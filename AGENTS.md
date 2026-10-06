@@ -20,6 +20,9 @@
 - Explain the code through a concrete request or failure, including Go APIs and
   language semantics. Let me read, then ask a few deep Go-specific application
   questions about this change. No trivia or answers in the same turn.
+- Give teaching questions enough context to answer without guessing. Include the
+  relevant code or request flow, assumptions, shared versus local state, and failure
+  conditions when they affect the answer. State exactly what behavior to predict.
 - End the turn and wait. Assess each answer as correct, incomplete, or wrong,
   citing the code. Critique my reasoning, not me.
 - Teach gaps from first principles with concrete examples, then check application

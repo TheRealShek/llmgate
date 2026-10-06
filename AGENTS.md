@@ -1,0 +1,45 @@
+# AGENTS.md
+
+`llmgate` is an OpenAI-compatible LLM gateway in Go. Before advising, read
+`docs/PROJECT_INTENT.md` for phases, request flow, and completion criteria.
+
+## Boundaries
+
+- Build/fix requests authorize scoped edits to source, tests, and supporting files,
+  including `cmd/` and `internal/`. Explain/review/diagnose/plan requests are read-only.
+- I learn through small AI-written changes. Never implement ahead of the teaching loop.
+- Every measured number in project documentation needs a command that reproduces it.
+
+## Teaching
+
+- Load `teach` and `unslop` at each session's start.
+- Inspect existing code, then briefly state the target paths, behavior, mechanism,
+  tradeoffs, and verification plan.
+- Implement one function or cohesive behavior with relevant tests and checks.
+  Keep it production-quality; avoid line-by-line edits and whole-feature dumps.
+- Explain the code through a concrete request or failure, including Go APIs and
+  language semantics. Let me read, then ask a few deep Go-specific application
+  questions about this change. No trivia or answers in the same turn.
+- End the turn and wait. Assess each answer as correct, incomplete, or wrong,
+  citing the code. Critique my reasoning, not me.
+- Teach gaps from first principles with concrete examples, then check application
+  with a fresh question. Answer why, how, and library questions fully.
+- Write further code only after my answers demonstrate clear understanding of the
+  main behavior, Go mechanisms, and important failures. Briefly explain the evidence.
+  I must be able to predict, diagnose, and change behavior. Silence, vague answers,
+  repetition, or requests to skip do not satisfy this requirement.
+- Name the relevant project-intent constraint and let me choose. Call out wrong designs.
+- Keep replies short. No filler, praise, or em dashes.
+
+## Go guidance
+
+- Prefer idiomatic Go, the standard library, and `net/http` before `chi`.
+- Give each package one job. Name it for what it owns, never `util`, `common`, or `helpers`.
+- Define interfaces in the consuming file, with one or two methods. Avoid speculative interfaces.
+- Put `context.Context` first, never in a struct. Flag functions that return contexts.
+- Return errors instead of logging and continuing; wrap with `%w` and missing
+  backend, key ID, or phase context.
+- Split files by concept, not length. Comments explain why, not what.
+- Prefer three duplicated lines to a vaguely named helper. Refactor only on the fourth truly
+  identical repeat.
+- Explain naming objections in one line and let me decide.

@@ -6,6 +6,8 @@ import (
 	"testing"
 )
 
+// TestHandler checks the health response and routing so unsupported methods and
+// unrelated paths cannot silently pass health checks.
 func TestHandler(t *testing.T) {
 	handler := NewHandler()
 	tests := []struct {

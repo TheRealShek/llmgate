@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+// TestRunServerShutdown checks that shutdown stops new connections, preserves
+// requests that finish in time, and cancels those that exceed the deadline.
 func TestRunServerShutdown(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
@@ -20,6 +22,7 @@ func TestRunServerShutdown(t *testing.T) {
 		{name: "deadline closes active request", timeout: 50 * time.Millisecond},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			// Port zero asks the OS for a free port, keeping tests independent of port 8080.
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
@@ -30,6 +33,7 @@ func TestRunServerShutdown(t *testing.T) {
 			canceled := make(chan struct{})
 			server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				close(started)
+				// Hold a real request open until the test releases it or Close cancels it.
 				select {
 				case <-release:
 					_, _ = w.Write([]byte("finished\n"))
@@ -62,6 +66,7 @@ func TestRunServerShutdown(t *testing.T) {
 				body, err := io.ReadAll(response.Body)
 				clientDone <- result{body: string(body), err: err}
 			}()
+			// Begin shutdown only after a request is active, rather than racing its arrival.
 			select {
 			case <-started:
 			case <-time.After(5 * time.Second):
@@ -79,6 +84,7 @@ func TestRunServerShutdown(t *testing.T) {
 				t.Fatal("listener accepted a connection during shutdown")
 			}
 			if tt.drain {
+				// Give an incorrect early return time to surface before letting the request finish.
 				select {
 				case err := <-serverDone:
 					t.Fatalf("server returned before the active request finished: %v", err)
@@ -119,11 +125,14 @@ func TestRunServerShutdown(t *testing.T) {
 	}
 }
 
+// TestRunServerListenerFailure checks that serving errors retain their cause so
+// callers can distinguish listener failures from normal shutdown.
 func TestRunServerListenerFailure(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A closed listener makes Serve fail without relying on a port collision.
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}

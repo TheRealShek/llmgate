@@ -42,7 +42,13 @@
 - Put `context.Context` first, never in a struct. Flag functions that return contexts.
 - Return errors instead of logging and continuing; wrap with `%w` and missing
   backend, key ID, or phase context.
-- Split files by concept, not length. Comments explain why, not what.
+- Split files by concept, not length.
+- Give each function and method a short comment explaining why it is needed and
+  what it does. Also use comments inside functions to explain the flow, Go
+  mechanisms, and failure handling where the reasoning is not obvious. Function
+  comments do not replace inline explanations. A reader should understand the
+  intent from the code and comments without needing the conversation. Keep comments
+  concise; avoid essays and restating individual lines of code.
 - Prefer three duplicated lines to a vaguely named helper. Refactor only on the fourth truly
   identical repeat.
 - Explain naming objections in one line and let me decide.

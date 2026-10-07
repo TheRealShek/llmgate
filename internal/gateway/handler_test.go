@@ -16,10 +16,13 @@ func TestHandler(t *testing.T) {
 		path   string
 		status int
 	}{
-		{name: "healthy", method: http.MethodGet, path: "/healthz", status: http.StatusOK},
-		{name: "unsupported method", method: http.MethodPost, path: "/healthz", status: http.StatusMethodNotAllowed},
+		{name: "healthy", method: http.MethodGet, path: "/v1/healthz", status: http.StatusOK},
+		{name: "unsupported method", method: http.MethodPost, path: "/v1/healthz", status: http.StatusMethodNotAllowed},
 		{name: "unknown route", method: http.MethodGet, path: "/missing", status: http.StatusNotFound},
-		{name: "health path suffix", method: http.MethodGet, path: "/healthz/extra", status: http.StatusNotFound},
+		{name: "health path suffix", method: http.MethodGet, path: "/v1/healthz/extra", status: http.StatusNotFound},
+		{name: "unversioned health", method: http.MethodGet, path: "/healthz", status: http.StatusNotFound},
+		{name: "unversioned models", method: http.MethodGet, path: "/models", status: http.StatusNotFound},
+		{name: "unsupported API version", method: http.MethodGet, path: "/v2/healthz", status: http.StatusNotFound},
 		{name: "no backend", method: http.MethodGet, path: "/v1/models", status: http.StatusServiceUnavailable},
 		{name: "models unsupported method", method: http.MethodPost, path: "/v1/models", status: http.StatusMethodNotAllowed},
 	}

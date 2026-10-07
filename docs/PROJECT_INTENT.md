@@ -38,7 +38,7 @@ gateway (Go)
   v            v                                     v
 Postgres     Redis                  llama.cpp A, B, C (later vLLM)
 
-gateway /metrics -> Prometheus -> Grafana
+gateway /v1/metrics -> Prometheus -> Grafana
 ```
 
 Request path, in order:
@@ -54,9 +54,12 @@ Request path, in order:
 
 - `POST /v1/chat/completions` with `stream: true` and `stream: false`
 - `GET /v1/models`
-- `GET /healthz` (process is up) and `GET /readyz` (at least one backend is healthy)
-- `GET /metrics`
-- `POST /admin/keys` and `DELETE /admin/keys/{id}` behind an admin token
+- `GET /v1/healthz` (process is up) and `GET /v1/readyz` (at least one backend is healthy)
+- `GET /v1/metrics`
+- `POST /v1/admin/keys` and `DELETE /v1/admin/keys/{id}` behind an admin token
+
+All gateway endpoints use a version prefix. The current API is `/v1`;
+future API versions use separate prefixes such as `/v2`.
 
 ## Data model
 

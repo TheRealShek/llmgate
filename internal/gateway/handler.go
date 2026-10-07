@@ -16,7 +16,7 @@ func NewHandler() http.Handler {
 // A missing backend leaves health available but returns 503 for model requests.
 func NewHandlerWithUpstream(upstream http.Handler) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", healthHandler)
+	mux.HandleFunc("GET /v1/healthz", healthHandler)
 	mux.Handle("GET /v1/models", modelsHandler(upstream))
 	return mux
 }

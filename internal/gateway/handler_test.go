@@ -20,6 +20,8 @@ func TestHandler(t *testing.T) {
 		{name: "unsupported method", method: http.MethodPost, path: "/healthz", status: http.StatusMethodNotAllowed},
 		{name: "unknown route", method: http.MethodGet, path: "/missing", status: http.StatusNotFound},
 		{name: "health path suffix", method: http.MethodGet, path: "/healthz/extra", status: http.StatusNotFound},
+		{name: "no backend", method: http.MethodGet, path: "/v1/models", status: http.StatusServiceUnavailable},
+		{name: "models unsupported method", method: http.MethodPost, path: "/v1/models", status: http.StatusMethodNotAllowed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -43,5 +45,18 @@ func TestHandler(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestHandlerModels checks model route integration without affecting the health route.
+func TestHandlerModels(t *testing.T) {
+	handler := NewHandlerWithUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte("models"))
+	}))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if recorder.Code != http.StatusAccepted || recorder.Body.String() != "models" {
+		t.Fatalf("model route response: %d %s", recorder.Code, recorder.Body.String())
 	}
 }

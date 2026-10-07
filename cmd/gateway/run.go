@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/therealshek/llmgate/internal/gateway"
+	"github.com/therealshek/llmgate/internal/proxy"
 )
 
 func run(ctx context.Context) error {
@@ -16,10 +17,17 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("load gateway config: %w", err)
 	}
 
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	defer transport.CloseIdleConnections()
+	var upstream http.Handler
+	if cfg.upstreamURL != nil {
+		upstream = proxy.NewHandler(cfg.upstreamURL, transport, cfg.upstreamTimeout)
+	}
+
 	// Bound slow headers and idle connections without limiting long response streams.
 	server := &http.Server{
 		Addr:              cfg.addr,
-		Handler:           gateway.NewHandler(),
+		Handler:           gateway.NewHandlerWithUpstream(upstream),
 		ReadHeaderTimeout: cfg.readHeaderTimeout,
 		IdleTimeout:       cfg.idleTimeout,
 	}

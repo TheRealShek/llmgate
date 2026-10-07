@@ -8,7 +8,6 @@ func NewHandler() http.Handler {
 	mux := http.NewServeMux()
 	// Liveness only checks this process; an unavailable backend belongs to readiness.
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		// Set headers before committing the status; later header changes are too late.
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		// A failed write means the response could not be delivered; there is no further work.

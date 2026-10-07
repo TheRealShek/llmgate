@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 )
@@ -22,7 +23,6 @@ func TestRunServerShutdown(t *testing.T) {
 		{name: "deadline closes active request", timeout: 50 * time.Millisecond},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			// Port zero asks the OS for a free port, keeping tests independent of port 8080.
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
@@ -33,7 +33,6 @@ func TestRunServerShutdown(t *testing.T) {
 			canceled := make(chan struct{})
 			server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				close(started)
-				// Hold a real request open until the test releases it or Close cancels it.
 				select {
 				case <-release:
 					_, _ = w.Write([]byte("finished\n"))
@@ -41,13 +40,17 @@ func TestRunServerShutdown(t *testing.T) {
 					close(canceled)
 				}
 			})}
-			t.Cleanup(func() { _ = server.Close() })
 			shutdownStarted := make(chan struct{})
 			server.RegisterOnShutdown(func() { close(shutdownStarted) })
 			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
+			var workers sync.WaitGroup
+			t.Cleanup(func() {
+				cancel()
+				_ = server.Close()
+				workers.Wait()
+			})
 			serverDone := make(chan error, 1)
-			go func() { serverDone <- runServer(ctx, server, listener, tt.timeout) }()
+			workers.Go(func() { serverDone <- runServer(ctx, server, listener, tt.timeout) })
 
 			client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{}}
 			defer client.CloseIdleConnections()
@@ -56,7 +59,7 @@ func TestRunServerShutdown(t *testing.T) {
 				err  error
 			}
 			clientDone := make(chan result, 1)
-			go func() {
+			workers.Go(func() {
 				response, err := client.Get("http://" + listener.Addr().String())
 				if err != nil {
 					clientDone <- result{err: err}
@@ -65,8 +68,7 @@ func TestRunServerShutdown(t *testing.T) {
 				defer response.Body.Close()
 				body, err := io.ReadAll(response.Body)
 				clientDone <- result{body: string(body), err: err}
-			}()
-			// Begin shutdown only after a request is active, rather than racing its arrival.
+			})
 			select {
 			case <-started:
 			case <-time.After(5 * time.Second):
@@ -84,7 +86,6 @@ func TestRunServerShutdown(t *testing.T) {
 				t.Fatal("listener accepted a connection during shutdown")
 			}
 			if tt.drain {
-				// Give an incorrect early return time to surface before letting the request finish.
 				select {
 				case err := <-serverDone:
 					t.Fatalf("server returned before the active request finished: %v", err)
@@ -132,7 +133,6 @@ func TestRunServerListenerFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A closed listener makes Serve fail without relying on a port collision.
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}

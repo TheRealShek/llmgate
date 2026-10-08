@@ -24,6 +24,7 @@ func TestHandler(t *testing.T) {
 		{name: "unversioned models", method: http.MethodGet, path: "/models", status: http.StatusNotFound},
 		{name: "unsupported API version", method: http.MethodGet, path: "/v2/healthz", status: http.StatusNotFound},
 		{name: "no backend", method: http.MethodGet, path: "/v1/models", status: http.StatusServiceUnavailable},
+		{name: "chat without backend", method: http.MethodPost, path: "/v1/chat/completions", status: http.StatusServiceUnavailable},
 		{name: "models unsupported method", method: http.MethodPost, path: "/v1/models", status: http.StatusMethodNotAllowed},
 	}
 	for _, tt := range tests {

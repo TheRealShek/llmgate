@@ -80,6 +80,8 @@ func TestLoadConfig(t *testing.T) {
 			env:  map[string]string{},
 			want: config{
 				addr:              ":8080",
+				readTimeout:       10 * time.Second,
+				maxBodyBytes:      1 << 20,
 				upstreamTimeout:   30 * time.Second,
 				readHeaderTimeout: 5 * time.Second,
 				idleTimeout:       60 * time.Second,
@@ -90,6 +92,8 @@ func TestLoadConfig(t *testing.T) {
 			name: "custom environment values",
 			env: map[string]string{
 				"GATEWAY_ADDR":                "127.0.0.1:9090",
+				"GATEWAY_READ_TIMEOUT":        "3s",
+				"GATEWAY_MAX_BODY_BYTES":      "2048",
 				"GATEWAY_UPSTREAM_TIMEOUT":    "20s",
 				"GATEWAY_READ_HEADER_TIMEOUT": "2s",
 				"GATEWAY_IDLE_TIMEOUT":        "30s",
@@ -97,11 +101,33 @@ func TestLoadConfig(t *testing.T) {
 			},
 			want: config{
 				addr:              "127.0.0.1:9090",
+				readTimeout:       3 * time.Second,
+				maxBodyBytes:      2048,
 				upstreamTimeout:   20 * time.Second,
 				readHeaderTimeout: 2 * time.Second,
 				idleTimeout:       30 * time.Second,
 				shutdownTimeout:   15 * time.Second,
 			},
+		},
+		{
+			name:      "zero read timeout",
+			env:       map[string]string{"GATEWAY_READ_TIMEOUT": "0s"},
+			wantError: true,
+		},
+		{
+			name:      "invalid body limit",
+			env:       map[string]string{"GATEWAY_MAX_BODY_BYTES": "bad"},
+			wantError: true,
+		},
+		{
+			name:      "zero body limit",
+			env:       map[string]string{"GATEWAY_MAX_BODY_BYTES": "0"},
+			wantError: true,
+		},
+		{
+			name:      "negative body limit",
+			env:       map[string]string{"GATEWAY_MAX_BODY_BYTES": "-1"},
+			wantError: true,
 		},
 		{
 			name:      "zero upstream timeout",

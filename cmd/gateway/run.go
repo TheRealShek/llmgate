@@ -24,10 +24,11 @@ func run(ctx context.Context) error {
 		upstream = proxy.NewHandler(cfg.upstreamURL, transport, cfg.upstreamTimeout)
 	}
 
-	// Bound slow headers and idle connections without limiting long response streams.
+	// Bound request reads and idle connections without limiting response streams.
 	server := &http.Server{
 		Addr:              cfg.addr,
-		Handler:           gateway.NewHandlerWithUpstream(upstream),
+		Handler:           gateway.NewHandlerWithChat(upstream, cfg.maxBodyBytes),
+		ReadTimeout:       cfg.readTimeout,
 		ReadHeaderTimeout: cfg.readHeaderTimeout,
 		IdleTimeout:       cfg.idleTimeout,
 	}

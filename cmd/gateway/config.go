@@ -15,6 +15,8 @@ type config struct {
 	readHeaderTimeout time.Duration
 	idleTimeout       time.Duration
 	shutdownTimeout   time.Duration
+	readTimeout       time.Duration
+	maxBodyBytes      int64
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -24,6 +26,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 		readHeaderTimeout: 5 * time.Second,
 		idleTimeout:       60 * time.Second,
 		shutdownTimeout:   10 * time.Second,
+		readTimeout:       10 * time.Second,
+		maxBodyBytes:      1 << 20,
 	}
 
 	if val := getenv("GATEWAY_ADDR"); val != "" {
@@ -31,6 +35,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 
 	var err error
+	if val := getenv("GATEWAY_MAX_BODY_BYTES"); val != "" {
+		cfg.maxBodyBytes, err = strconv.ParseInt(val, 10, 64)
+		if err != nil || cfg.maxBodyBytes <= 0 {
+			return config{}, fmt.Errorf("validate GATEWAY_MAX_BODY_BYTES: requires a positive integer")
+		}
+	}
+
+	cfg.readTimeout, err = envDuration(getenv, "GATEWAY_READ_TIMEOUT", cfg.readTimeout)
+	if err != nil {
+		return config{}, err
+	}
+
 	if val := getenv("GATEWAY_UPSTREAM_URL"); val != "" {
 		cfg.upstreamURL, err = parseUpstreamURL(val)
 		if err != nil {

@@ -15,9 +15,24 @@ func NewHandler() http.Handler {
 // NewHandlerWithUpstream builds health and model routes using the supplied backend handler.
 // A missing backend leaves health available but returns 503 for model requests.
 func NewHandlerWithUpstream(upstream http.Handler) http.Handler {
+	return newHandler(upstream, nil)
+}
+
+// NewHandlerWithChat adds non-streaming chat forwarding to upstream.
+// maxBodyBytes limits each chat request body; upstream may be nil when no backend is configured.
+func NewHandlerWithChat(upstream http.Handler, maxBodyBytes int64) http.Handler {
+	var chat http.Handler
+	if upstream != nil {
+		chat = &chatHandler{upstream: upstream, maxBodyBytes: maxBodyBytes}
+	}
+	return newHandler(upstream, chat)
+}
+
+func newHandler(upstream, chat http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/healthz", healthHandler)
-	mux.Handle("GET /v1/models", modelsHandler(upstream))
+	mux.Handle("GET /v1/models", backendHandler(upstream))
+	mux.Handle("POST /v1/chat/completions", backendHandler(chat))
 	return mux
 }
 
@@ -29,7 +44,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok\n"))
 }
 
-func modelsHandler(upstream http.Handler) http.Handler {
+func backendHandler(upstream http.Handler) http.Handler {
 	if upstream != nil {
 		return upstream
 	}

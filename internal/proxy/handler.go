@@ -17,8 +17,14 @@ import (
 // transport sends upstream HTTP requests and is owned by the caller.
 // timeout bounds the entire upstream request, including reading the response body.
 func NewHandler(target *url.URL, transport http.RoundTripper, timeout time.Duration) http.Handler {
+	// Copy the URL value so caller mutations do not change backend.
 	backend := *target
+
+	// ReverseProxy rewrites the request, sends it over transport with RoundTrip,
+	// and copies the response back to the client.
 	forwarder := &httputil.ReverseProxy{
+		// Rewrite points the outbound URL to the backend while preserving the original
+		// path, query parameters, and headers.
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(&backend)
 		},
@@ -26,6 +32,8 @@ func NewHandler(target *url.URL, transport http.RoundTripper, timeout time.Durat
 		ErrorLog:     log.New(proxyLogWriter{}, "", 0),
 		ErrorHandler: handleError,
 	}
+
+	// Wrap forwarder so each request receives an upstream timeout context before ServeHTTP runs.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
@@ -33,15 +41,16 @@ func NewHandler(target *url.URL, transport http.RoundTripper, timeout time.Durat
 	})
 }
 
+// handleError maps transport and context failures into OpenAI-compatible HTTP error responses.
 func handleError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, context.Canceled) {
-		return
+		return // Client disconnected early. Nothing to deliver.
 	}
 	status := http.StatusBadGateway
 	if errors.Is(err, context.DeadlineExceeded) {
 		status = http.StatusGatewayTimeout
 	}
-	// Transport errors can contain URLs or credentials; log only the outcome.
+	// Transport errors can contain raw URLs or credentials. Log only the status.
 	slog.Warn("upstream request failed", "status", status)
 	_ = api.WriteError(w, status, api.Error{
 		Message: "upstream request failed",
@@ -52,9 +61,9 @@ func handleError(w http.ResponseWriter, r *http.Request, err error) {
 
 type proxyLogWriter struct{}
 
+// Write intercepts ReverseProxy internal error logs to drop raw messages that may
+// contain internal URLs or tokens.
 func (proxyLogWriter) Write(p []byte) (int, error) {
-	// ReverseProxy logs body-copy failures separately from ErrorHandler.
-	// Discard its raw message because errors may contain sensitive request data.
 	slog.Warn("upstream response failed")
 	return len(p), nil
 }

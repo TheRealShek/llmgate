@@ -11,18 +11,22 @@ import (
 	"github.com/therealshek/llmgate/internal/api"
 )
 
+// chatHandler validates chat completion requests, rejects unsupported streaming options,
+// and forwards valid non-streaming payloads to the upstream backend.
 type chatHandler struct {
 	upstream     http.Handler
 	maxBodyBytes int64
 }
 
 func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// The OpenAI chat completions API requires JSON payloads.
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
 		writeChatError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json", "unsupported_media_type")
 		return
 	}
 
+	// Cap the bytes read from the client to prevent unbounded memory growth.
 	limited := http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
 	defer limited.Close()
 	body, err := io.ReadAll(limited)
@@ -36,12 +40,14 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check whether the client requested streaming or a single JSON response.
 	stream, err := chatStreamRequested(body)
 	if err != nil {
 		writeChatError(w, http.StatusBadRequest, "request must be a JSON object with a boolean stream field when present", "invalid_json")
 		return
 	}
 	if stream {
+		// Streaming is not yet implemented. Return 501.
 		_ = api.WriteError(w, http.StatusNotImplemented, api.Error{
 			Message: "streaming chat is not implemented yet",
 			Type:    "server_error",
@@ -50,13 +56,17 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reading r.Body drained the stream. Clone the request and attach a new reader
+	// for the buffered bytes so the upstream proxy can read the body.
 	request := r.Clone(r.Context())
 	request.Body = io.NopCloser(bytes.NewReader(body))
 	request.ContentLength = int64(len(body))
-	request.TransferEncoding = nil
+	request.TransferEncoding = nil // Use Content-Length instead of chunked transfer.
 	h.upstream.ServeHTTP(w, request)
 }
 
+// chatStreamRequested unmarshals only top-level keys so it can check "stream"
+// without parsing model payload fields.
 func chatStreamRequested(body []byte) (bool, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
@@ -77,6 +87,7 @@ func chatStreamRequested(body []byte) (bool, error) {
 	return stream, nil
 }
 
+// writeChatError writes an invalid_request_error in OpenAI JSON format.
 func writeChatError(w http.ResponseWriter, status int, message, code string) {
 	_ = api.WriteError(w, status, api.Error{
 		Message: message,

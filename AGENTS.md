@@ -23,6 +23,17 @@ agent present.
 - Challenge a mistaken design with a concrete failure or tradeoff. Do not assume
   familiarity with Go or inference infrastructure.
 
+## Workflow and reviews
+
+- Follow `go-conventions` for all Go code.
+- Do not use the `code-review` skill.
+- Push commits directly to `main`.
+
+## Code comments
+
+- Write comments that show how requests move through the system.
+- When code uses `http.HandlerFunc`, `ReverseProxy`, request clones, context timeouts, or response flushers, state where the request comes from, what changes it, and where it goes next.
+
 ## Size each coding task for reading
 
 Implement one small, complete behavior per task, including its necessary tests

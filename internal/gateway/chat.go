@@ -7,15 +7,18 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strconv"
 
 	"github.com/therealshek/llmgate/internal/api"
 )
 
-// chatHandler validates chat completion requests, rejects unsupported streaming options,
-// and forwards valid non-streaming payloads to the upstream backend.
+// chatHandler validates chat completion requests and forwards valid payloads
+// to the configured streaming or non-streaming backend handler.
 type chatHandler struct {
-	upstream     http.Handler
+	nonStreaming http.Handler
+	streaming    http.Handler
 	maxBodyBytes int64
+	maxTokens    int64
 }
 
 func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -41,18 +44,30 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check whether the client requested streaming or a single JSON response.
-	stream, err := chatStreamRequested(body)
+	options, err := parseChatRequest(body)
 	if err != nil {
 		writeChatError(w, http.StatusBadRequest, "request must be a JSON object with a boolean stream field when present", "invalid_json")
 		return
 	}
-	if stream {
-		// Streaming is not yet implemented. Return 501.
+	upstream := h.nonStreaming
+	if options.stream {
+		upstream = h.streaming
+	}
+	if upstream == nil {
+		// Constructors without a streaming proxy keep their existing 501 response.
 		_ = api.WriteError(w, http.StatusNotImplemented, api.Error{
 			Message: "streaming chat is not implemented yet",
 			Type:    "server_error",
 			Code:    "streaming_not_supported",
 		})
+		return
+	}
+
+	// Validate the client's token count, or add the configured default when omitted,
+	// before the buffered request reaches the proxy.
+	body, err = limitChatTokens(body, options.fields, h.maxTokens)
+	if err != nil {
+		writeChatError(w, http.StatusBadRequest, "max_tokens must be a positive integer within the configured limit", "invalid_max_tokens")
 		return
 	}
 
@@ -62,29 +77,69 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	request.Body = io.NopCloser(bytes.NewReader(body))
 	request.ContentLength = int64(len(body))
 	request.TransferEncoding = nil // Use Content-Length instead of chunked transfer.
-	h.upstream.ServeHTTP(w, request)
+	// Send the cloned request to the selected response mode. Its inherited context
+	// lets a client disconnect stop either the JSON response or the SSE stream.
+	upstream.ServeHTTP(w, request)
 }
 
-// chatStreamRequested unmarshals only top-level keys so it can check "stream"
-// without parsing model payload fields.
-func chatStreamRequested(body []byte) (bool, error) {
+type chatRequest struct {
+	fields map[string]json.RawMessage
+	stream bool
+}
+
+// parseChatRequest unmarshals only top-level keys so validation can inspect options
+// without rebuilding the client's model payload or dropping backend-specific fields.
+func parseChatRequest(body []byte) (chatRequest, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
-		return false, err
+		return chatRequest{}, err
 	}
 	if fields == nil {
-		return false, errors.New("request is not a JSON object")
+		return chatRequest{}, errors.New("request is not a JSON object")
 	}
 	var stream bool
 	if raw, exists := fields["stream"]; exists {
 		if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-			return false, errors.New("stream is not a boolean")
+			return chatRequest{}, errors.New("stream is not a boolean")
 		}
 		if err := json.Unmarshal(raw, &stream); err != nil {
-			return false, err
+			return chatRequest{}, err
 		}
 	}
-	return stream, nil
+	return chatRequest{fields: fields, stream: stream}, nil
+}
+
+func limitChatTokens(body []byte, fields map[string]json.RawMessage, limit int64) ([]byte, error) {
+	if limit == 0 {
+		return body, nil
+	}
+	raw, exists := fields["max_tokens"]
+	if !exists {
+		return addDefaultChatTokens(body, len(fields), limit), nil
+	}
+	var tokens int64
+	if err := json.Unmarshal(raw, &tokens); err != nil {
+		return nil, err
+	}
+	if tokens <= 0 || tokens > limit {
+		return nil, errors.New("max_tokens is outside the configured limit")
+	}
+	return body, nil
+}
+
+// addDefaultChatTokens inserts one field into an already validated JSON object.
+// Keep the client's existing bytes instead of re-encoding unknown backend fields.
+func addDefaultChatTokens(body []byte, fieldCount int, limit int64) []byte {
+	closingBrace := len(bytes.TrimRight(body, " \t\r\n")) - 1
+	tokenField := strconv.AppendInt([]byte(`"max_tokens":`), limit, 10)
+	result := make([]byte, 0, len(body)+len(tokenField)+1)
+	result = append(result, body[:closingBrace]...)
+	if fieldCount > 0 {
+		result = append(result, ',')
+	}
+	result = append(result, tokenField...)
+	result = append(result, body[closingBrace:]...)
+	return result
 }
 
 // writeChatError writes an invalid_request_error in OpenAI JSON format.

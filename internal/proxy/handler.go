@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -13,16 +14,27 @@ import (
 	"github.com/therealshek/llmgate/internal/api"
 )
 
-// NewHandler forwards non-streaming requests to target, a validated, non-nil backend URL.
+// NewNonStreamingHandler forwards non-streaming requests to target, a validated, non-nil backend URL.
 // transport sends upstream HTTP requests and is owned by the caller.
-// timeout bounds the entire upstream request, including reading the response body.
-func NewHandler(target *url.URL, transport http.RoundTripper, timeout time.Duration) http.Handler {
+// totalTimeout bounds the entire upstream request, including reading the response body.
+func NewNonStreamingHandler(target *url.URL, transport http.RoundTripper, totalTimeout time.Duration) http.Handler {
+	forwarder := newForwarder(target, transport)
+
+	// Wrap forwarder so each request receives an upstream timeout context before ServeHTTP runs.
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), totalTimeout)
+		defer cancel()
+		forwarder.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func newForwarder(target *url.URL, transport http.RoundTripper) *httputil.ReverseProxy {
 	// Copy the URL value so caller mutations do not change backend.
 	backend := *target
 
 	// ReverseProxy rewrites the request, sends it over transport with RoundTrip,
 	// and copies the response back to the client.
-	forwarder := &httputil.ReverseProxy{
+	return &httputil.ReverseProxy{
 		// Rewrite points the outbound URL to the backend while preserving the original
 		// path, query parameters, and headers.
 		Rewrite: func(r *httputil.ProxyRequest) {
@@ -30,24 +42,18 @@ func NewHandler(target *url.URL, transport http.RoundTripper, timeout time.Durat
 		},
 		Transport:    transport,
 		ErrorLog:     log.New(proxyLogWriter{}, "", 0),
-		ErrorHandler: handleError,
+		ErrorHandler: handleUpstreamError,
 	}
-
-	// Wrap forwarder so each request receives an upstream timeout context before ServeHTTP runs.
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx, cancel := context.WithTimeout(r.Context(), timeout)
-		defer cancel()
-		forwarder.ServeHTTP(w, r.WithContext(ctx))
-	})
 }
 
-// handleError maps transport and context failures into OpenAI-compatible HTTP error responses.
-func handleError(w http.ResponseWriter, r *http.Request, err error) {
+// handleUpstreamError maps transport and context failures into OpenAI-compatible HTTP error responses.
+func handleUpstreamError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, context.Canceled) {
 		return // Client disconnected early. Nothing to deliver.
 	}
 	status := http.StatusBadGateway
-	if errors.Is(err, context.DeadlineExceeded) {
+	var timeoutError net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeoutError) && timeoutError.Timeout()) {
 		status = http.StatusGatewayTimeout
 	}
 	// Transport errors can contain raw URLs or credentials. Log only the status.

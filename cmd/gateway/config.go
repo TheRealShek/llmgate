@@ -9,25 +9,33 @@ import (
 )
 
 type config struct {
-	addr              string
-	upstreamURL       *url.URL
-	upstreamTimeout   time.Duration
-	readHeaderTimeout time.Duration
-	idleTimeout       time.Duration
-	shutdownTimeout   time.Duration
-	readTimeout       time.Duration
-	maxBodyBytes      int64
+	addr                   string
+	upstreamURL            *url.URL
+	upstreamTimeout        time.Duration
+	readHeaderTimeout      time.Duration
+	idleTimeout            time.Duration
+	shutdownTimeout        time.Duration
+	readTimeout            time.Duration
+	maxBodyBytes           int64
+	maxTokens              int64
+	upstreamConnectTimeout time.Duration
+	upstreamHeaderTimeout  time.Duration
+	streamIdleTimeout      time.Duration
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
 	cfg := config{
-		addr:              ":8080",
-		upstreamTimeout:   30 * time.Second,
-		readHeaderTimeout: 5 * time.Second,
-		idleTimeout:       60 * time.Second,
-		shutdownTimeout:   10 * time.Second,
-		readTimeout:       10 * time.Second,
-		maxBodyBytes:      1 << 20,
+		addr:                   ":8080",
+		upstreamTimeout:        30 * time.Second,
+		readHeaderTimeout:      5 * time.Second,
+		idleTimeout:            60 * time.Second,
+		shutdownTimeout:        10 * time.Second,
+		readTimeout:            10 * time.Second,
+		maxBodyBytes:           1 << 20, // 1 MiB
+		maxTokens:              1024,
+		upstreamConnectTimeout: 5 * time.Second,
+		upstreamHeaderTimeout:  30 * time.Second,
+		streamIdleTimeout:      30 * time.Second,
 	}
 
 	if val := getenv("GATEWAY_ADDR"); val != "" {
@@ -35,6 +43,25 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 
 	var err error
+	cfg.upstreamConnectTimeout, err = envDuration(getenv, "GATEWAY_UPSTREAM_CONNECT_TIMEOUT", cfg.upstreamConnectTimeout)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.upstreamHeaderTimeout, err = envDuration(getenv, "GATEWAY_UPSTREAM_HEADER_TIMEOUT", cfg.upstreamHeaderTimeout)
+	if err != nil {
+		return config{}, err
+	}
+	cfg.streamIdleTimeout, err = envDuration(getenv, "GATEWAY_STREAM_IDLE_TIMEOUT", cfg.streamIdleTimeout)
+	if err != nil {
+		return config{}, err
+	}
+	if val := getenv("GATEWAY_MAX_TOKENS"); val != "" {
+		cfg.maxTokens, err = strconv.ParseInt(val, 10, 64)
+		if err != nil || cfg.maxTokens <= 0 {
+			return config{}, fmt.Errorf("validate GATEWAY_MAX_TOKENS: requires a positive integer")
+		}
+	}
+
 	if val := getenv("GATEWAY_MAX_BODY_BYTES"); val != "" {
 		cfg.maxBodyBytes, err = strconv.ParseInt(val, 10, 64)
 		if err != nil || cfg.maxBodyBytes <= 0 {

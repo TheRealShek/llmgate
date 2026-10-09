@@ -18,16 +18,25 @@ func run(ctx context.Context) error {
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = (&net.Dialer{Timeout: cfg.upstreamConnectTimeout}).DialContext
+	transport.TLSHandshakeTimeout = cfg.upstreamConnectTimeout
+	transport.ResponseHeaderTimeout = cfg.upstreamHeaderTimeout
 	defer transport.CloseIdleConnections()
-	var upstream http.Handler
+	var nonStreaming http.Handler
+	var streaming http.Handler
 	if cfg.upstreamURL != nil {
-		upstream = proxy.NewHandler(cfg.upstreamURL, transport, cfg.upstreamTimeout)
+		nonStreaming = proxy.NewNonStreamingHandler(cfg.upstreamURL, transport, cfg.upstreamTimeout)
+		streaming = proxy.NewStreamingHandler(cfg.upstreamURL, transport, cfg.streamIdleTimeout)
 	}
+	handler := gateway.NewHandlerWithBackends(nonStreaming, streaming, gateway.ChatLimits{
+		MaxBodyBytes: cfg.maxBodyBytes,
+		MaxTokens:    cfg.maxTokens,
+	})
 
 	// Bound request reads and idle connections without limiting response streams.
 	server := &http.Server{
 		Addr:              cfg.addr,
-		Handler:           gateway.NewHandlerWithChat(upstream, cfg.maxBodyBytes),
+		Handler:           handler,
 		ReadTimeout:       cfg.readTimeout,
 		ReadHeaderTimeout: cfg.readHeaderTimeout,
 		IdleTimeout:       cfg.idleTimeout,

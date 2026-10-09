@@ -12,8 +12,8 @@ import (
 	"time"
 )
 
-// TestHandlerForwarding checks target paths, query forwarding, headers, bodies, and backend statuses.
-func TestHandlerForwarding(t *testing.T) {
+// TestNonStreamingHandlerForwarding checks target paths, query forwarding, headers, bodies, and backend statuses.
+func TestNonStreamingHandlerForwarding(t *testing.T) {
 	for _, status := range []int{http.StatusOK, http.StatusServiceUnavailable} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -40,7 +40,7 @@ func TestHandlerForwarding(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, "http://gateway.example/v1/models?limit=2", nil)
 			request.Header.Set("X-Forwarded-For", "spoofed")
 			recorder := httptest.NewRecorder()
-			NewHandler(target, transport, time.Second).ServeHTTP(recorder, request)
+			NewNonStreamingHandler(target, transport, time.Second).ServeHTTP(recorder, request)
 			if recorder.Code != status || recorder.Body.String() != `{"data":[]}` || recorder.Header().Get("Content-Type") != "application/json" {
 				t.Fatalf("unexpected proxy response: %d %s %s", recorder.Code, recorder.Header(), recorder.Body.String())
 			}
@@ -48,8 +48,8 @@ func TestHandlerForwarding(t *testing.T) {
 	}
 }
 
-// TestHandlerResponseBodyDeadline checks that a backend cannot stall indefinitely after sending headers.
-func TestHandlerResponseBodyDeadline(t *testing.T) {
+// TestNonStreamingHandlerResponseBodyDeadline checks that a backend cannot stall indefinitely after sending headers.
+func TestNonStreamingHandlerResponseBodyDeadline(t *testing.T) {
 	stopped := make(chan struct{})
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", "10000")
@@ -65,7 +65,7 @@ func TestHandlerResponseBodyDeadline(t *testing.T) {
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	t.Cleanup(transport.CloseIdleConnections)
-	gateway := httptest.NewServer(NewHandler(target, transport, 100*time.Millisecond))
+	gateway := httptest.NewServer(NewNonStreamingHandler(target, transport, 100*time.Millisecond))
 	t.Cleanup(gateway.Close)
 	client := gateway.Client()
 	client.Timeout = 5 * time.Second
@@ -84,8 +84,8 @@ func TestHandlerResponseBodyDeadline(t *testing.T) {
 	}
 }
 
-// TestHandlerConnectionFailure checks that an unreachable backend returns a safe gateway error.
-func TestHandlerConnectionFailure(t *testing.T) {
+// TestNonStreamingHandlerConnectionFailure checks that an unreachable backend returns a safe gateway error.
+func TestNonStreamingHandlerConnectionFailure(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	target, err := url.Parse(backend.URL)
 	if err != nil {
@@ -95,14 +95,14 @@ func TestHandlerConnectionFailure(t *testing.T) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	defer transport.CloseIdleConnections()
 	recorder := httptest.NewRecorder()
-	NewHandler(target, transport, time.Second).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	NewNonStreamingHandler(target, transport, time.Second).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
 	if recorder.Code != http.StatusBadGateway || recorder.Body.String() != "{\"error\":{\"message\":\"upstream request failed\",\"type\":\"server_error\",\"code\":\"upstream_error\"}}\n" {
 		t.Fatalf("unexpected connection failure response: %d %s", recorder.Code, recorder.Body.String())
 	}
 }
 
-// TestHandlerCancellation checks that client cancellation and a gateway deadline both stop upstream work.
-func TestHandlerCancellation(t *testing.T) {
+// TestNonStreamingHandlerCancellation checks that client cancellation and a gateway deadline both stop upstream work.
+func TestNonStreamingHandlerCancellation(t *testing.T) {
 	for _, clientCancel := range []bool{true, false} {
 		name := "gateway deadline"
 		if clientCancel {
@@ -127,7 +127,7 @@ func TestHandlerCancellation(t *testing.T) {
 			if clientCancel {
 				timeout = 5 * time.Second
 			}
-			gateway := httptest.NewServer(NewHandler(target, transport, timeout))
+			gateway := httptest.NewServer(NewNonStreamingHandler(target, transport, timeout))
 			t.Cleanup(gateway.Close)
 			ctx, cancel := context.WithCancel(t.Context())
 			var workers sync.WaitGroup

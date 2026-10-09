@@ -54,7 +54,7 @@ func TestHandler(t *testing.T) {
 
 // TestHandlerModels checks model route integration without affecting the health route.
 func TestHandlerModels(t *testing.T) {
-	handler := NewHandlerWithUpstream(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := NewHandlerWithModels(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte("models"))
 	}))

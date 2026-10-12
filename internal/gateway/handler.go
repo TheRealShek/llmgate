@@ -6,43 +6,20 @@ import (
 	"github.com/therealshek/llmgate/internal/api"
 )
 
-// NewHandler builds the gateway routes without opening a listener so HTTP behavior
-// can be tested independently of server startup and shutdown.
-func NewHandler() http.Handler {
-	return NewHandlerWithModels(nil)
-}
-
-// NewHandlerWithModels builds health and model routes using the supplied backend handler.
-// A missing backend leaves health available but returns 503 for model requests.
-func NewHandlerWithModels(upstream http.Handler) http.Handler {
-	return newHandler(upstream, nil)
-}
-
-// NewHandlerWithNonStreamingChat adds non-streaming chat forwarding to upstream.
-// maxBodyBytes limits each chat request body; upstream may be nil when no backend is configured.
-func NewHandlerWithNonStreamingChat(upstream http.Handler, maxBodyBytes int64) http.Handler {
-	return NewHandlerWithNonStreamingChatLimits(upstream, ChatLimits{MaxBodyBytes: maxBodyBytes})
-}
-
 // ChatLimits controls the request resources checked before forwarding chat requests.
 type ChatLimits struct {
 	// MaxBodyBytes bounds the incoming JSON body.
 	MaxBodyBytes int64
 	// MaxTokens bounds explicit output-token requests and supplies omitted values.
-	// Zero preserves the legacy behavior without token validation or insertion.
+	// Zero disables token validation and insertion.
 	MaxTokens int64
 }
 
-// NewHandlerWithNonStreamingChatLimits validates chat requests before non-streaming forwarding.
-// upstream receives accepted requests; limits supplies the validated body and token bounds.
-func NewHandlerWithNonStreamingChatLimits(upstream http.Handler, limits ChatLimits) http.Handler {
-	return NewHandlerWithBackends(upstream, nil, limits)
-}
-
-// NewHandlerWithBackends routes chat through validation to the selected response mode.
+// NewHandler builds the gateway routes and validates chat before forwarding.
 // nonStreaming handles model lists and JSON chat responses; streaming handles SSE chat.
 // limits bounds accepted request bodies and output-token options before either proxy runs.
-func NewHandlerWithBackends(nonStreaming, streaming http.Handler, limits ChatLimits) http.Handler {
+// A missing nonStreaming backend leaves health available but returns 503 for backend routes.
+func NewHandler(nonStreaming, streaming http.Handler, limits ChatLimits) http.Handler {
 	var chat http.Handler
 	if nonStreaming != nil {
 		chat = &chatHandler{
@@ -52,13 +29,10 @@ func NewHandlerWithBackends(nonStreaming, streaming http.Handler, limits ChatLim
 			maxTokens:    limits.MaxTokens,
 		}
 	}
-	return newHandler(nonStreaming, chat)
-}
 
-func newHandler(upstream, chat http.Handler) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/healthz", healthHandler)
-	mux.Handle("GET /v1/models", backendHandler(upstream))
+	mux.Handle("GET /v1/models", backendHandler(nonStreaming))
 	mux.Handle("POST /v1/chat/completions", backendHandler(chat))
 	return mux
 }

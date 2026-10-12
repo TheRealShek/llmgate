@@ -28,7 +28,8 @@ func TestRequestIdentity(t *testing.T) {
 		return nil, errors.New("transport-secret")
 	})
 	forwarder := proxy.NewNonStreamingHandler(&url.URL{Scheme: "http", Host: "backend.example"}, transport, time.Second)
-	handler := requestlog.NewHandler(gateway.NewHandlerWithModels(forwarder), logger)
+	routes := gateway.NewHandler(forwarder, nil, gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
+	handler := requestlog.NewHandler(routes, logger)
 	paths := []string{"/v1/healthz", "/v1/models", "/missing/private-secret?token=query-secret"}
 	type result struct {
 		id       string

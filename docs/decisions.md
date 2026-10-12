@@ -66,16 +66,15 @@ work.
 Inspect top-level options as `json.RawMessage`. Valid explicit token counts keep
 the original request bytes. For omitted values, insert just the new field before
 the closing object brace, preserving all existing bytes and unknown fields.
-Update Content-Length to match the resulting body. Existing constructor calls
-preserve their behavior; startup uses the constructor that receives both body
-and token limits.
+Update Content-Length to match the resulting body. The gateway constructor
+receives both body and token limits; startup supplies positive values for both.
 
 ## Streaming chat forwarding
 
 Streaming requests pass through the same JSON, body-size, and output-token
 validation as non-streaming requests. Startup supplies a separate streaming
-proxy. Existing constructors without that proxy retain their `501` response
-for streaming requests.
+proxy. A configured JSON backend without a streaming proxy returns `501` for
+streaming requests.
 
 Use `ReverseProxy` with immediate flushing to forward backend response bytes
 without parsing or rebuilding SSE events. A copied chunk can contain part of an
@@ -118,3 +117,14 @@ raw URLs, query strings, or caller-supplied IDs.
 Pass the response writer through unchanged. This preserves flushing and HTTP
 abort behavior without implementing a response-writer wrapper. Status and byte
 count collection are separate work.
+
+## Gateway construction
+
+Use one `gateway.NewHandler(nonStreaming, streaming, limits)` constructor for
+startup and tests. Remove variants from earlier project stages instead of
+keeping them as compatibility wrappers inside this internal package.
+
+Keep logging, routing, chat validation, and proxying as separate components
+because each owns distinct behavior. Startup names the route handler `routes`
+and its logging wrapper `loggedRoutes` so their execution order is visible.
+The README follows one streaming request through the functions that run it.

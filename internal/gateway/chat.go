@@ -54,9 +54,9 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		upstream = h.streaming
 	}
 	if upstream == nil {
-		// Constructors without a streaming proxy keep their existing 501 response.
+		// A configured JSON backend does not guarantee streaming is available.
 		_ = api.WriteError(w, http.StatusNotImplemented, api.Error{
-			Message: "streaming chat is not implemented yet",
+			Message: "streaming chat is not configured",
 			Type:    "server_error",
 			Code:    "streaming_not_supported",
 		})

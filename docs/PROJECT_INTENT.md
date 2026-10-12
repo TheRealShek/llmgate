@@ -246,7 +246,8 @@ The top of the README, in this order:
 - Finish a phase before starting the next one. Do not add features from a later phase early.
 - Write the test for a failure case before fixing the bug.
 - Every performance claim needs a number and a command that reproduces it.
-- Commit at the end of each working session so GitHub shows steady progress.
+- Commit only when explicitly requested. Completing a working session does not
+  authorize a commit or push.
 - Apply for backend and platform roles while Phase 1 is in progress. Link the repo even when it is unfinished.
 
 ## Questions I should be able to answer when this is done

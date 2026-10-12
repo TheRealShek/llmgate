@@ -27,7 +27,24 @@ agent present.
 
 - Follow `go-conventions` for all Go code.
 - Do not use the `code-review` skill.
-- Push commits directly to `main`.
+- Do not commit or push unless Abhishek explicitly requests that action. Completing
+  a coding task does not authorize a commit. When a push is requested, push to
+  `main` unless instructed otherwise.
+
+## Keep the code easy to follow
+
+- Keep one clear construction path for the current gateway. Prefer one constructor
+  with explicit dependencies and limits over variants for each development stage.
+- Update callers and tests when an internal constructor changes. Do not keep old
+  constructors solely to avoid updating tests or preserve obsolete project stages.
+- Keep handler layers when they own distinct behavior, such as logging, validation,
+  or proxying. Avoid wrappers and helpers that only add another step to follow.
+- Make startup show how requests flow through the components. Use names that
+  describe each component and separate assembly steps so readers can follow them.
+- Keep the README reading guide aligned with the actual entry point and request
+  flow. Remove comments that describe features as unfinished after they exist.
+- Before adding a new abstraction, check whether it makes the main request path
+  easier to understand. Prefer direct code when it only moves complexity elsewhere.
 
 ## Code comments
 

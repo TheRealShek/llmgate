@@ -19,26 +19,32 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("load gateway config: %w", err)
 	}
 
+	// DefaultTransport is declared as the http.RoundTripper interface.
+	// Assert its underlying type is *http.Transport and clone it so custom
+	// timeouts and idle connection cleanup do not mutate the process-wide transport.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{Timeout: cfg.upstreamConnectTimeout}).DialContext
 	transport.TLSHandshakeTimeout = cfg.upstreamConnectTimeout
 	transport.ResponseHeaderTimeout = cfg.upstreamHeaderTimeout
 	defer transport.CloseIdleConnections()
+
 	var nonStreaming http.Handler
 	var streaming http.Handler
 	if cfg.upstreamURL != nil {
 		nonStreaming = proxy.NewNonStreamingHandler(cfg.upstreamURL, transport, cfg.upstreamTimeout)
 		streaming = proxy.NewStreamingHandler(cfg.upstreamURL, transport, cfg.streamIdleTimeout)
 	}
-	handler := gateway.NewHandlerWithBackends(nonStreaming, streaming, gateway.ChatLimits{
+
+	routes := gateway.NewHandler(nonStreaming, streaming, gateway.ChatLimits{
 		MaxBodyBytes: cfg.maxBodyBytes,
 		MaxTokens:    cfg.maxTokens,
 	})
+	loggedRoutes := requestlog.NewHandler(routes, slog.Default())
 
 	// Bound request reads and idle connections without limiting response streams.
 	server := &http.Server{
 		Addr:              cfg.addr,
-		Handler:           requestlog.NewHandler(handler, slog.Default()),
+		Handler:           loggedRoutes,
 		ReadTimeout:       cfg.readTimeout,
 		ReadHeaderTimeout: cfg.readHeaderTimeout,
 		IdleTimeout:       cfg.idleTimeout,

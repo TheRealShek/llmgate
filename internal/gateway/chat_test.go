@@ -33,7 +33,7 @@ func TestChatForwarding(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json; charset=utf-8")
 		recorder := httptest.NewRecorder()
-		NewHandlerWithNonStreamingChat(upstream, 1024).ServeHTTP(recorder, request)
+		NewHandler(upstream, nil, ChatLimits{MaxBodyBytes: 1024}).ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusCreated || recorder.Body.String() != `{"choices":[]}` {
 			t.Fatalf("unexpected chat response: %d %s", recorder.Code, recorder.Body.String())
 		}
@@ -45,7 +45,7 @@ func TestChatReadTimeout(t *testing.T) {
 	upstream := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("incomplete upload reached upstream")
 	})
-	server := httptest.NewUnstartedServer(NewHandlerWithNonStreamingChat(upstream, 1024))
+	server := httptest.NewUnstartedServer(NewHandler(upstream, nil, ChatLimits{MaxBodyBytes: 1024}))
 	server.Config.ReadTimeout = 50 * time.Millisecond
 	server.Start()
 	t.Cleanup(server.Close)
@@ -86,7 +86,7 @@ func TestChatRejections(t *testing.T) {
 		{name: "null", body: `null`, contentType: "application/json", status: 400},
 		{name: "invalid stream type", body: `{"stream":"false"}`, contentType: "application/json", status: 400},
 		{name: "null stream", body: `{"stream":null}`, contentType: "application/json", status: 400},
-		{name: "streaming", body: `{"stream":true}`, contentType: "application/json", status: 501},
+		{name: "streaming not configured", body: `{"stream":true}`, contentType: "application/json", status: 501},
 		{name: "too large", body: strings.Repeat("x", 65), contentType: "application/json", status: 413},
 		{name: "missing content type", body: `{}`, status: 415},
 		{name: "wrong content type", body: `{}`, contentType: "text/plain", status: 415},
@@ -104,12 +104,15 @@ func TestChatRejections(t *testing.T) {
 			request.Header.Set("Content-Type", tt.contentType)
 			request.ContentLength = -1
 			recorder := httptest.NewRecorder()
-			NewHandlerWithNonStreamingChat(upstream, 64).ServeHTTP(recorder, request)
+			NewHandler(upstream, nil, ChatLimits{MaxBodyBytes: 64}).ServeHTTP(recorder, request)
 			if recorder.Code != tt.status {
 				t.Fatalf("status = %d, want %d: %s", recorder.Code, tt.status, recorder.Body.String())
 			}
 			if tt.status != 405 && recorder.Header().Get("Content-Type") != "application/json" {
 				t.Fatal("rejection did not return a JSON error")
+			}
+			if tt.name == "streaming not configured" && !strings.Contains(recorder.Body.String(), "streaming chat is not configured") {
+				t.Fatalf("missing streaming backend returned an obsolete message: %s", recorder.Body.String())
 			}
 		})
 	}
@@ -122,7 +125,7 @@ func TestChatBodyBoundary(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
-	NewHandlerWithNonStreamingChat(upstream, 64).ServeHTTP(recorder, request)
+	NewHandler(upstream, nil, ChatLimits{MaxBodyBytes: 64}).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusNoContent {
 		t.Fatalf("body at size limit was rejected: %d", recorder.Code)
 	}
@@ -147,7 +150,8 @@ func TestChatProxyIntegration(t *testing.T) {
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	defer transport.CloseIdleConnections()
-	handler := NewHandlerWithNonStreamingChat(proxy.NewNonStreamingHandler(target, transport, time.Second), 1024)
+	nonStreaming := proxy.NewNonStreamingHandler(target, transport, time.Second)
+	handler := NewHandler(nonStreaming, nil, ChatLimits{MaxBodyBytes: 1024})
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
@@ -174,7 +178,9 @@ func TestChatCancellation(t *testing.T) {
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	t.Cleanup(transport.CloseIdleConnections)
-	gateway := httptest.NewServer(NewHandlerWithNonStreamingChat(proxy.NewNonStreamingHandler(target, transport, 5*time.Second), 1024))
+	nonStreaming := proxy.NewNonStreamingHandler(target, transport, 5*time.Second)
+	handler := NewHandler(nonStreaming, nil, ChatLimits{MaxBodyBytes: 1024})
+	gateway := httptest.NewServer(handler)
 	t.Cleanup(gateway.Close)
 	ctx, cancel := context.WithCancel(t.Context())
 	var workers sync.WaitGroup

@@ -22,6 +22,7 @@ func NewHandler(next http.Handler, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		info := requestInfo{id: rand.Text()}
+		// derived logger keeps that ID attached without modifying the shared logger.
 		info.logger = logger.With("request_id", info.id)
 		w.Header().Set("X-Request-ID", info.id)
 

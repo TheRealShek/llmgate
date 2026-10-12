@@ -9,7 +9,7 @@ import (
 // TestHandler checks the health response and routing so unsupported methods and
 // unrelated paths cannot silently pass health checks.
 func TestHandler(t *testing.T) {
-	handler := NewHandler()
+	handler := NewHandler(nil, nil, ChatLimits{})
 	tests := []struct {
 		name   string
 		method string
@@ -54,10 +54,11 @@ func TestHandler(t *testing.T) {
 
 // TestHandlerModels checks model route integration without affecting the health route.
 func TestHandlerModels(t *testing.T) {
-	handler := NewHandlerWithModels(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte("models"))
-	}))
+	})
+	handler := NewHandler(upstream, nil, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
 	if recorder.Code != http.StatusAccepted || recorder.Body.String() != "models" {

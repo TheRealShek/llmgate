@@ -109,12 +109,30 @@ or `30s` and must be positive.
 
 ## Read the code
 
-Start with [startup](cmd/gateway/run.go), then follow the
-[request logs](internal/requestlog/handler.go), [routes](internal/gateway/handler.go),
-[chat validation](internal/gateway/chat.go), and [proxy](internal/proxy/handler.go).
-See [streaming](internal/proxy/stream.go) for idle-read cancellation and
-[shutdown](cmd/gateway/server.go) for
-connection cleanup. The implementation uses only the Go standard library.
+Start with a single request: `POST /v1/chat/completions` with `stream: true`.
+Read these functions in order:
+
+1. [`run`](cmd/gateway/run.go) assembles the proxies, `routes`, and `loggedRoutes`,
+   then gives the HTTP server the outer logging handler.
+2. [`requestlog.NewHandler`](internal/requestlog/handler.go) assigns the request
+   ID and logger, then calls `next.ServeHTTP` to enter the routes.
+3. [`gateway.NewHandler`](internal/gateway/handler.go) registers the chat route
+   with a `chatHandler`. This is the only gateway constructor.
+4. [`chatHandler.ServeHTTP`](internal/gateway/chat.go) validates the JSON and
+   limits, selects the streaming proxy, and gives it a request with a fresh
+   body reader through `upstream.ServeHTTP`.
+5. [`streamHandler.ServeHTTP`](internal/proxy/stream.go) keeps client cancellation
+   and adds the idle-read timeout wrapper before calling the reverse proxy.
+6. [`newForwarder`](internal/proxy/handler.go) configures that reverse proxy to
+   send the request to the backend and copy its response back to the client.
+
+Each `ServeHTTP` call hands the request to the next component. Backend response
+bytes return through the same response writer. When forwarding ends, the logging
+handler writes the finish log. For JSON chat, step 5 uses
+`proxy.NewNonStreamingHandler` instead and applies a total deadline.
+
+Read [shutdown](cmd/gateway/server.go) separately for connection cleanup. The
+implementation uses only the Go standard library.
 
 Run the tests with:
 

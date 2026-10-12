@@ -26,12 +26,16 @@ func run(ctx context.Context) error {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{Timeout: cfg.upstreamConnectTimeout}).DialContext
 	transport.TLSHandshakeTimeout = cfg.upstreamConnectTimeout
+
 	transport.ResponseHeaderTimeout = cfg.upstreamHeaderTimeout
 	defer transport.CloseIdleConnections()
 
-	var nonStreaming http.Handler
-	var streaming http.Handler
-	var readiness http.Handler
+	var (
+		nonStreaming http.Handler
+		streaming    http.Handler
+		readiness    http.Handler
+	)
+
 	if cfg.upstreamURL != nil {
 		nonStreaming = proxy.NewNonStreamingHandler(cfg.upstreamURL, transport, cfg.upstreamTimeout)
 		streaming = proxy.NewStreamingHandler(cfg.upstreamURL, transport, cfg.streamIdleTimeout)
@@ -52,12 +56,15 @@ func run(ctx context.Context) error {
 		ReadHeaderTimeout: cfg.readHeaderTimeout,
 		IdleTimeout:       cfg.idleTimeout,
 	}
+
 	listener, err := net.Listen("tcp", server.Addr)
 	if err != nil {
 		return fmt.Errorf("listen gateway HTTP on %s: %w", server.Addr, err)
 	}
+
 	if err := runServer(ctx, server, listener, cfg.shutdownTimeout); err != nil {
 		return fmt.Errorf("run gateway HTTP on %s: %w", server.Addr, err)
 	}
+
 	return nil
 }

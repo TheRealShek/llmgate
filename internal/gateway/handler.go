@@ -36,6 +36,7 @@ func NewHandler(nonStreaming, streaming, readiness http.Handler, limits ChatLimi
 	mux.Handle("GET /v1/readyz", backendHandler(readiness))
 	mux.Handle("GET /v1/models", backendHandler(nonStreaming))
 	mux.Handle("POST /v1/chat/completions", backendHandler(chat))
+
 	return mux
 }
 
@@ -51,6 +52,7 @@ func backendHandler(upstream http.Handler) http.Handler {
 	if upstream != nil {
 		return upstream
 	}
+
 	return http.HandlerFunc(noBackendHandler)
 }
 

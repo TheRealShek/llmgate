@@ -25,6 +25,7 @@ func newForwarder(target *url.URL, transport http.RoundTripper) *httputil.Revers
 		// with the gateway ID while preserving the path, query, and other headers.
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(&backend)
+
 			if id := requestlog.ID(r.In.Context()); id != "" {
 				r.Out.Header.Set("X-Request-ID", id)
 			}
@@ -35,6 +36,7 @@ func newForwarder(target *url.URL, transport http.RoundTripper) *httputil.Revers
 				// backend headers, so remove its ID to avoid a duplicate or spoofed value.
 				response.Header.Del("X-Request-ID")
 			}
+
 			return nil
 		},
 		Transport:    transport,
@@ -48,7 +50,9 @@ func handleUpstreamError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, context.Canceled) {
 		return // Client disconnected early. Nothing to deliver.
 	}
+
 	status := http.StatusBadGateway
+
 	var timeoutError net.Error
 	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeoutError) && timeoutError.Timeout()) {
 		status = http.StatusGatewayTimeout

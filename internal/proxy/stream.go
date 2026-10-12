@@ -20,6 +20,7 @@ func NewStreamingHandler(target *url.URL, transport http.RoundTripper, idleTimeo
 	// ReverseProxy copies backend body bytes to the client. Immediate flushing lets
 	// the client receive each copied chunk while backend generation is still running.
 	forwarder.FlushInterval = -1
+
 	return &streamHandler{forwarder: forwarder, idleTimeout: idleTimeout}
 }
 
@@ -64,6 +65,7 @@ func (t *idleTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		cancel:      t.cancel,
 		idleTimeout: t.idleTimeout,
 	}
+
 	return response, nil
 }
 
@@ -86,5 +88,6 @@ func (b *idleBody) Read(p []byte) (int, error) {
 			<-finished
 		}
 	}()
+
 	return b.ReadCloser.Read(p)
 }

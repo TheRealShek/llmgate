@@ -38,14 +38,17 @@ func (h *readinessHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// and gets its own deadline before going to the backend's /health endpoint.
 	ctx, cancel := context.WithTimeout(r.Context(), h.timeout)
 	defer cancel()
+
 	probe, err := http.NewRequestWithContext(ctx, http.MethodGet, h.healthURL, nil)
 	if err != nil {
 		writeNotReady(w)
 		return
 	}
+
 	if id := requestlog.ID(ctx); id != "" {
 		probe.Header.Set("X-Request-ID", id)
 	}
+
 	response, err := h.client.Do(probe)
 	if err != nil {
 		// The URL and transport error can contain sensitive details. Return a fixed
@@ -60,6 +63,7 @@ func (h *readinessHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeNotReady(w)
 		return
 	}
+
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))

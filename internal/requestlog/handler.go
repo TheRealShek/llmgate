@@ -30,6 +30,7 @@ func NewHandler(next http.Handler, logger *slog.Logger) http.Handler {
 		// WithContext preserves client cancellation; this wrapper creates no deadline.
 		r = r.WithContext(context.WithValue(r.Context(), contextKey{}, info))
 		info.logger.InfoContext(r.Context(), "request started", "method", r.Method)
+
 		completed := false
 		defer func() {
 			info.logger.InfoContext(r.Context(), "request finished",
@@ -37,7 +38,9 @@ func NewHandler(next http.Handler, logger *slog.Logger) http.Handler {
 				"duration_ms", float64(time.Since(started))/float64(time.Millisecond),
 				"completed", completed)
 		}()
+
 		next.ServeHTTP(w, r)
+
 		completed = true
 	})
 }
@@ -47,6 +50,7 @@ func Logger(ctx context.Context) *slog.Logger {
 	if info, ok := ctx.Value(contextKey{}).(requestInfo); ok {
 		return info.logger
 	}
+
 	return slog.Default()
 }
 

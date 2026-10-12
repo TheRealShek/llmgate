@@ -30,17 +30,21 @@ func TestChatTokenLimit(t *testing.T) {
 			called := false
 			upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				called = true
+
 				got, err := io.ReadAll(r.Body)
 				if err != nil || string(got) != body || r.ContentLength != int64(len(body)) {
 					t.Errorf("explicit max_tokens changed the forwarded body: %q %v", got, err)
 				}
+
 				w.WriteHeader(http.StatusNoContent)
 			})
 			handler := NewHandler(upstream, nil, nil, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
 			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 			request.Header.Set("Content-Type", "application/json")
+
 			recorder := httptest.NewRecorder()
 			handler.ServeHTTP(recorder, request)
+
 			if recorder.Code != tt.status || called != (tt.status == http.StatusNoContent) {
 				t.Fatalf("status = %d, upstream called = %v; want %d", recorder.Code, called, tt.status)
 			}
@@ -68,13 +72,16 @@ func TestChatTokenLimitOmitted(t *testing.T) {
 				if err != nil || string(got) != tt.want || r.ContentLength != int64(len(tt.want)) {
 					t.Errorf("default token request = %q, length %d, error %v; want %q", got, r.ContentLength, err, tt.want)
 				}
+
 				w.WriteHeader(http.StatusNoContent)
 			})
 			handler := NewHandler(upstream, nil, nil, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
 			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tt.body))
 			request.Header.Set("Content-Type", "application/json")
+
 			recorder := httptest.NewRecorder()
 			handler.ServeHTTP(recorder, request)
+
 			if recorder.Code != http.StatusNoContent {
 				t.Fatalf("omitted max_tokens was rejected: %d", recorder.Code)
 			}

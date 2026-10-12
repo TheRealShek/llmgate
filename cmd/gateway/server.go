@@ -15,11 +15,13 @@ func runServer(ctx context.Context, server *http.Server, listener net.Listener, 
 	// Let Serve report its result without waiting for the shutdown path to receive it.
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(listener) }()
+
 	select {
 	case err := <-serveDone:
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
+
 		return fmt.Errorf("serve gateway HTTP: %w", err)
 	case <-ctx.Done():
 	}
@@ -27,6 +29,7 @@ func runServer(ctx context.Context, server *http.Server, listener net.Listener, 
 	// The signal context is already canceled; draining needs a fresh deadline.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
+
 	shutdownErr := server.Shutdown(shutdownCtx)
 	if shutdownErr != nil {
 		shutdownErr = fmt.Errorf("shutdown gateway HTTP: %w", shutdownErr)
@@ -43,5 +46,6 @@ func runServer(ctx context.Context, server *http.Server, listener net.Listener, 
 	} else if serveErr != nil {
 		serveErr = fmt.Errorf("serve gateway HTTP: %w", serveErr)
 	}
+
 	return errors.Join(shutdownErr, serveErr)
 }

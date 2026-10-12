@@ -36,29 +36,37 @@ func TestLoadConfigUpstreamURL(t *testing.T) {
 				if key == "GATEWAY_UPSTREAM_URL" {
 					return tt.value
 				}
+
 				return ""
 			})
 			if tt.wantError {
 				if err == nil {
 					t.Fatal("loadConfig() expected error, got nil")
 				}
+
 				if !strings.Contains(err.Error(), "GATEWAY_UPSTREAM_URL") || strings.Contains(err.Error(), "secret") {
 					t.Fatalf("error must identify the setting without exposing credentials: %v", err)
 				}
+
 				if cfg != (config{}) {
 					t.Fatalf("invalid URL returned partial config: %+v", cfg)
 				}
+
 				return
 			}
+
 			if err != nil {
 				t.Fatalf("loadConfig() unexpected error: %v", err)
 			}
+
 			if tt.value == "" {
 				if cfg.upstreamURL != nil {
 					t.Fatal("unset URL must remain nil")
 				}
+
 				return
 			}
+
 			if cfg.upstreamURL == nil || cfg.upstreamURL.String() != tt.value {
 				t.Fatalf("upstream URL = %v, want %q", cfg.upstreamURL, tt.value)
 			}
@@ -255,16 +263,20 @@ func TestLoadConfig(t *testing.T) {
 			getenv := func(key string) string {
 				return tt.env[key]
 			}
+
 			cfg, err := loadConfig(getenv)
 			if tt.wantError {
 				if err == nil {
 					t.Fatal("loadConfig() expected error, got nil")
 				}
+
 				return
 			}
+
 			if err != nil {
 				t.Fatalf("loadConfig() unexpected error: %v", err)
 			}
+
 			if cfg != tt.want {
 				t.Fatalf("loadConfig() = %+v, want %+v", cfg, tt.want)
 			}

@@ -24,5 +24,6 @@ type errorResponse struct {
 func WriteError(w http.ResponseWriter, status int, detail Error) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
+
 	return json.NewEncoder(w).Encode(errorResponse{Error: detail})
 }

@@ -26,14 +26,17 @@ func TestChatForwarding(t *testing.T) {
 			if err != nil || string(got) != body || r.ContentLength != int64(len(body)) {
 				t.Errorf("forwarded body or length changed: %q, %d, %v", got, r.ContentLength, err)
 			}
+
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
 			_, _ = w.Write([]byte(`{"choices":[]}`))
 		})
 		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json; charset=utf-8")
+
 		recorder := httptest.NewRecorder()
 		NewHandler(upstream, nil, nil, ChatLimits{MaxBodyBytes: 1024}).ServeHTTP(recorder, request)
+
 		if recorder.Code != http.StatusCreated || recorder.Body.String() != `{"choices":[]}` {
 			t.Fatalf("unexpected chat response: %d %s", recorder.Code, recorder.Body.String())
 		}
@@ -49,23 +52,28 @@ func TestChatReadTimeout(t *testing.T) {
 	server.Config.ReadTimeout = 50 * time.Millisecond
 	server.Start()
 	t.Cleanup(server.Close)
+
 	conn, err := net.DialTimeout("tcp", server.Listener.Addr().String(), time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+
 	if err := conn.SetDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
+
 	_, err = fmt.Fprint(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: gateway\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
 	if err != nil {
 		t.Fatalf("stalled upload did not receive an error response: %v", err)
 	}
 	defer response.Body.Close()
+
 	if response.StatusCode != http.StatusBadRequest {
 		t.Fatalf("stalled upload status = %d, want 400", response.StatusCode)
 	}
@@ -96,21 +104,26 @@ func TestChatRejections(t *testing.T) {
 			upstream := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 				t.Error("rejected request reached upstream")
 			})
+
 			method := http.MethodPost
 			if tt.name == "GET chat" {
 				method = http.MethodGet
 			}
+
 			request := httptest.NewRequest(method, "/v1/chat/completions", strings.NewReader(tt.body))
 			request.Header.Set("Content-Type", tt.contentType)
 			request.ContentLength = -1
 			recorder := httptest.NewRecorder()
 			NewHandler(upstream, nil, nil, ChatLimits{MaxBodyBytes: 64}).ServeHTTP(recorder, request)
+
 			if recorder.Code != tt.status {
 				t.Fatalf("status = %d, want %d: %s", recorder.Code, tt.status, recorder.Body.String())
 			}
+
 			if tt.status != 405 && recorder.Header().Get("Content-Type") != "application/json" {
 				t.Fatal("rejection did not return a JSON error")
 			}
+
 			if tt.name == "streaming not configured" && !strings.Contains(recorder.Body.String(), "streaming chat is not configured") {
 				t.Fatalf("missing streaming backend returned an obsolete message: %s", recorder.Body.String())
 			}
@@ -124,8 +137,10 @@ func TestChatBodyBoundary(t *testing.T) {
 	body := "{}" + strings.Repeat(" ", 62)
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
+
 	recorder := httptest.NewRecorder()
 	NewHandler(upstream, nil, nil, ChatLimits{MaxBodyBytes: 64}).ServeHTTP(recorder, request)
+
 	if recorder.Code != http.StatusNoContent {
 		t.Fatalf("body at size limit was rejected: %d", recorder.Code)
 	}
@@ -134,28 +149,34 @@ func TestChatBodyBoundary(t *testing.T) {
 // TestChatProxyIntegration checks the real backend receives chat bodies and preserves its response.
 func TestChatProxyIntegration(t *testing.T) {
 	body := `{"model":"test","messages":[],"stream":false,"extra":123}`
+
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, err := io.ReadAll(r.Body)
 		if err != nil || string(got) != body || r.Method != http.MethodPost || r.URL.Path != "/api/v1/chat/completions" {
 			t.Errorf("unexpected backend request: %s %s %q %v", r.Method, r.URL.Path, got, err)
 		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"choices":[]}`))
 	}))
 	defer backend.Close()
+
 	target, err := url.Parse(backend.URL + "/api")
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	defer transport.CloseIdleConnections()
+
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, time.Second)
 	handler := NewHandler(nonStreaming, nil, nil, ChatLimits{MaxBodyBytes: 1024})
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(recorder, request)
+
 	if recorder.Code != http.StatusOK || recorder.Body.String() != `{"choices":[]}` {
 		t.Fatalf("unexpected backend response: %d %s", recorder.Code, recorder.Body.String())
 	}
@@ -167,15 +188,18 @@ func TestChatCancellation(t *testing.T) {
 	stopped := make(chan struct{})
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
+
 		close(started)
 		<-r.Context().Done()
 		close(stopped)
 	}))
 	t.Cleanup(backend.Close)
+
 	target, err := url.Parse(backend.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	t.Cleanup(transport.CloseIdleConnections)
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, 5*time.Second)
@@ -183,30 +207,41 @@ func TestChatCancellation(t *testing.T) {
 	gateway := httptest.NewServer(handler)
 	t.Cleanup(gateway.Close)
 	ctx, cancel := context.WithCancel(t.Context())
+
 	var workers sync.WaitGroup
+
 	t.Cleanup(func() { cancel(); workers.Wait() })
+
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	request.Header.Set("Content-Type", "application/json")
+
 	done := make(chan struct{})
+
 	workers.Go(func() {
 		response, err := gateway.Client().Do(request)
 		if response != nil {
 			_ = response.Body.Close()
 		}
+
 		if err == nil {
 			t.Error("canceled request unexpectedly succeeded")
 		}
+
 		close(done)
 	})
+
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
 		t.Fatal("backend request did not start")
 	}
+
 	cancel()
+
 	for _, event := range []<-chan struct{}{stopped, done} {
 		select {
 		case <-event:

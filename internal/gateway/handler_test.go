@@ -10,6 +10,7 @@ import (
 // unrelated paths cannot silently pass health checks.
 func TestHandler(t *testing.T) {
 	handler := NewHandler(nil, nil, nil, ChatLimits{})
+
 	tests := []struct {
 		name   string
 		method string
@@ -35,17 +36,21 @@ func TestHandler(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(tt.method, tt.path, nil)
 			handler.ServeHTTP(recorder, request)
+
 			if recorder.Code != tt.status {
 				t.Fatalf("status = %d, want %d", recorder.Code, tt.status)
 			}
+
 			if tt.status == http.StatusOK {
 				if body := recorder.Body.String(); body != "ok\n" {
 					t.Errorf("body = %q, want %q", body, "ok\n")
 				}
+
 				if contentType := recorder.Header().Get("Content-Type"); contentType != "text/plain; charset=utf-8" {
 					t.Errorf("Content-Type = %q, want text/plain; charset=utf-8", contentType)
 				}
 			}
+
 			if tt.status == http.StatusMethodNotAllowed {
 				if allow := recorder.Header().Get("Allow"); allow != "GET, HEAD" {
 					t.Errorf("Allow = %q, want GET, HEAD", allow)
@@ -64,6 +69,7 @@ func TestHandlerModels(t *testing.T) {
 	handler := NewHandler(upstream, nil, nil, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+
 	if recorder.Code != http.StatusAccepted || recorder.Body.String() != "models" {
 		t.Fatalf("model route response: %d %s", recorder.Code, recorder.Body.String())
 	}

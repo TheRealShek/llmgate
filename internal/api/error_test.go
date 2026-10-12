@@ -18,13 +18,16 @@ func TestWriteError(t *testing.T) {
 				Type:    "server_error",
 				Code:    "upstream_error",
 			}
+
 			recorder := httptest.NewRecorder()
 			if err := WriteError(recorder, status, detail); err != nil {
 				t.Fatal(err)
 			}
+
 			if recorder.Code != status || recorder.Header().Get("Content-Type") != "application/json" {
 				t.Fatalf("unexpected response status or content type: %d %v", recorder.Code, recorder.Header())
 			}
+
 			var body struct {
 				Error struct {
 					Message string `json:"message"`
@@ -35,6 +38,7 @@ func TestWriteError(t *testing.T) {
 			if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
 				t.Fatalf("response is not valid JSON: %v", err)
 			}
+
 			if body.Error.Message != detail.Message || body.Error.Type != detail.Type || body.Error.Code != detail.Code {
 				t.Fatalf("error response did not preserve fields: %+v", body)
 			}
@@ -53,10 +57,12 @@ func (failedWriter) Write([]byte) (int, error) {
 // TestWriteErrorFailure checks that a response-write failure reaches the caller without a second status.
 func TestWriteErrorFailure(t *testing.T) {
 	w := failedWriter{httptest.NewRecorder()}
+
 	err := WriteError(w, http.StatusServiceUnavailable, Error{Message: "no backend configured", Type: "server_error", Code: "no_backend"})
 	if !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("write error = %v, want closed pipe", err)
 	}
+
 	if w.Code != http.StatusServiceUnavailable || w.Body.Len() != 0 {
 		t.Fatalf("unexpected failed-write response: %d %q", w.Code, w.Body.String())
 	}

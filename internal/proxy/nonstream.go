@@ -20,6 +20,7 @@ func NewNonStreamingHandler(target *url.URL, transport http.RoundTripper, totalT
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), totalTimeout)
 		defer cancel()
+
 		requestForwarder := *forwarder
 		requestForwarder.ErrorLog = log.New(proxyLogWriter{logger: requestlog.Logger(ctx)}, "", 0)
 		requestForwarder.ServeHTTP(w, r.WithContext(ctx))

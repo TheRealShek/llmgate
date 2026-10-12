@@ -27,12 +27,15 @@ func TestRunServerShutdown(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+
 			t.Cleanup(func() { _ = listener.Close() })
+
 			started := make(chan struct{})
 			release := make(chan struct{})
 			canceled := make(chan struct{})
 			server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				close(started)
+
 				select {
 				case <-release:
 					_, _ = w.Write([]byte("finished\n"))
@@ -41,24 +44,35 @@ func TestRunServerShutdown(t *testing.T) {
 				}
 			})}
 			shutdownStarted := make(chan struct{})
+
 			server.RegisterOnShutdown(func() { close(shutdownStarted) })
+
 			ctx, cancel := context.WithCancel(t.Context())
+
 			var workers sync.WaitGroup
+
 			t.Cleanup(func() {
 				cancel()
+
 				_ = server.Close()
+
 				workers.Wait()
 			})
+
 			serverDone := make(chan error, 1)
+
 			workers.Go(func() { serverDone <- runServer(ctx, server, listener, tt.timeout) })
 
 			client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{}}
 			defer client.CloseIdleConnections()
+
 			type result struct {
 				body string
 				err  error
 			}
+
 			clientDone := make(chan result, 1)
+
 			workers.Go(func() {
 				response, err := client.Get("http://" + listener.Addr().String())
 				if err != nil {
@@ -66,55 +80,68 @@ func TestRunServerShutdown(t *testing.T) {
 					return
 				}
 				defer response.Body.Close()
+
 				body, err := io.ReadAll(response.Body)
 				clientDone <- result{body: string(body), err: err}
 			})
+
 			select {
 			case <-started:
 			case <-time.After(5 * time.Second):
 				t.Fatal("request did not reach the handler")
 			}
+
 			cancel()
+
 			select {
 			case <-shutdownStarted:
 			case <-time.After(5 * time.Second):
 				t.Fatal("shutdown did not start")
 			}
+
 			connection, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
 			if err == nil {
 				_ = connection.Close()
+
 				t.Fatal("listener accepted a connection during shutdown")
 			}
+
 			if tt.drain {
 				select {
 				case err := <-serverDone:
 					t.Fatalf("server returned before the active request finished: %v", err)
 				case <-time.After(25 * time.Millisecond):
 				}
+
 				close(release)
 			}
+
 			select {
 			case err := <-serverDone:
 				if tt.drain && err != nil {
 					t.Fatalf("shutdown failed: %v", err)
 				}
+
 				if !tt.drain && !errors.Is(err, context.DeadlineExceeded) {
 					t.Fatalf("shutdown error = %v, want context.DeadlineExceeded", err)
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("server did not return")
 			}
+
 			select {
 			case got := <-clientDone:
 				if tt.drain && (got.err != nil || got.body != "finished\n") {
 					t.Fatalf("response = %q, error = %v", got.body, got.err)
 				}
+
 				if !tt.drain && got.err == nil {
 					t.Fatal("request succeeded after the shutdown deadline")
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("client did not return")
 			}
+
 			if !tt.drain {
 				select {
 				case <-canceled:
@@ -133,9 +160,11 @@ func TestRunServerListenerFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	err = runServer(t.Context(), &http.Server{}, listener, time.Second)
 	if !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("serve error = %v, want net.ErrClosed", err)

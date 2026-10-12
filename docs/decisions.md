@@ -120,7 +120,7 @@ count collection are separate work.
 
 ## Gateway construction
 
-Use one `gateway.NewHandler(nonStreaming, streaming, limits)` constructor for
+Use one `gateway.NewHandler(nonStreaming, streaming, readiness, limits)` constructor for
 startup and tests. Remove variants from earlier project stages instead of
 keeping them as compatibility wrappers inside this internal package.
 
@@ -128,3 +128,33 @@ Keep logging, routing, chat validation, and proxying as separate components
 because each owns distinct behavior. Startup names the route handler `routes`
 and its logging wrapper `loggedRoutes` so their execution order is visible.
 The README follows one streaming request through the functions that run it.
+
+Keep both response modes in the `proxy` package because both forward requests
+to the backend. `nonstream.go` owns the total-deadline handler; `stream.go` owns
+the streaming handler and idle-read wrappers. `forward.go` owns reverse-proxy
+setup and error logging shared by both modes. Group code by its responsibility
+instead of grouping all types that implement `http.Handler` into one package.
+
+## Single-backend readiness
+
+`GET /v1/readyz` probes the configured backend's `/health` endpoint on demand,
+preserving the backend base path. Use llama.cpp's documented health endpoint
+instead of model listing because a server can be reachable while its model is
+still loading. See the [backend documentation](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md#api-endpoints).
+
+Only backend HTTP `200` means ready. Return plain `ok` with gateway status `200`
+on success, and a fixed OpenAI-compatible `503` on any other backend status or
+transport failure. Do not follow redirects, pass through backend responses, or
+forward caller credentials, bodies, or query parameters. Forward the generated
+request ID for tracing. An unset backend returns `503`; liveness remains `200`.
+
+`GATEWAY_READINESS_TIMEOUT`, default `2s`, bounds each probe independently of
+chat timeouts. The probe inherits client cancellation and owns its deadline's
+cancel function. Close the backend body immediately after receiving headers.
+This avoids waiting on a stalled body or buffering arbitrary content, at the
+cost of potentially giving up connection reuse when response bytes remain unread.
+
+Probe each time instead of keeping cached health or a background worker. This
+keeps the first readiness behavior small, but probe traffic reaches the backend
+directly. Readiness does not reserve capacity or block chat forwarding. Phase 2
+will add periodic checks and use backend health in routing.

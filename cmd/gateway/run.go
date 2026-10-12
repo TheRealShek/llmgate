@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/therealshek/llmgate/internal/backend"
 	"github.com/therealshek/llmgate/internal/gateway"
 	"github.com/therealshek/llmgate/internal/proxy"
 	"github.com/therealshek/llmgate/internal/requestlog"
@@ -30,12 +31,14 @@ func run(ctx context.Context) error {
 
 	var nonStreaming http.Handler
 	var streaming http.Handler
+	var readiness http.Handler
 	if cfg.upstreamURL != nil {
 		nonStreaming = proxy.NewNonStreamingHandler(cfg.upstreamURL, transport, cfg.upstreamTimeout)
 		streaming = proxy.NewStreamingHandler(cfg.upstreamURL, transport, cfg.streamIdleTimeout)
+		readiness = backend.NewReadinessHandler(cfg.upstreamURL, transport, cfg.readinessTimeout)
 	}
 
-	routes := gateway.NewHandler(nonStreaming, streaming, gateway.ChatLimits{
+	routes := gateway.NewHandler(nonStreaming, streaming, readiness, gateway.ChatLimits{
 		MaxBodyBytes: cfg.maxBodyBytes,
 		MaxTokens:    cfg.maxTokens,
 	})

@@ -21,6 +21,7 @@ type config struct {
 	upstreamConnectTimeout time.Duration
 	upstreamHeaderTimeout  time.Duration
 	streamIdleTimeout      time.Duration
+	readinessTimeout       time.Duration
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
@@ -36,6 +37,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		upstreamConnectTimeout: 5 * time.Second,
 		upstreamHeaderTimeout:  30 * time.Second,
 		streamIdleTimeout:      30 * time.Second,
+		readinessTimeout:       2 * time.Second,
 	}
 
 	if val := getenv("GATEWAY_ADDR"); val != "" {
@@ -43,6 +45,10 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 
 	var err error
+	cfg.readinessTimeout, err = envDuration(getenv, "GATEWAY_READINESS_TIMEOUT", cfg.readinessTimeout)
+	if err != nil {
+		return config{}, err
+	}
 	cfg.upstreamConnectTimeout, err = envDuration(getenv, "GATEWAY_UPSTREAM_CONNECT_TIMEOUT", cfg.upstreamConnectTimeout)
 	if err != nil {
 		return config{}, err

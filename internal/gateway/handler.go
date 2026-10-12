@@ -18,8 +18,9 @@ type ChatLimits struct {
 // NewHandler builds the gateway routes and validates chat before forwarding.
 // nonStreaming handles model lists and JSON chat responses; streaming handles SSE chat.
 // limits bounds accepted request bodies and output-token options before either proxy runs.
-// A missing nonStreaming backend leaves health available but returns 503 for backend routes.
-func NewHandler(nonStreaming, streaming http.Handler, limits ChatLimits) http.Handler {
+// A missing nonStreaming backend leaves health available but returns 503 for models and chat.
+// readiness checks backend health; nil returns 503 on the readiness route.
+func NewHandler(nonStreaming, streaming, readiness http.Handler, limits ChatLimits) http.Handler {
 	var chat http.Handler
 	if nonStreaming != nil {
 		chat = &chatHandler{
@@ -32,6 +33,7 @@ func NewHandler(nonStreaming, streaming http.Handler, limits ChatLimits) http.Ha
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/healthz", healthHandler)
+	mux.Handle("GET /v1/readyz", backendHandler(readiness))
 	mux.Handle("GET /v1/models", backendHandler(nonStreaming))
 	mux.Handle("POST /v1/chat/completions", backendHandler(chat))
 	return mux

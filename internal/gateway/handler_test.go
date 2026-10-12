@@ -9,7 +9,7 @@ import (
 // TestHandler checks the health response and routing so unsupported methods and
 // unrelated paths cannot silently pass health checks.
 func TestHandler(t *testing.T) {
-	handler := NewHandler(nil, nil, ChatLimits{})
+	handler := NewHandler(nil, nil, nil, ChatLimits{})
 	tests := []struct {
 		name   string
 		method string
@@ -24,6 +24,9 @@ func TestHandler(t *testing.T) {
 		{name: "unversioned models", method: http.MethodGet, path: "/models", status: http.StatusNotFound},
 		{name: "unsupported API version", method: http.MethodGet, path: "/v2/healthz", status: http.StatusNotFound},
 		{name: "no backend", method: http.MethodGet, path: "/v1/models", status: http.StatusServiceUnavailable},
+		{name: "readiness without backend", method: http.MethodGet, path: "/v1/readyz", status: http.StatusServiceUnavailable},
+		{name: "readiness unsupported method", method: http.MethodPost, path: "/v1/readyz", status: http.StatusMethodNotAllowed},
+		{name: "unversioned readiness", method: http.MethodGet, path: "/readyz", status: http.StatusNotFound},
 		{name: "chat without backend", method: http.MethodPost, path: "/v1/chat/completions", status: http.StatusServiceUnavailable},
 		{name: "models unsupported method", method: http.MethodPost, path: "/v1/models", status: http.StatusMethodNotAllowed},
 	}
@@ -58,7 +61,7 @@ func TestHandlerModels(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte("models"))
 	})
-	handler := NewHandler(upstream, nil, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
+	handler := NewHandler(upstream, nil, nil, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
 	if recorder.Code != http.StatusAccepted || recorder.Body.String() != "models" {

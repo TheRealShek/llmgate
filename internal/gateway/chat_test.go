@@ -33,7 +33,7 @@ func TestChatForwarding(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json; charset=utf-8")
 		recorder := httptest.NewRecorder()
-		NewHandler(upstream, nil, ChatLimits{MaxBodyBytes: 1024}).ServeHTTP(recorder, request)
+		NewHandler(upstream, nil, nil, ChatLimits{MaxBodyBytes: 1024}).ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusCreated || recorder.Body.String() != `{"choices":[]}` {
 			t.Fatalf("unexpected chat response: %d %s", recorder.Code, recorder.Body.String())
 		}
@@ -45,7 +45,7 @@ func TestChatReadTimeout(t *testing.T) {
 	upstream := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("incomplete upload reached upstream")
 	})
-	server := httptest.NewUnstartedServer(NewHandler(upstream, nil, ChatLimits{MaxBodyBytes: 1024}))
+	server := httptest.NewUnstartedServer(NewHandler(upstream, nil, nil, ChatLimits{MaxBodyBytes: 1024}))
 	server.Config.ReadTimeout = 50 * time.Millisecond
 	server.Start()
 	t.Cleanup(server.Close)
@@ -104,7 +104,7 @@ func TestChatRejections(t *testing.T) {
 			request.Header.Set("Content-Type", tt.contentType)
 			request.ContentLength = -1
 			recorder := httptest.NewRecorder()
-			NewHandler(upstream, nil, ChatLimits{MaxBodyBytes: 64}).ServeHTTP(recorder, request)
+			NewHandler(upstream, nil, nil, ChatLimits{MaxBodyBytes: 64}).ServeHTTP(recorder, request)
 			if recorder.Code != tt.status {
 				t.Fatalf("status = %d, want %d: %s", recorder.Code, tt.status, recorder.Body.String())
 			}
@@ -125,7 +125,7 @@ func TestChatBodyBoundary(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
-	NewHandler(upstream, nil, ChatLimits{MaxBodyBytes: 64}).ServeHTTP(recorder, request)
+	NewHandler(upstream, nil, nil, ChatLimits{MaxBodyBytes: 64}).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusNoContent {
 		t.Fatalf("body at size limit was rejected: %d", recorder.Code)
 	}
@@ -151,7 +151,7 @@ func TestChatProxyIntegration(t *testing.T) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	defer transport.CloseIdleConnections()
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, time.Second)
-	handler := NewHandler(nonStreaming, nil, ChatLimits{MaxBodyBytes: 1024})
+	handler := NewHandler(nonStreaming, nil, nil, ChatLimits{MaxBodyBytes: 1024})
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
@@ -179,7 +179,7 @@ func TestChatCancellation(t *testing.T) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	t.Cleanup(transport.CloseIdleConnections)
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, 5*time.Second)
-	handler := NewHandler(nonStreaming, nil, ChatLimits{MaxBodyBytes: 1024})
+	handler := NewHandler(nonStreaming, nil, nil, ChatLimits{MaxBodyBytes: 1024})
 	gateway := httptest.NewServer(handler)
 	t.Cleanup(gateway.Close)
 	ctx, cancel := context.WithCancel(t.Context())

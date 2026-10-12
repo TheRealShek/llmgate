@@ -41,7 +41,7 @@ func TestStreamingChatFlush(t *testing.T) {
 	t.Cleanup(transport.CloseIdleConnections)
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, 10*time.Millisecond)
 	streaming := proxy.NewStreamingHandler(target, transport, time.Second)
-	handler := NewHandler(nonStreaming, streaming, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
+	handler := NewHandler(nonStreaming, streaming, nil, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
 	gateway := httptest.NewServer(requestlog.NewHandler(handler, slog.New(slog.NewJSONHandler(io.Discard, nil))))
 	t.Cleanup(gateway.Close)
 	client := gateway.Client()
@@ -211,7 +211,7 @@ func newStreamingTestGateway(t *testing.T, backendHandler http.Handler, headerTi
 	t.Cleanup(transport.CloseIdleConnections)
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, 10*time.Millisecond)
 	streaming := proxy.NewStreamingHandler(target, transport, idleTimeout)
-	gateway := httptest.NewServer(NewHandler(nonStreaming, streaming, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8}))
+	gateway := httptest.NewServer(NewHandler(nonStreaming, streaming, nil, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8}))
 	t.Cleanup(gateway.Close)
 	gateway.Client().Timeout = 5 * time.Second
 	return gateway

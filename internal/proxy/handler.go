@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/therealshek/llmgate/internal/api"
+	"github.com/therealshek/llmgate/internal/requestlog"
 )
 
 // NewNonStreamingHandler forwards non-streaming requests to target, a validated, non-nil backend URL.
@@ -24,7 +25,9 @@ func NewNonStreamingHandler(target *url.URL, transport http.RoundTripper, totalT
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), totalTimeout)
 		defer cancel()
-		forwarder.ServeHTTP(w, r.WithContext(ctx))
+		requestForwarder := *forwarder
+		requestForwarder.ErrorLog = log.New(proxyLogWriter{logger: requestlog.Logger(ctx)}, "", 0)
+		requestForwarder.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -35,13 +38,24 @@ func newForwarder(target *url.URL, transport http.RoundTripper) *httputil.Revers
 	// ReverseProxy rewrites the request, sends it over transport with RoundTrip,
 	// and copies the response back to the client.
 	return &httputil.ReverseProxy{
-		// Rewrite points the outbound URL to the backend while preserving the original
-		// path, query parameters, and headers.
+		// Rewrite points the outbound URL to the backend and replaces caller identity
+		// with the gateway ID while preserving the path, query, and other headers.
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(&backend)
+			if id := requestlog.ID(r.In.Context()); id != "" {
+				r.Out.Header.Set("X-Request-ID", id)
+			}
+		},
+		ModifyResponse: func(response *http.Response) error {
+			if requestlog.ID(response.Request.Context()) != "" {
+				// The logging wrapper already set the client ID. ReverseProxy adds
+				// backend headers, so remove its ID to avoid a duplicate or spoofed value.
+				response.Header.Del("X-Request-ID")
+			}
+			return nil
 		},
 		Transport:    transport,
-		ErrorLog:     log.New(proxyLogWriter{}, "", 0),
+		ErrorLog:     log.New(proxyLogWriter{logger: slog.Default()}, "", 0),
 		ErrorHandler: handleUpstreamError,
 	}
 }
@@ -57,7 +71,7 @@ func handleUpstreamError(w http.ResponseWriter, r *http.Request, err error) {
 		status = http.StatusGatewayTimeout
 	}
 	// Transport errors can contain raw URLs or credentials. Log only the status.
-	slog.Warn("upstream request failed", "status", status)
+	requestlog.Logger(r.Context()).WarnContext(r.Context(), "upstream request failed", "status", status)
 	_ = api.WriteError(w, status, api.Error{
 		Message: "upstream request failed",
 		Type:    "server_error",
@@ -65,11 +79,13 @@ func handleUpstreamError(w http.ResponseWriter, r *http.Request, err error) {
 	})
 }
 
-type proxyLogWriter struct{}
+type proxyLogWriter struct {
+	logger *slog.Logger
+}
 
 // Write intercepts ReverseProxy internal error logs to drop raw messages that may
 // contain internal URLs or tokens.
-func (proxyLogWriter) Write(p []byte) (int, error) {
-	slog.Warn("upstream response failed")
+func (w proxyLogWriter) Write(p []byte) (int, error) {
+	w.logger.Warn("upstream response failed")
 	return len(p), nil
 }

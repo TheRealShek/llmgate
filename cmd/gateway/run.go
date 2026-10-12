@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 
 	"github.com/therealshek/llmgate/internal/gateway"
 	"github.com/therealshek/llmgate/internal/proxy"
+	"github.com/therealshek/llmgate/internal/requestlog"
 )
 
 func run(ctx context.Context) error {
@@ -36,7 +38,7 @@ func run(ctx context.Context) error {
 	// Bound request reads and idle connections without limiting response streams.
 	server := &http.Server{
 		Addr:              cfg.addr,
-		Handler:           handler,
+		Handler:           requestlog.NewHandler(handler, slog.Default()),
 		ReadTimeout:       cfg.readTimeout,
 		ReadHeaderTimeout: cfg.readHeaderTimeout,
 		IdleTimeout:       cfg.idleTimeout,

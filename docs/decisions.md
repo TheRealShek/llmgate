@@ -94,3 +94,27 @@ callback remains when the read returns. Streaming has no total request deadline.
 Client disconnects cancel the upstream request. A backend failure or idle timeout
 after response headers ends the incomplete stream; the gateway cannot replace
 its HTTP status. Do not retry or append a fabricated completion marker.
+
+## Request identity and logs
+
+Generate a fresh, random request ID for every HTTP request, including health
+checks and rejected requests. Return it in `X-Request-ID` and forward it to the
+backend in the same header. Replace caller IDs and discard backend response IDs
+so clients and gateway logs share one identity. Trusting caller IDs would let
+clients reuse IDs or put sensitive text into logs.
+
+Attach the request logger to the incoming context. Request clones retain this
+metadata along with client cancellation. Copy the proxy per request before
+setting its internal error logger, so concurrent requests do not share IDs.
+The transport remains shared.
+
+Log request start and finish, the method, the registered route, and elapsed
+time in milliseconds. A deferred finish log runs when a handler returns or
+panics. `completed` means the handler returned normally; it does not mean the
+backend returned success or the client received every byte. Proxy failure logs
+use the same ID and omit raw error messages. Do not log bodies, authorization,
+raw URLs, query strings, or caller-supplied IDs.
+
+Pass the response writer through unchanged. This preserves flushing and HTTP
+abort behavior without implementing a response-writer wrapper. Status and byte
+count collection are separate work.

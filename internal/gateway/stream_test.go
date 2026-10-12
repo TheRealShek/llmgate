@@ -3,6 +3,7 @@ package gateway
 import (
 	"bufio"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/therealshek/llmgate/internal/proxy"
+	"github.com/therealshek/llmgate/internal/requestlog"
 )
 
 // TestStreamingChatFlush checks chunks arrive before backend completion and outlive the JSON-response deadline.
@@ -39,7 +41,8 @@ func TestStreamingChatFlush(t *testing.T) {
 	t.Cleanup(transport.CloseIdleConnections)
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, 10*time.Millisecond)
 	streaming := proxy.NewStreamingHandler(target, transport, time.Second)
-	gateway := httptest.NewServer(NewHandlerWithBackends(nonStreaming, streaming, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8}))
+	handler := NewHandlerWithBackends(nonStreaming, streaming, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
+	gateway := httptest.NewServer(requestlog.NewHandler(handler, slog.New(slog.NewJSONHandler(io.Discard, nil))))
 	t.Cleanup(gateway.Close)
 	client := gateway.Client()
 	client.Timeout = 5 * time.Second

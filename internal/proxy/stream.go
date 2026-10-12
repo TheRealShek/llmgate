@@ -3,10 +3,13 @@ package proxy
 import (
 	"context"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"time"
+
+	"github.com/therealshek/llmgate/internal/requestlog"
 )
 
 // NewStreamingHandler forwards requests to the validated, non-nil target without a total deadline.
@@ -34,6 +37,7 @@ func (h *streamHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Each request owns its proxy copy and cancellation wrapper; the underlying
 	// transport remains shared. The rewritten request then travels to the backend.
 	forwarder := *h.forwarder
+	forwarder.ErrorLog = log.New(proxyLogWriter{logger: requestlog.Logger(ctx)}, "", 0)
 	forwarder.Transport = &idleTransport{
 		base:        h.forwarder.Transport,
 		cancel:      cancel,

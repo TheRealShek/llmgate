@@ -17,10 +17,12 @@ import (
 	"github.com/therealshek/llmgate/internal/proxy"
 )
 
-// TestChatForwarding checks that validation preserves the original body, optional fields, and backend response.
+// TestChatForwarding checks that validation preserves the original body, optional fields, and
+// backend response.
 func TestChatForwarding(t *testing.T) {
 	for _, stream := range []string{"", `,"stream":false`} {
-		body := ` {"model":"test","messages":[{"role":"user","content":"hello"}],"custom":123` + stream + `} `
+		body := ` {"model":"test","messages":[{"role":"user","content":"hello"}],` +
+			`"custom":123` + stream + `} `
 		upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			got, err := io.ReadAll(r.Body)
 			if err != nil || string(got) != body || r.ContentLength != int64(len(body)) {
@@ -43,12 +45,18 @@ func TestChatForwarding(t *testing.T) {
 	}
 }
 
-// TestChatReadTimeout checks a stalled upload fails within the server deadline without reaching the backend.
+// TestChatReadTimeout checks a stalled upload fails within the server deadline without reaching
+// the backend.
 func TestChatReadTimeout(t *testing.T) {
 	upstream := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("incomplete upload reached upstream")
 	})
-	server := httptest.NewUnstartedServer(NewHandler(upstream, nil, nil, ChatLimits{MaxBodyBytes: 1024}))
+	server := httptest.NewUnstartedServer(NewHandler(
+		upstream,
+		nil,
+		nil,
+		ChatLimits{MaxBodyBytes: 1024},
+	))
 	server.Config.ReadTimeout = 50 * time.Millisecond
 	server.Start()
 	t.Cleanup(server.Close)
@@ -63,7 +71,13 @@ func TestChatReadTimeout(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = fmt.Fprint(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: gateway\r\nContent-Type: application/json\r\nContent-Length: 10\r\n\r\n{")
+	_, err = fmt.Fprint(
+		conn,
+		"POST /v1/chat/completions HTTP/1.1\r\n"+
+			"Host: gateway\r\n"+
+			"Content-Type: application/json\r\n"+
+			"Content-Length: 10\r\n\r\n{",
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,9 +106,19 @@ func TestChatRejections(t *testing.T) {
 		{name: "multiple JSON values", body: `{} {}`, contentType: "application/json", status: 400},
 		{name: "array", body: `[]`, contentType: "application/json", status: 400},
 		{name: "null", body: `null`, contentType: "application/json", status: 400},
-		{name: "invalid stream type", body: `{"stream":"false"}`, contentType: "application/json", status: 400},
+		{
+			name:        "invalid stream type",
+			body:        `{"stream":"false"}`,
+			contentType: "application/json",
+			status:      400,
+		},
 		{name: "null stream", body: `{"stream":null}`, contentType: "application/json", status: 400},
-		{name: "streaming not configured", body: `{"stream":true}`, contentType: "application/json", status: 501},
+		{
+			name:        "streaming not configured",
+			body:        `{"stream":true}`,
+			contentType: "application/json",
+			status:      501,
+		},
 		{name: "too large", body: strings.Repeat("x", 65), contentType: "application/json", status: 413},
 		{name: "missing content type", body: `{}`, status: 415},
 		{name: "wrong content type", body: `{}`, contentType: "text/plain", status: 415},
@@ -124,7 +148,8 @@ func TestChatRejections(t *testing.T) {
 				t.Fatal("rejection did not return a JSON error")
 			}
 
-			if tt.name == "streaming not configured" && !strings.Contains(recorder.Body.String(), "streaming chat is not configured") {
+			if tt.name == "streaming not configured" &&
+				!strings.Contains(recorder.Body.String(), "streaming chat is not configured") {
 				t.Fatalf("missing streaming backend returned an obsolete message: %s", recorder.Body.String())
 			}
 		})
@@ -133,7 +158,9 @@ func TestChatRejections(t *testing.T) {
 
 // TestChatBodyBoundary checks that a body exactly at the byte limit is accepted.
 func TestChatBodyBoundary(t *testing.T) {
-	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 	body := "{}" + strings.Repeat(" ", 62)
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
@@ -152,7 +179,10 @@ func TestChatProxyIntegration(t *testing.T) {
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, err := io.ReadAll(r.Body)
-		if err != nil || string(got) != body || r.Method != http.MethodPost || r.URL.Path != "/api/v1/chat/completions" {
+		if err != nil ||
+			string(got) != body ||
+			r.Method != http.MethodPost ||
+			r.URL.Path != "/api/v1/chat/completions" {
 			t.Errorf("unexpected backend request: %s %s %q %v", r.Method, r.URL.Path, got, err)
 		}
 
@@ -212,7 +242,12 @@ func TestChatCancellation(t *testing.T) {
 
 	t.Cleanup(func() { cancel(); workers.Wait() })
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, gateway.URL+"/v1/chat/completions", strings.NewReader(`{"stream":false}`))
+	request, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		gateway.URL+"/v1/chat/completions",
+		strings.NewReader(`{"stream":false}`),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

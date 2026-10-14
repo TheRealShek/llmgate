@@ -11,7 +11,12 @@ import (
 
 // runServer serves HTTP and, on cancellation, drains requests up to shutdownTimeout.
 // It waits for shutdown and closes overdue connections so process exit has a bounded wait.
-func runServer(ctx context.Context, server *http.Server, listener net.Listener, shutdownTimeout time.Duration) error {
+func runServer(
+	ctx context.Context,
+	server *http.Server,
+	listener net.Listener,
+	shutdownTimeout time.Duration,
+) error {
 	// Let Serve report its result without waiting for the shutdown path to receive it.
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- server.Serve(listener) }()

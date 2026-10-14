@@ -51,17 +51,29 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 
-	cfg.upstreamConnectTimeout, err = envDuration(getenv, "GATEWAY_UPSTREAM_CONNECT_TIMEOUT", cfg.upstreamConnectTimeout)
+	cfg.upstreamConnectTimeout, err = envDuration(
+		getenv,
+		"GATEWAY_UPSTREAM_CONNECT_TIMEOUT",
+		cfg.upstreamConnectTimeout,
+	)
 	if err != nil {
 		return config{}, err
 	}
 
-	cfg.upstreamHeaderTimeout, err = envDuration(getenv, "GATEWAY_UPSTREAM_HEADER_TIMEOUT", cfg.upstreamHeaderTimeout)
+	cfg.upstreamHeaderTimeout, err = envDuration(
+		getenv,
+		"GATEWAY_UPSTREAM_HEADER_TIMEOUT",
+		cfg.upstreamHeaderTimeout,
+	)
 	if err != nil {
 		return config{}, err
 	}
 
-	cfg.streamIdleTimeout, err = envDuration(getenv, "GATEWAY_STREAM_IDLE_TIMEOUT", cfg.streamIdleTimeout)
+	cfg.streamIdleTimeout, err = envDuration(
+		getenv,
+		"GATEWAY_STREAM_IDLE_TIMEOUT",
+		cfg.streamIdleTimeout,
+	)
 	if err != nil {
 		return config{}, err
 	}
@@ -97,7 +109,11 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 
-	cfg.readHeaderTimeout, err = envDuration(getenv, "GATEWAY_READ_HEADER_TIMEOUT", cfg.readHeaderTimeout)
+	cfg.readHeaderTimeout, err = envDuration(
+		getenv,
+		"GATEWAY_READ_HEADER_TIMEOUT",
+		cfg.readHeaderTimeout,
+	)
 	if err != nil {
 		return config{}, err
 	}
@@ -126,8 +142,13 @@ func parseUpstreamURL(raw string) (*url.URL, error) {
 		return nil, fmt.Errorf("validate GATEWAY_UPSTREAM_URL: requires HTTP or HTTPS and a host")
 	}
 
-	if upstream.User != nil || upstream.RawQuery != "" || upstream.ForceQuery || strings.Contains(raw, "#") {
-		return nil, fmt.Errorf("validate GATEWAY_UPSTREAM_URL: credentials, query strings, and fragments are unsupported")
+	if upstream.User != nil ||
+		upstream.RawQuery != "" ||
+		upstream.ForceQuery ||
+		strings.Contains(raw, "#") {
+		return nil, fmt.Errorf(
+			"validate GATEWAY_UPSTREAM_URL: credentials, query strings, and fragments are unsupported",
+		)
 	}
 
 	if port := upstream.Port(); port != "" {
@@ -140,7 +161,11 @@ func parseUpstreamURL(raw string) (*url.URL, error) {
 	return upstream, nil
 }
 
-func envDuration(getenv func(string) string, key string, fallback time.Duration) (time.Duration, error) {
+func envDuration(
+	getenv func(string) string,
+	key string,
+	fallback time.Duration,
+) (time.Duration, error) {
 	val := getenv(key)
 	if val == "" {
 		return fallback, nil

@@ -34,7 +34,8 @@ func TestCreateKeyValidation(t *testing.T) {
 	}
 }
 
-// TestKeyLifecycle proves hash-only persistence, lookup through a new pool, and idempotent revocation.
+// TestKeyLifecycle proves hash-only persistence, lookup through a new pool, and idempotent
+// revocation.
 func TestKeyLifecycle(t *testing.T) {
 	pool := testPool(t)
 	store := NewKeyStore(pool)
@@ -54,13 +55,21 @@ func TestKeyLifecycle(t *testing.T) {
 		t.Fatal("key must contain 32 random bytes in URL-safe encoding")
 	}
 
-	if key.ID <= 0 || key.Name != "alice" || key.RequestsPerMin != 60 || key.TokensPerDay != 10000 || key.CreatedAt.IsZero() {
+	if key.ID <= 0 ||
+		key.Name != "alice" ||
+		key.RequestsPerMin != 60 ||
+		key.TokensPerDay != 10000 ||
+		key.CreatedAt.IsZero() {
 		t.Fatal("stored identity and limits differ from the requested values")
 	}
 
 	var storedHash []byte
 
-	if err := pool.QueryRow(ctx, "SELECT key_hash FROM api_keys WHERE id = $1", key.ID).Scan(&storedHash); err != nil {
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT key_hash FROM api_keys WHERE id = $1",
+		key.ID,
+	).Scan(&storedHash); err != nil {
 		t.Fatal(err)
 	}
 
@@ -95,7 +104,11 @@ func TestKeyLifecycle(t *testing.T) {
 
 	var firstRevocation time.Time
 
-	if err := pool.QueryRow(ctx, "SELECT revoked_at FROM api_keys WHERE id = $1", key.ID).Scan(&firstRevocation); err != nil {
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT revoked_at FROM api_keys WHERE id = $1",
+		key.ID,
+	).Scan(&firstRevocation); err != nil {
 		t.Fatal(err)
 	}
 
@@ -105,7 +118,11 @@ func TestKeyLifecycle(t *testing.T) {
 
 	var secondRevocation time.Time
 
-	if err := pool.QueryRow(ctx, "SELECT revoked_at FROM api_keys WHERE id = $1", key.ID).Scan(&secondRevocation); err != nil {
+	if err := pool.QueryRow(
+		ctx,
+		"SELECT revoked_at FROM api_keys WHERE id = $1",
+		key.ID,
+	).Scan(&secondRevocation); err != nil {
 		t.Fatal(err)
 	}
 
@@ -122,7 +139,8 @@ func TestKeyLifecycle(t *testing.T) {
 	}
 }
 
-// TestKeyStoreCancellation preserves caller cancellation and never returns a secret on failed insertion.
+// TestKeyStoreCancellation preserves caller cancellation and never returns a secret on failed
+// insertion.
 func TestKeyStoreCancellation(t *testing.T) {
 	store := NewKeyStore(testPool(t))
 	ctx, cancel := context.WithCancel(t.Context())
@@ -163,7 +181,8 @@ func TestKeyStoreDatabaseFailure(t *testing.T) {
 		t.Fatal("unavailable storage must fail insertion without returning a key")
 	}
 
-	if _, err := store.LookupKey(t.Context(), "unknown"); err == nil || errors.Is(err, ErrKeyNotFound) {
+	if _, err := store.LookupKey(t.Context(), "unknown"); err == nil ||
+		errors.Is(err, ErrKeyNotFound) {
 		t.Fatal("unavailable storage must not be mistaken for an unknown key")
 	}
 
@@ -226,11 +245,13 @@ func TestConcurrentKeys(t *testing.T) {
 	}
 }
 
-// TestKeySchemaConstraints checks PostgreSQL rejects duplicate hashes and invalid values independently of Go.
+// TestKeySchemaConstraints checks PostgreSQL rejects duplicate hashes and invalid values
+// independently of Go.
 func TestKeySchemaConstraints(t *testing.T) {
 	pool := testPool(t)
 	hash := sha256.Sum256([]byte("schema test key"))
-	query := "INSERT INTO api_keys (key_hash, name, requests_per_min, tokens_per_day) VALUES ($1, $2, $3, $4)"
+	query := "INSERT INTO api_keys (key_hash, name, requests_per_min, tokens_per_day) " +
+		"VALUES ($1, $2, $3, $4)"
 
 	if _, err := pool.Exec(t.Context(), query, hash[:], "alice", 1, 1); err != nil {
 		t.Fatal(err)
@@ -255,7 +276,8 @@ func TestKeySchemaConstraints(t *testing.T) {
 	}
 }
 
-// TestKeyMigrationRollback checks the down migration removes the table and the up migration recreates it.
+// TestKeyMigrationRollback checks the down migration removes the table and the up migration
+// recreates it.
 func TestKeyMigrationRollback(t *testing.T) {
 	pool := testPool(t)
 
@@ -270,7 +292,10 @@ func TestKeyMigrationRollback(t *testing.T) {
 
 	var table *string
 
-	if err := pool.QueryRow(t.Context(), "SELECT to_regclass('api_keys')::text").Scan(&table); err != nil {
+	if err := pool.QueryRow(
+		t.Context(),
+		"SELECT to_regclass('api_keys')::text",
+	).Scan(&table); err != nil {
 		t.Fatal(err)
 	}
 

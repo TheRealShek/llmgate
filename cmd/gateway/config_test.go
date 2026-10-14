@@ -44,7 +44,8 @@ func TestLoadConfigUpstreamURL(t *testing.T) {
 					t.Fatal("loadConfig() expected error, got nil")
 				}
 
-				if !strings.Contains(err.Error(), "GATEWAY_UPSTREAM_URL") || strings.Contains(err.Error(), "secret") {
+				if !strings.Contains(err.Error(), "GATEWAY_UPSTREAM_URL") ||
+					strings.Contains(err.Error(), "secret") {
 					t.Fatalf("error must identify the setting without exposing credentials: %v", err)
 				}
 

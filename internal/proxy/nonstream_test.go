@@ -12,7 +12,8 @@ import (
 	"time"
 )
 
-// TestNonStreamingHandlerForwarding checks target paths, query forwarding, headers, bodies, and backend statuses.
+// TestNonStreamingHandlerForwarding checks target paths, query forwarding, headers, bodies, and
+// backend statuses.
 func TestNonStreamingHandlerForwarding(t *testing.T) {
 	for _, status := range []int{http.StatusOK, http.StatusServiceUnavailable} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -49,14 +50,22 @@ func TestNonStreamingHandlerForwarding(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			NewNonStreamingHandler(target, transport, time.Second).ServeHTTP(recorder, request)
 
-			if recorder.Code != status || recorder.Body.String() != `{"data":[]}` || recorder.Header().Get("Content-Type") != "application/json" {
-				t.Fatalf("unexpected proxy response: %d %s %s", recorder.Code, recorder.Header(), recorder.Body.String())
+			if recorder.Code != status ||
+				recorder.Body.String() != `{"data":[]}` ||
+				recorder.Header().Get("Content-Type") != "application/json" {
+				t.Fatalf(
+					"unexpected proxy response: %d %s %s",
+					recorder.Code,
+					recorder.Header(),
+					recorder.Body.String(),
+				)
 			}
 		})
 	}
 }
 
-// TestNonStreamingHandlerResponseBodyDeadline checks that a backend cannot stall indefinitely after sending headers.
+// TestNonStreamingHandlerResponseBodyDeadline checks that a backend cannot stall indefinitely
+// after sending headers.
 func TestNonStreamingHandlerResponseBodyDeadline(t *testing.T) {
 	stopped := make(chan struct{})
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +106,8 @@ func TestNonStreamingHandlerResponseBodyDeadline(t *testing.T) {
 	}
 }
 
-// TestNonStreamingHandlerConnectionFailure checks that an unreachable backend returns a safe gateway error.
+// TestNonStreamingHandlerConnectionFailure checks that an unreachable backend returns a safe
+// gateway error.
 func TestNonStreamingHandlerConnectionFailure(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 
@@ -112,14 +122,21 @@ func TestNonStreamingHandlerConnectionFailure(t *testing.T) {
 	defer transport.CloseIdleConnections()
 
 	recorder := httptest.NewRecorder()
-	NewNonStreamingHandler(target, transport, time.Second).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	NewNonStreamingHandler(
+		target,
+		transport,
+		time.Second,
+	).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
 
-	if recorder.Code != http.StatusBadGateway || recorder.Body.String() != "{\"error\":{\"message\":\"upstream request failed\",\"type\":\"server_error\",\"code\":\"upstream_error\"}}\n" {
+	wantBody := "{\"error\":{\"message\":\"upstream request failed\"," +
+		"\"type\":\"server_error\",\"code\":\"upstream_error\"}}\n"
+	if recorder.Code != http.StatusBadGateway || recorder.Body.String() != wantBody {
 		t.Fatalf("unexpected connection failure response: %d %s", recorder.Code, recorder.Body.String())
 	}
 }
 
-// TestNonStreamingHandlerCancellation checks that client cancellation and a gateway deadline both stop upstream work.
+// TestNonStreamingHandlerCancellation checks that client cancellation and a gateway deadline
+// both stop upstream work.
 func TestNonStreamingHandlerCancellation(t *testing.T) {
 	for _, clientCancel := range []bool{true, false} {
 		name := "gateway deadline"

@@ -15,7 +15,11 @@ import (
 // NewStreamingHandler forwards requests to the validated, non-nil target without a total deadline.
 // transport is caller-owned and must bound connection establishment and response-header waits.
 // idleTimeout bounds each wait for more upstream body bytes.
-func NewStreamingHandler(target *url.URL, transport http.RoundTripper, idleTimeout time.Duration) http.Handler {
+func NewStreamingHandler(
+	target *url.URL,
+	transport http.RoundTripper,
+	idleTimeout time.Duration,
+) http.Handler {
 	forwarder := newForwarder(target, transport)
 	// ReverseProxy copies backend body bytes to the client. Immediate flushing lets
 	// the client receive each copied chunk while backend generation is still running.

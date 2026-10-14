@@ -20,7 +20,11 @@ type readinessHandler struct {
 // NewReadinessHandler probes target's health endpoint on each readiness request.
 // target must be a validated, non-nil backend base URL. The caller owns transport.
 // timeout bounds the probe; only HTTP 200 means the backend is ready.
-func NewReadinessHandler(target *url.URL, transport http.RoundTripper, timeout time.Duration) http.Handler {
+func NewReadinessHandler(
+	target *url.URL,
+	transport http.RoundTripper,
+	timeout time.Duration,
+) http.Handler {
 	return &readinessHandler{
 		healthURL: target.JoinPath("health").String(),
 		client: &http.Client{

@@ -18,9 +18,15 @@ import (
 	"github.com/therealshek/llmgate/internal/requestlog"
 )
 
-// TestReadinessStatus checks backend health statuses, base paths, identity, and isolation from client inputs.
+// TestReadinessStatus checks backend health statuses, base paths, identity, and isolation from
+// client inputs.
 func TestReadinessStatus(t *testing.T) {
-	for _, status := range []int{http.StatusOK, http.StatusServiceUnavailable, http.StatusInternalServerError, http.StatusNoContent} {
+	for _, status := range []int{
+		http.StatusOK,
+		http.StatusServiceUnavailable,
+		http.StatusInternalServerError,
+		http.StatusNoContent,
+	} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			upstreamIDs := make(chan string, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -54,7 +60,11 @@ func TestReadinessStatus(t *testing.T) {
 			readiness := backend.NewReadinessHandler(target, transport, time.Second)
 			routes := gateway.NewHandler(nil, nil, readiness, gateway.ChatLimits{})
 			handler := requestlog.NewHandler(routes, slog.New(slog.NewJSONHandler(io.Discard, nil)))
-			request := httptest.NewRequest(http.MethodGet, "/v1/readyz?token=client-secret", strings.NewReader("client-secret"))
+			request := httptest.NewRequest(
+				http.MethodGet,
+				"/v1/readyz?token=client-secret",
+				strings.NewReader("client-secret"),
+			)
 			request.Header.Set("Authorization", "Bearer client-secret")
 			request.Header.Set("Cookie", "client-secret")
 
@@ -72,10 +82,15 @@ func TestReadinessStatus(t *testing.T) {
 
 			upstreamID := <-upstreamIDs
 			if upstreamID == "" || upstreamID != response.Header().Get("X-Request-ID") {
-				t.Fatalf("probe and client IDs differ: %q %q", upstreamID, response.Header().Get("X-Request-ID"))
+				t.Fatalf(
+					"probe and client IDs differ: %q %q",
+					upstreamID,
+					response.Header().Get("X-Request-ID"),
+				)
 			}
 
-			if response.Header().Get("Set-Cookie") != "" || strings.Contains(response.Body.String(), "secret") {
+			if response.Header().Get("Set-Cookie") != "" ||
+				strings.Contains(response.Body.String(), "secret") {
 				t.Fatal("readiness forwarded backend headers or body")
 			}
 
@@ -83,7 +98,8 @@ func TestReadinessStatus(t *testing.T) {
 				t.Fatalf("healthy response = %q", response.Body.String())
 			}
 
-			if want == http.StatusServiceUnavailable && !strings.Contains(response.Body.String(), `"code":"backend_not_ready"`) {
+			if want == http.StatusServiceUnavailable &&
+				!strings.Contains(response.Body.String(), `"code":"backend_not_ready"`) {
 				t.Fatalf("missing readiness error code: %s", response.Body.String())
 			}
 
@@ -97,7 +113,8 @@ func TestReadinessStatus(t *testing.T) {
 	}
 }
 
-// TestReadinessCleanup checks probe deadlines, client cancellation, and early body closure release backend work.
+// TestReadinessCleanup checks probe deadlines, client cancellation, and early body closure
+// release backend work.
 func TestReadinessCleanup(t *testing.T) {
 	for _, mode := range []string{"deadline", "client cancellation", "stalled response body"} {
 		t.Run(mode, func(t *testing.T) {
@@ -143,7 +160,10 @@ func TestReadinessCleanup(t *testing.T) {
 			response := httptest.NewRecorder()
 
 			workers.Go(func() {
-				handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/readyz", nil).WithContext(ctx))
+				handler.ServeHTTP(
+					response,
+					httptest.NewRequest(http.MethodGet, "/v1/readyz", nil).WithContext(ctx),
+				)
 				close(done)
 			})
 
@@ -177,7 +197,8 @@ func TestReadinessCleanup(t *testing.T) {
 	}
 }
 
-// TestReadinessRedirect checks an alternate server cannot make an unhealthy configured backend appear ready.
+// TestReadinessRedirect checks an alternate server cannot make an unhealthy configured backend
+// appear ready.
 func TestReadinessRedirect(t *testing.T) {
 	var followed atomic.Int32
 
@@ -201,14 +222,19 @@ func TestReadinessRedirect(t *testing.T) {
 	t.Cleanup(transport.CloseIdleConnections)
 
 	response := httptest.NewRecorder()
-	backend.NewReadinessHandler(target, transport, time.Second).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/readyz", nil))
+	backend.NewReadinessHandler(
+		target,
+		transport,
+		time.Second,
+	).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/readyz", nil))
 
 	if response.Code != http.StatusServiceUnavailable || followed.Load() != 0 {
 		t.Fatalf("redirect status = %d, alternate requests = %d", response.Code, followed.Load())
 	}
 }
 
-// TestReadinessConnectionFailure checks an unreachable backend produces a fixed 503 without exposing its URL.
+// TestReadinessConnectionFailure checks an unreachable backend produces a fixed 503 without
+// exposing its URL.
 func TestReadinessConnectionFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 
@@ -223,9 +249,14 @@ func TestReadinessConnectionFailure(t *testing.T) {
 	t.Cleanup(transport.CloseIdleConnections)
 
 	response := httptest.NewRecorder()
-	backend.NewReadinessHandler(target, transport, time.Second).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/readyz", nil))
+	backend.NewReadinessHandler(
+		target,
+		transport,
+		time.Second,
+	).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/readyz", nil))
 
-	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), server.URL) {
+	if response.Code != http.StatusServiceUnavailable ||
+		strings.Contains(response.Body.String(), server.URL) {
 		t.Fatalf("unexpected connection failure response: %d %s", response.Code, response.Body.String())
 	}
 }

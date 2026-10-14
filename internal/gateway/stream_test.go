@@ -15,7 +15,8 @@ import (
 	"github.com/therealshek/llmgate/internal/requestlog"
 )
 
-// TestStreamingChatFlush checks chunks arrive before backend completion and outlive the JSON-response deadline.
+// TestStreamingChatFlush checks chunks arrive before backend completion and outlive the
+// JSON-response deadline.
 func TestStreamingChatFlush(t *testing.T) {
 	release := make(chan struct{})
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,12 +47,19 @@ func TestStreamingChatFlush(t *testing.T) {
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, 10*time.Millisecond)
 	streaming := proxy.NewStreamingHandler(target, transport, time.Second)
 	handler := NewHandler(nonStreaming, streaming, nil, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
-	gateway := httptest.NewServer(requestlog.NewHandler(handler, slog.New(slog.NewJSONHandler(io.Discard, nil))))
+	gateway := httptest.NewServer(requestlog.NewHandler(
+		handler,
+		slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	))
 	t.Cleanup(gateway.Close)
 	client := gateway.Client()
 	client.Timeout = 5 * time.Second
 
-	response, err := client.Post(gateway.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"stream":true}`))
+	response, err := client.Post(
+		gateway.URL+"/v1/chat/completions",
+		"application/json",
+		strings.NewReader(`{"stream":true}`),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +68,9 @@ func TestStreamingChatFlush(t *testing.T) {
 	reader := bufio.NewReader(response.Body)
 
 	first, err := reader.ReadString('\n')
-	if err != nil || first != "data: first\n" || response.Header.Get("Content-Type") != "text/event-stream" {
+	if err != nil ||
+		first != "data: first\n" ||
+		response.Header.Get("Content-Type") != "text/event-stream" {
 		t.Fatalf("first chunk did not arrive while backend was blocked: %q %v", first, err)
 	}
 
@@ -76,7 +86,8 @@ func TestStreamingChatFlush(t *testing.T) {
 	}
 }
 
-// TestStreamingChatContinuousChunks checks new bytes reset the idle wait throughout a longer stream.
+// TestStreamingChatContinuousChunks checks new bytes reset the idle wait throughout a longer
+// stream.
 func TestStreamingChatContinuousChunks(t *testing.T) {
 	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -101,7 +112,11 @@ func TestStreamingChatContinuousChunks(t *testing.T) {
 	})
 	gateway := newStreamingTestGateway(t, backend, time.Second, 300*time.Millisecond)
 
-	response, err := gateway.Client().Post(gateway.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"stream":true}`))
+	response, err := gateway.Client().Post(
+		gateway.URL+"/v1/chat/completions",
+		"application/json",
+		strings.NewReader(`{"stream":true}`),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +128,8 @@ func TestStreamingChatContinuousChunks(t *testing.T) {
 	}
 }
 
-// TestStreamingChatFailures checks header deadlines, idle gaps, and client disconnects stop backend work.
+// TestStreamingChatFailures checks header deadlines, idle gaps, and client disconnects stop
+// backend work.
 func TestStreamingChatFailures(t *testing.T) {
 	for _, mode := range []string{"header timeout", "idle timeout", "client disconnect"} {
 		t.Run(mode, func(t *testing.T) {
@@ -142,7 +158,11 @@ func TestStreamingChatFailures(t *testing.T) {
 
 			gateway := newStreamingTestGateway(t, backend, headerTimeout, idleTimeout)
 
-			response, err := gateway.Client().Post(gateway.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"stream":true}`))
+			response, err := gateway.Client().Post(
+				gateway.URL+"/v1/chat/completions",
+				"application/json",
+				strings.NewReader(`{"stream":true}`),
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -174,7 +194,8 @@ func TestStreamingChatFailures(t *testing.T) {
 	}
 }
 
-// TestStreamingChatCancellationIsolation checks one disconnected stream cannot cancel a concurrent stream.
+// TestStreamingChatCancellationIsolation checks one disconnected stream cannot cancel a
+// concurrent stream.
 func TestStreamingChatCancellationIsolation(t *testing.T) {
 	aStopped := make(chan struct{})
 	bRelease := make(chan struct{})
@@ -200,20 +221,29 @@ func TestStreamingChatCancellationIsolation(t *testing.T) {
 	})
 	gateway := newStreamingTestGateway(t, backend, time.Second, time.Second)
 
-	a, err := gateway.Client().Post(gateway.URL+"/v1/chat/completions?id=A", "application/json", strings.NewReader(`{"stream":true}`))
+	a, err := gateway.Client().Post(
+		gateway.URL+"/v1/chat/completions?id=A",
+		"application/json",
+		strings.NewReader(`{"stream":true}`),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer a.Body.Close()
 
-	b, err := gateway.Client().Post(gateway.URL+"/v1/chat/completions?id=B", "application/json", strings.NewReader(`{"stream":true}`))
+	b, err := gateway.Client().Post(
+		gateway.URL+"/v1/chat/completions?id=B",
+		"application/json",
+		strings.NewReader(`{"stream":true}`),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer b.Body.Close()
 
 	for _, response := range []*http.Response{a, b} {
-		if first, err := bufio.NewReader(response.Body).ReadString('\n'); err != nil || first != "data: first\n" {
+		if first, err := bufio.NewReader(response.Body).ReadString('\n'); err != nil ||
+			first != "data: first\n" {
 			t.Fatalf("concurrent first chunk = %q, error %v", first, err)
 		}
 	}
@@ -234,7 +264,11 @@ func TestStreamingChatCancellationIsolation(t *testing.T) {
 	}
 }
 
-func newStreamingTestGateway(t *testing.T, backendHandler http.Handler, headerTimeout, idleTimeout time.Duration) *httptest.Server {
+func newStreamingTestGateway(
+	t *testing.T,
+	backendHandler http.Handler,
+	headerTimeout, idleTimeout time.Duration,
+) *httptest.Server {
 	t.Helper()
 
 	backend := httptest.NewServer(backendHandler)
@@ -250,7 +284,12 @@ func newStreamingTestGateway(t *testing.T, backendHandler http.Handler, headerTi
 	t.Cleanup(transport.CloseIdleConnections)
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, 10*time.Millisecond)
 	streaming := proxy.NewStreamingHandler(target, transport, idleTimeout)
-	gateway := httptest.NewServer(NewHandler(nonStreaming, streaming, nil, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8}))
+	gateway := httptest.NewServer(NewHandler(
+		nonStreaming,
+		streaming,
+		nil,
+		ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+	))
 	t.Cleanup(gateway.Close)
 	gateway.Client().Timeout = 5 * time.Second
 

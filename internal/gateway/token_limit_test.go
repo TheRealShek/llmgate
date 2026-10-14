@@ -52,7 +52,8 @@ func TestChatTokenLimit(t *testing.T) {
 	}
 }
 
-// TestChatTokenLimitOmitted checks default insertion preserves existing JSON bytes and updates body length.
+// TestChatTokenLimitOmitted checks default insertion preserves existing JSON bytes and updates
+// body length.
 func TestChatTokenLimitOmitted(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -70,13 +71,23 @@ func TestChatTokenLimitOmitted(t *testing.T) {
 			upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				got, err := io.ReadAll(r.Body)
 				if err != nil || string(got) != tt.want || r.ContentLength != int64(len(tt.want)) {
-					t.Errorf("default token request = %q, length %d, error %v; want %q", got, r.ContentLength, err, tt.want)
+					t.Errorf(
+						"default token request = %q, length %d, error %v; want %q",
+						got,
+						r.ContentLength,
+						err,
+						tt.want,
+					)
 				}
 
 				w.WriteHeader(http.StatusNoContent)
 			})
 			handler := NewHandler(upstream, nil, nil, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
-			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tt.body))
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/v1/chat/completions",
+				strings.NewReader(tt.body),
+			)
 			request.Header.Set("Content-Type", "application/json")
 
 			recorder := httptest.NewRecorder()

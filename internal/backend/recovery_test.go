@@ -12,7 +12,8 @@ import (
 	"github.com/therealshek/llmgate/internal/backend"
 )
 
-// TestReadinessRecovery checks concurrent probes observe backend recovery and later failure without cached state.
+// TestReadinessRecovery checks concurrent probes observe backend recovery and later failure
+// without cached state.
 func TestReadinessRecovery(t *testing.T) {
 	var (
 		status atomic.Int32
@@ -34,7 +35,11 @@ func TestReadinessRecovery(t *testing.T) {
 	t.Cleanup(transport.CloseIdleConnections)
 	handler := backend.NewReadinessHandler(target, transport, time.Second)
 
-	for _, expected := range []int{http.StatusServiceUnavailable, http.StatusOK, http.StatusServiceUnavailable} {
+	for _, expected := range []int{
+		http.StatusServiceUnavailable,
+		http.StatusOK,
+		http.StatusServiceUnavailable,
+	} {
 		status.Store(int32(expected))
 
 		var workers sync.WaitGroup

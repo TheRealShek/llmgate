@@ -18,18 +18,73 @@ func TestHandler(t *testing.T) {
 		status int
 	}{
 		{name: "healthy", method: http.MethodGet, path: "/v1/healthz", status: http.StatusOK},
-		{name: "unsupported method", method: http.MethodPost, path: "/v1/healthz", status: http.StatusMethodNotAllowed},
+		{
+			name:   "unsupported method",
+			method: http.MethodPost,
+			path:   "/v1/healthz",
+			status: http.StatusMethodNotAllowed,
+		},
 		{name: "unknown route", method: http.MethodGet, path: "/missing", status: http.StatusNotFound},
-		{name: "health path suffix", method: http.MethodGet, path: "/v1/healthz/extra", status: http.StatusNotFound},
-		{name: "unversioned health", method: http.MethodGet, path: "/healthz", status: http.StatusNotFound},
-		{name: "unversioned models", method: http.MethodGet, path: "/models", status: http.StatusNotFound},
-		{name: "unsupported API version", method: http.MethodGet, path: "/v2/healthz", status: http.StatusNotFound},
-		{name: "no backend", method: http.MethodGet, path: "/v1/models", status: http.StatusServiceUnavailable},
-		{name: "readiness without backend", method: http.MethodGet, path: "/v1/readyz", status: http.StatusServiceUnavailable},
-		{name: "readiness unsupported method", method: http.MethodPost, path: "/v1/readyz", status: http.StatusMethodNotAllowed},
-		{name: "unversioned readiness", method: http.MethodGet, path: "/readyz", status: http.StatusNotFound},
-		{name: "chat without backend", method: http.MethodPost, path: "/v1/chat/completions", status: http.StatusServiceUnavailable},
-		{name: "models unsupported method", method: http.MethodPost, path: "/v1/models", status: http.StatusMethodNotAllowed},
+		{
+			name:   "health path suffix",
+			method: http.MethodGet,
+			path:   "/v1/healthz/extra",
+			status: http.StatusNotFound,
+		},
+		{
+			name:   "unversioned health",
+			method: http.MethodGet,
+			path:   "/healthz",
+			status: http.StatusNotFound,
+		},
+		{
+			name:   "unversioned models",
+			method: http.MethodGet,
+			path:   "/models",
+			status: http.StatusNotFound,
+		},
+		{
+			name:   "unsupported API version",
+			method: http.MethodGet,
+			path:   "/v2/healthz",
+			status: http.StatusNotFound,
+		},
+		{
+			name:   "no backend",
+			method: http.MethodGet,
+			path:   "/v1/models",
+			status: http.StatusServiceUnavailable,
+		},
+		{
+			name:   "readiness without backend",
+			method: http.MethodGet,
+			path:   "/v1/readyz",
+			status: http.StatusServiceUnavailable,
+		},
+		{
+			name:   "readiness unsupported method",
+			method: http.MethodPost,
+			path:   "/v1/readyz",
+			status: http.StatusMethodNotAllowed,
+		},
+		{
+			name:   "unversioned readiness",
+			method: http.MethodGet,
+			path:   "/readyz",
+			status: http.StatusNotFound,
+		},
+		{
+			name:   "chat without backend",
+			method: http.MethodPost,
+			path:   "/v1/chat/completions",
+			status: http.StatusServiceUnavailable,
+		},
+		{
+			name:   "models unsupported method",
+			method: http.MethodPost,
+			path:   "/v1/models",
+			status: http.StatusMethodNotAllowed,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -46,7 +101,8 @@ func TestHandler(t *testing.T) {
 					t.Errorf("body = %q, want %q", body, "ok\n")
 				}
 
-				if contentType := recorder.Header().Get("Content-Type"); contentType != "text/plain; charset=utf-8" {
+				contentType := recorder.Header().Get("Content-Type")
+				if contentType != "text/plain; charset=utf-8" {
 					t.Errorf("Content-Type = %q, want text/plain; charset=utf-8", contentType)
 				}
 			}

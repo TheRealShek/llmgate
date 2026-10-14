@@ -20,7 +20,8 @@ import (
 	"github.com/therealshek/llmgate/internal/requestlog"
 )
 
-// TestRequestIdentity checks concurrent routes and proxy failures keep separate IDs without logging caller secrets.
+// TestRequestIdentity checks concurrent routes and proxy failures keep separate IDs without
+// logging caller secrets.
 func TestRequestIdentity(t *testing.T) {
 	var logs bytes.Buffer
 
@@ -28,8 +29,17 @@ func TestRequestIdentity(t *testing.T) {
 	transport := transportFunc(func(r *http.Request) (*http.Response, error) {
 		return nil, errors.New("transport-secret")
 	})
-	forwarder := proxy.NewNonStreamingHandler(&url.URL{Scheme: "http", Host: "backend.example"}, transport, time.Second)
-	routes := gateway.NewHandler(forwarder, nil, nil, gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
+	forwarder := proxy.NewNonStreamingHandler(
+		&url.URL{Scheme: "http", Host: "backend.example"},
+		transport,
+		time.Second,
+	)
+	routes := gateway.NewHandler(
+		forwarder,
+		nil,
+		nil,
+		gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+	)
 	handler := requestlog.NewHandler(routes, logger)
 	paths := []string{"/v1/healthz", "/v1/models", "/missing/private-secret?token=query-secret"}
 
@@ -79,7 +89,14 @@ func TestRequestIdentity(t *testing.T) {
 		seen[got.id] = got.logCount
 	}
 
-	for _, secret := range []string{"prompt-secret", "caller-secret", "key-secret", "query-secret", "private-secret", "transport-secret"} {
+	for _, secret := range []string{
+		"prompt-secret",
+		"caller-secret",
+		"key-secret",
+		"query-secret",
+		"private-secret",
+		"transport-secret",
+	} {
 		if strings.Contains(logs.String(), secret) {
 			t.Fatalf("logs exposed %q", secret)
 		}
@@ -126,7 +143,8 @@ type brokenBody struct{}
 func (brokenBody) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
 func (brokenBody) Close() error             { return nil }
 
-// TestProxyRequestLogs checks forwarded IDs, flushing, and safe correlated logs for both proxy failure paths.
+// TestProxyRequestLogs checks forwarded IDs, flushing, and safe correlated logs for both proxy
+// failure paths.
 func TestProxyRequestLogs(t *testing.T) {
 	for _, mode := range []string{"JSON", "stream", "transport failure", "body failure"} {
 		t.Run(mode, func(t *testing.T) {
@@ -219,7 +237,8 @@ func TestProxyRequestLogs(t *testing.T) {
 	}
 }
 
-// TestAbortedRequest checks logging preserves cancellation, the original writer, and HTTP abort panics.
+// TestAbortedRequest checks logging preserves cancellation, the original writer, and HTTP abort
+// panics.
 func TestAbortedRequest(t *testing.T) {
 	var logs bytes.Buffer
 
@@ -244,7 +263,10 @@ func TestAbortedRequest(t *testing.T) {
 			}
 		}()
 
-		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/models", nil).WithContext(ctx))
+		handler.ServeHTTP(
+			response,
+			httptest.NewRequest(http.MethodGet, "/v1/models", nil).WithContext(ctx),
+		)
 	}()
 
 	if !strings.Contains(logs.String(), `"completed":false`) {

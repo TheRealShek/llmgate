@@ -25,7 +25,13 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// The OpenAI chat completions API requires JSON payloads.
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" {
-		writeChatError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json", "unsupported_media_type")
+		writeChatError(
+			w,
+			http.StatusUnsupportedMediaType,
+			"Content-Type must be application/json",
+			"unsupported_media_type",
+		)
+
 		return
 	}
 
@@ -37,7 +43,12 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			writeChatError(w, http.StatusRequestEntityTooLarge, "request body exceeds the size limit", "body_too_large")
+			writeChatError(
+				w,
+				http.StatusRequestEntityTooLarge,
+				"request body exceeds the size limit",
+				"body_too_large",
+			)
 		} else {
 			writeChatError(w, http.StatusBadRequest, "could not read request body", "invalid_body")
 		}
@@ -48,7 +59,13 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Check whether the client requested streaming or a single JSON response.
 	options, err := parseChatRequest(body)
 	if err != nil {
-		writeChatError(w, http.StatusBadRequest, "request must be a JSON object with a boolean stream field when present", "invalid_json")
+		writeChatError(
+			w,
+			http.StatusBadRequest,
+			"request must be a JSON object with a boolean stream field when present",
+			"invalid_json",
+		)
+
 		return
 	}
 
@@ -72,7 +89,13 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// before the buffered request reaches the proxy.
 	body, err = limitChatTokens(body, options.fields, h.maxTokens)
 	if err != nil {
-		writeChatError(w, http.StatusBadRequest, "max_tokens must be a positive integer within the configured limit", "invalid_max_tokens")
+		writeChatError(
+			w,
+			http.StatusBadRequest,
+			"max_tokens must be a positive integer within the configured limit",
+			"invalid_max_tokens",
+		)
+
 		return
 	}
 

@@ -10,10 +10,15 @@ import (
 	"github.com/therealshek/llmgate/internal/requestlog"
 )
 
-// NewNonStreamingHandler forwards non-streaming requests to target, a validated, non-nil backend URL.
+// NewNonStreamingHandler forwards non-streaming requests to target, a validated, non-nil backend
+// URL.
 // transport sends upstream HTTP requests and is owned by the caller.
 // totalTimeout bounds the entire upstream request, including reading the response body.
-func NewNonStreamingHandler(target *url.URL, transport http.RoundTripper, totalTimeout time.Duration) http.Handler {
+func NewNonStreamingHandler(
+	target *url.URL,
+	transport http.RoundTripper,
+	totalTimeout time.Duration,
+) http.Handler {
 	forwarder := newForwarder(target, transport)
 
 	// Wrap forwarder so each request receives an upstream timeout context before ServeHTTP runs.

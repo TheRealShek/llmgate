@@ -11,7 +11,11 @@ import (
 
 // TestWriteError checks error statuses, the JSON envelope, and escaping of message text.
 func TestWriteError(t *testing.T) {
-	for _, status := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+	for _, status := range []int{
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout,
+	} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			detail := Error{
 				Message: "backend said \"unavailable\"\ntry again",
@@ -39,7 +43,9 @@ func TestWriteError(t *testing.T) {
 				t.Fatalf("response is not valid JSON: %v", err)
 			}
 
-			if body.Error.Message != detail.Message || body.Error.Type != detail.Type || body.Error.Code != detail.Code {
+			if body.Error.Message != detail.Message ||
+				body.Error.Type != detail.Type ||
+				body.Error.Code != detail.Code {
 				t.Fatalf("error response did not preserve fields: %+v", body)
 			}
 		})
@@ -54,11 +60,16 @@ func (failedWriter) Write([]byte) (int, error) {
 	return 0, io.ErrClosedPipe
 }
 
-// TestWriteErrorFailure checks that a response-write failure reaches the caller without a second status.
+// TestWriteErrorFailure checks that a response-write failure reaches the caller without a second
+// status.
 func TestWriteErrorFailure(t *testing.T) {
 	w := failedWriter{httptest.NewRecorder()}
 
-	err := WriteError(w, http.StatusServiceUnavailable, Error{Message: "no backend configured", Type: "server_error", Code: "no_backend"})
+	err := WriteError(
+		w,
+		http.StatusServiceUnavailable,
+		Error{Message: "no backend configured", Type: "server_error", Code: "no_backend"},
+	)
 	if !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("write error = %v, want closed pipe", err)
 	}

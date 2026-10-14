@@ -18,7 +18,7 @@ The goal is a portfolio project that shows I can own the serving layer of an inf
 | Part          | Choice                                                             | Why                                                 |
 | ------------- | ------------------------------------------------------------------ | --------------------------------------------------- |
 | Language      | Go, standard library `net/http`, optional `chi`                    | Goroutines and `context` fit long-lived streams     |
-| Model backend | llama.cpp server with a small GGUF model (Qwen2.5 1.5B or similar) | Runs on CPU, no GPU needed                          |
+| Model backend | llama.cpp server with GLM-Edge-4B-Chat Q6_K GGUF                 | Runs on CPU, no GPU needed                          |
 | Storage       | Postgres                                                           | API keys and usage records                          |
 | Shared state  | Redis                                                              | Rate limit counters shared across gateway instances |
 | Metrics       | Prometheus and Grafana                                             | Standard, and interviewers know it                  |

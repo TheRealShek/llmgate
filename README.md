@@ -8,13 +8,15 @@ request validation, cancellation, and deadlines.
 Phase 1 is in progress. Health checks, model listing, JSON and streaming chat,
 and request IDs with structured logs work today. Authentication, rate limits,
 usage tracking, metrics, and Docker Compose are still planned. An initial
-[single-stream baseline](docs/benchmarks.md) records 100 sequential requests
-against a real llama.cpp backend, split between direct and gateway paths.
+[historical Qwen single-stream baseline](docs/benchmarks.md) records 100 sequential
+requests split between direct and gateway paths. GLM-Edge-4B-Chat Q6_K is now
+the primary model; its performance baseline has not been recorded yet.
 
 ## Run locally
 
-Use Go 1.27 or later and an already-running OpenAI-compatible backend. Set the
-backend's base URL without the `/v1` suffix:
+Use Go 1.27 or later. Follow the [GLM setup and testing guide](docs/manual-testing.md)
+to start llama.cpp with the downloaded GLM-Edge-4B-Chat Q6_K file and the alias
+`glm-edge-4b-chat`. Set the backend's base URL without the `/v1` suffix:
 
 ```sh
 GATEWAY_UPSTREAM_URL=http://127.0.0.1:8081 go run ./cmd/gateway
@@ -27,15 +29,15 @@ curl http://localhost:8080/v1/healthz
 curl http://localhost:8080/v1/readyz
 curl http://localhost:8080/v1/models
 
-# Replace MODEL_ID with an ID returned by /v1/models.
+# The documented backend starts with the alias glm-edge-4b-chat.
 curl http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"MODEL_ID","messages":[{"role":"user","content":"Hello"}],"stream":false}'
+  -d '{"model":"glm-edge-4b-chat","messages":[{"role":"user","content":"Hello"}],"stream":false}'
 
 # Stream tokens as the backend generates them.
 curl -N http://localhost:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"MODEL_ID","messages":[{"role":"user","content":"Hello"}],"stream":true}'
+  -d '{"model":"glm-edge-4b-chat","messages":[{"role":"user","content":"Hello"}],"stream":true}'
 ```
 
 Without `GATEWAY_UPSTREAM_URL`, the process still starts. Health returns `200`,

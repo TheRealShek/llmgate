@@ -1,25 +1,52 @@
-# Manual testing with llama.cpp
+# Manual testing with GLM and llama.cpp
 
-These commands reproduce the Phase 1 checks from our October 14, 2026 session.
-Use three terminals so backend logs, gateway logs, and client output stay visible.
+GLM-Edge-4B-Chat Q6_K is the primary model. These commands run the Phase 1
+checks through llama.cpp and the gateway. Use three terminals so backend logs,
+gateway logs, and client output stay visible. Historical evidence below is
+explicitly labeled with the model used at the time.
 
 The backend listens on host port 8081. The gateway listens on port 8080.
 Both host ports are bound to localhost.
 
-## 1. Start the backend in terminal one
+## 1. Prepare the model and start the backend in terminal one
 
-Docker is installed on the test machine, but the session could not access its
-socket without sudo. The first run downloads the image and model. The named
-volume keeps the model after the container exits.
+The model is already downloaded on this machine at
+`~/.cache/llmgate/models/glm-edge-4b-chat/ggml-model-Q6_K.gguf`.
+The download is 3,554,369,472 bytes. Its source revision and SHA-256 are also
+recorded alongside it in `download.json`.
+
+On a fresh machine, download the same official file:
+
+```sh
+mkdir -p "$HOME/.cache/llmgate/models/glm-edge-4b-chat"
+
+curl --fail --location --retry 3 --continue-at - \
+  --output "$HOME/.cache/llmgate/models/glm-edge-4b-chat/ggml-model-Q6_K.gguf" \
+  'https://huggingface.co/zai-org/glm-edge-4b-chat-gguf/resolve/e168d9e95cf9af8bfbe54e04df7123516a51415d/ggml-model-Q6_K.gguf'
+```
+
+Before starting the backend, verify the file. This check also works for the
+copy already downloaded on this machine:
+
+```sh
+printf '%s  %s\n' \
+  'd8e83d4f9b6c6c89214d5c1dd17355d44be99173c15efa846d31ce01d1bda1f3' \
+  "$HOME/.cache/llmgate/models/glm-edge-4b-chat/ggml-model-Q6_K.gguf" \
+  | sha256sum --check
+```
+
+Continue only when the checksum reports `OK`. Start the backend with a read-only
+mount of the model directory. Stop any existing backend on host port 8081 first.
+Docker requires sudo in this session.
 
 ```sh
 sudo docker run --rm --init \
-  --name llmgate-backend \
+  --name llmgate-glm-test \
   -p 127.0.0.1:8081:8080 \
-  -v llmgate-model-cache:/models \
-  -e LLAMA_CACHE=/models \
+  -v "$HOME/.cache/llmgate/models/glm-edge-4b-chat:/models:ro" \
   ghcr.io/ggml-org/llama.cpp:server \
-  -hf Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M \
+  --model /models/ggml-model-Q6_K.gguf \
+  --alias glm-edge-4b-chat \
   --host 0.0.0.0 \
   --port 8080 \
   --ctx-size 2048 \
@@ -32,7 +59,7 @@ maps it to host port 8081. The image's `server` tag can change between runs.
 This guide is a functional check, not a version-pinned benchmark.
 
 References: [llama.cpp Docker instructions](https://github.com/ggml-org/llama.cpp/blob/master/docs/docker.md)
-and [the Qwen model](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF).
+and [the official GLM GGUF model](https://huggingface.co/zai-org/glm-edge-4b-chat-gguf).
 
 ## 2. Check the backend and start the gateway in terminal two
 
@@ -72,7 +99,7 @@ readiness checks the backend's `/health` endpoint.
 The model-list response should contain this ID under `data`:
 
 ```text
-Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M
+glm-edge-4b-chat
 ```
 
 Use the ID actually returned if it differs from the examples below.
@@ -84,7 +111,7 @@ curl -N --fail-with-body \
   http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M",
+    "model": "glm-edge-4b-chat",
     "messages": [
       {"role": "user", "content": "Explain why a gateway needs timeouts in three short sentences."}
     ],
@@ -101,10 +128,10 @@ progressively. Each JSON event contains an answer fragment in
 Curl displays the raw Server-Sent Events rather than joining the answer fragments.
 The repeated JSON metadata is expected.
 
-The earlier version of this command used a shell variable for the model ID:
+The same command can use a shell variable for the model ID:
 
 ```sh
-MODEL_ID='Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M'
+MODEL_ID='glm-edge-4b-chat'
 
 curl -N --fail-with-body \
   http://127.0.0.1:8080/v1/chat/completions \
@@ -117,11 +144,11 @@ Both versions send the same request.
 ## 5. Test non-streaming chat
 
 ```sh
-curl -N --fail-with-body \
+curl --fail-with-body \
   http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M",
+    "model": "glm-edge-4b-chat",
     "messages": [
       {"role": "user", "content": "Explain why a gateway needs timeouts in three short sentences."}
     ],
@@ -131,11 +158,9 @@ curl -N --fail-with-body \
 ```
 
 Expect one JSON response after generation finishes. The complete answer appears
-in `choices[0].message.content`, with token counts in `usage`. The `-N` option
-is unnecessary for this mode but remains here to match the session command.
+in `choices[0].message.content`, with token counts in `usage`.
 
-The observed response contained 41 prompt tokens and 116 completion tokens.
-Generated text and token counts can differ on later runs.
+Generated text and token counts depend on the model and can differ on later runs.
 
 ## 6. Test client-disconnect cancellation
 
@@ -143,7 +168,7 @@ Generated text and token counts can differ on later runs.
 curl -N http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M",
+    "model": "glm-edge-4b-chat",
     "messages": [
       {"role": "user", "content": "Write a detailed story about a long expedition across the ocean."}
     ],
@@ -155,7 +180,8 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 Press Ctrl+C in terminal three while tokens are arriving, before generation
 finishes. Watch terminal one for backend cancellation and slot release.
 
-The session produced these backend lines:
+The earlier Qwen run produced these backend lines. They show the expected log
+pattern; repeat the command above to collect GLM cancellation evidence:
 
 ```text
 49.49.307.529 W srv          stop: cancel task, id_task = 193
@@ -190,8 +216,23 @@ Expected results:
 - Readiness returns HTTP 503 because the backend is unavailable.
 - Model listing returns HTTP 502 when the upstream connection fails.
 
-These commands were proposed in the session, but their results have not yet
-been supplied. Repeat the backend command in terminal one to restart it.
+The earlier Qwen run passed these checks. Repeat them with GLM to verify the
+current setup. Restart the backend with the command in step 1 and wait for
+`/v1/readyz` to return 200. Send another chat request without restarting the
+gateway to verify recovery. Recovery also passed in the earlier Qwen run.
+
+## 8. Record a GLM single-stream baseline
+
+With both services running and no other inference traffic:
+
+```sh
+python bench/single_stream.py > /tmp/llmgate-glm-single-stream-100.json
+```
+
+The default model is `glm-edge-4b-chat`. This sends one warm-up per path, then
+100 sequential measured requests, split evenly between direct llama.cpp and the
+gateway. See [benchmarks](benchmarks.md) for timing definitions and historical
+results. Save GLM measurements separately from the retired model's data.
 
 ## Automated tests
 

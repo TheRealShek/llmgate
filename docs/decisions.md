@@ -1,5 +1,22 @@
 # Decisions
 
+## Primary inference model
+
+Use GLM-Edge-4B-Chat Q6_K as the primary CPU model in llama.cpp, following
+Abhishek's trial and selection. Serve it with the alias `glm-edge-4b-chat` so
+requests and the benchmark use a stable model ID.
+
+Use the official `zai-org/glm-edge-4b-chat-gguf` file `ggml-model-Q6_K.gguf`
+at revision `e168d9e95cf9af8bfbe54e04df7123516a51415d`. Its SHA-256 is
+`d8e83d4f9b6c6c89214d5c1dd17355d44be99173c15efa846d31ce01d1bda1f3`.
+Keep the weights outside the repository and mount their directory read-only.
+The file includes its chat template.
+
+The previous Qwen model is retired. Abhishek confirmed running the scoped
+Docker-volume cleanup command successfully. Historical Qwen benchmarks remain
+unchanged and labeled with their original model. Record a separate GLM baseline
+before making performance claims about the replacement.
+
 ## Code naming
 
 Each name should describe its actual role or behavior in its package and at the

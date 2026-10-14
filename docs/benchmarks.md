@@ -1,6 +1,10 @@
 # Single-stream baseline
 
-## October 14, 2026 run
+GLM-Edge-4B-Chat Q6_K is now the primary model. Its benchmark has not been
+recorded yet. The results below belong to the retired Qwen model and remain
+historical evidence; they do not describe GLM performance.
+
+## Historical Qwen run on October 14, 2026
 
 We sent 100 measured requests, 50 directly to llama.cpp and 50 through the
 gateway. All completed with text and `[DONE]`, generated 70 completion tokens,
@@ -36,13 +40,13 @@ The repeated prompt and warm-ups make this a warm-cache workload. The backend
 and gateway run on the same machine. The run did not capture an image digest,
 model checksum, or background system load, so it is not a fully pinned benchmark.
 
-## Reproduce
+## Run the benchmark with GLM
 
 Follow [manual testing](manual-testing.md) to start the backend and gateway.
 Leave both running and avoid other inference traffic. From the repository root:
 
 ```sh
-python bench/single_stream.py > /tmp/llmgate-single-stream-100.json
+python bench/single_stream.py > /tmp/llmgate-glm-single-stream-100.json
 ```
 
 The script uses Python's standard library. Progress and warm-up results go to
@@ -50,8 +54,19 @@ stderr; the JSON report goes to stdout. It exits with a nonzero status if a
 warm-up fails or any measured request fails. Failures during measured requests
 remain in the report rather than contributing latency values to the summaries.
 
-The script reproduces the request, timing, warm-up, and ordering method used
-for the saved run. It does not promise identical output tokens or timings.
+The default model is `glm-edge-4b-chat`. The script preserves the prompt, timing,
+warm-up, and ordering method from the saved run. The model has changed, so
+new output tokens and timings must be recorded as GLM results.
+
+For reference, the historical run used this model argument. Repeating it would
+require restoring the retired backend; the current GLM setup cannot reproduce
+Qwen measurements:
+
+```sh
+python bench/single_stream.py \
+  --model 'Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M' \
+  > /tmp/llmgate-qwen-single-stream-100.json
+```
 
 ## What the measurements mean
 
@@ -66,7 +81,8 @@ write. That metric remains future work.
 `backend_decode_tps` comes from llama.cpp's `timings.predicted_per_second`.
 It describes backend decoding speed, not aggregate gateway throughput.
 
-The difference between the two median first-token latencies is about 0.64 ms.
+In the historical Qwen run, the difference between the two median first-token
+latencies is about 0.64 ms.
 The median of the 50 paired gateway-minus-direct differences is about 0.22 ms.
 These are different summaries; neither isolates gateway processing cost from
 run-to-run variation.

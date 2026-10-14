@@ -1,5 +1,6 @@
 """Compare sequential streaming requests to llama.cpp and the gateway."""
 
+import argparse
 import json
 import math
 import statistics
@@ -9,7 +10,7 @@ import urllib.request
 
 
 PAYLOAD = {
-    "model": "Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q4_K_M",
+    "model": "glm-edge-4b-chat",
     "messages": [{
         "role": "user",
         "content": "Explain why a gateway needs timeouts in three short sentences.",
@@ -96,6 +97,15 @@ def summarize(name, results):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--model",
+        default=PAYLOAD["model"],
+        help="Model ID advertised by /v1/models",
+    )
+    args = parser.parse_args()
+    PAYLOAD["model"] = args.model
+
     for name, base in TARGETS:
         print("Warm-up:", name, measure(base), file=sys.stderr, flush=True)
 

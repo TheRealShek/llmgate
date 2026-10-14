@@ -23,7 +23,21 @@ func runServer(ctx context.Context, server *http.Server, listener net.Listener, 
 		}
 
 		return fmt.Errorf("serve gateway HTTP: %w", err)
+	case <-time.After(20 * time.Millisecond):
+		fmt.Printf("Server listening on %s\n", listener.Addr())
 	case <-ctx.Done():
+	}
+
+	if ctx.Err() == nil {
+		select {
+		case err := <-serveDone:
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+
+			return fmt.Errorf("serve gateway HTTP: %w", err)
+		case <-ctx.Done():
+		}
 	}
 
 	// The signal context is already canceled; draining needs a fresh deadline.

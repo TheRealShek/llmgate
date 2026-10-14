@@ -1,0 +1,34 @@
+services:
+  postgres:
+    image: postgres:18.6
+    environment:
+      POSTGRES_USER: llmgate
+      POSTGRES_DB: llmgate
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U llmgate -d llmgate"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  migrate:
+    image: migrate/migrate:v4.20.1
+    profiles: ["tools"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../migrations:/migrations:ro
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://llmgate@postgres:5432/llmgate?sslmode=disable"
+      - "up"
+
+volumes:
+  postgres-data:

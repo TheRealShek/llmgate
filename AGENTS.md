@@ -45,6 +45,9 @@ agent present.
   flow. Remove comments that describe features as unfinished after they exist.
 - Before adding a new abstraction, check whether it makes the main request path
   easier to understand. Prefer direct code when it only moves complexity elsewhere.
+- Keep reusable error definitions in the owning package's `error.go` and use them
+  from callers. Preserve operation failure causes with `%w`. HTTP handlers use
+  `api.WriteError` for the shared response format.
 
 ## Code comments
 
@@ -70,6 +73,10 @@ it. Proceed without asking for approval when the request and scope are clear.
 
 Keep measured gateway claims reproducible with a command. Record agreed
 non-obvious design decisions in `docs/decisions.md`.
+Maintain the existing documents. Keep setup and test commands in the manual
+testing guide and reading order in the README. Avoid separate progress, planning,
+or per-feature documents that repeat information already held in the code or
+project intent.
 
 ## Explain the completed change
 

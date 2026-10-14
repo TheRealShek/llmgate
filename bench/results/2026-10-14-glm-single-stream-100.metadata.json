@@ -1,0 +1,147 @@
+{
+  "started_at": "2026-10-14T22:38:10.731046+05:30",
+  "git_commit": "456fc4d1f2cb2a5d588641a8e25cd7357a881940",
+  "gateway_and_benchmark_source_match_commit": true,
+  "uncommitted_paths": [
+    " M README.md",
+    " M docs/decisions.md",
+    " M go.mod",
+    "?? deploy/",
+    "?? docs/key-storage.md",
+    "?? docs/phase1-plan.md",
+    "?? go.sum",
+    "?? internal/store/",
+    "?? migrations/"
+  ],
+  "model": {
+    "repo": "zai-org/glm-edge-4b-chat-gguf",
+    "revision": "e168d9e95cf9af8bfbe54e04df7123516a51415d",
+    "filename": "ggml-model-Q6_K.gguf",
+    "size": 3554369472,
+    "sha256": "d8e83d4f9b6c6c89214d5c1dd17355d44be99173c15efa846d31ce01d1bda1f3",
+    "source": "https://huggingface.co/zai-org/glm-edge-4b-chat-gguf/resolve/e168d9e95cf9af8bfbe54e04df7123516a51415d/ggml-model-Q6_K.gguf"
+  },
+  "docker_image": {
+    "id": "sha256:c789283572ba78c2699b8945a96e654c850f938a717883f2e6187a14adac698f",
+    "repo_digests": [
+      "ghcr.io/ggml-org/llama.cpp@sha256:c789283572ba78c2699b8945a96e654c850f938a717883f2e6187a14adac698f"
+    ]
+  },
+  "llama_cpp_build": "b11580-4413a1924",
+  "launch": {
+    "terminal_pids": {
+      "llmgate: GLM inference": 248343,
+      "llmgate: gateway": 248344
+    },
+    "engine_command": [
+      "sudo",
+      "docker",
+      "run",
+      "--rm",
+      "--init",
+      "--name",
+      "llmgate-glm-benchmark",
+      "-p",
+      "127.0.0.1:8081:8080",
+      "-v",
+      "/home/therealshek/.cache/llmgate/models/glm-edge-4b-chat:/models:ro",
+      "ghcr.io/ggml-org/llama.cpp:server",
+      "--model",
+      "/models/ggml-model-Q6_K.gguf",
+      "--alias",
+      "glm-edge-4b-chat",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "8080",
+      "--ctx-size",
+      "2048",
+      "--parallel",
+      "1",
+      "--threads",
+      "6"
+    ],
+    "gateway_command": [
+      "go",
+      "run",
+      "./cmd/gateway"
+    ],
+    "gateway_environment": {
+      "GATEWAY_ADDR": "127.0.0.1:8080",
+      "GATEWAY_UPSTREAM_URL": "http://127.0.0.1:8081"
+    }
+  },
+  "go_version": "go version go1.27.0-X:nodwarf5 linux/amd64",
+  "python_version": "3.14.7",
+  "kernel": "7.2.5-3-omarchy",
+  "cpu": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           39 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  16\nOn-line CPU(s) list:                     0-15\nVendor ID:                               GenuineIntel\nModel name:                              12th Gen Intel(R) Core(TM) i7-12650H\nCPU family:                              6\nModel:                                   154\nThread(s) per core:                      2\nCore(s) per socket:                      10\nSocket(s):                               1\nStepping:                                3\nMicrocode version:                       0x43b\nCPU(s) scaling MHz:                      37%\nCPU max MHz:                             4700.0000\nCPU min MHz:                             400.0000\nBogoMIPS:                                5376.00\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc art arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc cpuid aperfmperf tsc_known_freq pni pclmulqdq dtes64 monitor ds_cpl vmx smx est tm2 ssse3 sdbg fma cx16 xtpr pdcm pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch cpuid_fault epb ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow flexpriority ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb intel_pt sha_ni xsaveopt xsavec xgetbv1 xsaves split_lock_detect user_shstk avx_vnni dtherm ida arat pln pts hwp hwp_notify hwp_act_window hwp_epp hwp_pkg_req hfi vnmi umip pku ospke waitpkg gfni vaes vpclmulqdq rdpid movdiri movdir64b fsrm md_clear serialize arch_lbr ibt flush_l1d arch_capabilities\nVirtualization:                          VT-x\nL1d cache:                               416 KiB (10 instances)\nL1i cache:                               448 KiB (10 instances)\nL2 cache:                                9.5 MiB (7 instances)\nL3 cache:                                24 MiB (1 instance)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-15\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Mitigation; Clear Register File\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Not affected\nVulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditional; PBRSB-eIBRS SW sequence; BHI BHI_DIS_S\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Not affected\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Mitigation; IBPB before exit to userspace\n",
+  "memory_before": {
+    "MemTotal": "15975928 kB",
+    "MemAvailable": "7971792 kB",
+    "SwapTotal": "31950896 kB",
+    "SwapFree": "29304716 kB"
+  },
+  "load_average_before": [
+    1.1015625,
+    0.8818359375,
+    0.875
+  ],
+  "benchmark_command": [
+    "python",
+    "bench/single_stream.py",
+    "--model",
+    "glm-edge-4b-chat"
+  ],
+  "timing_method": "client observed, first nonempty SSE delta.content; total includes [DONE] and response close",
+  "backend_decode_tps_source": "llama.cpp timings.predicted_per_second",
+  "warmups_per_path": 1,
+  "measured_requests": 100,
+  "concurrency": 1,
+  "cache_state": "warm, repeated prompt",
+  "finished_at": "2026-10-14T22:50:36.140770+05:30",
+  "benchmark_exit_code": 0,
+  "load_average_after": [
+    6.51513671875,
+    6.267578125,
+    4.1123046875
+  ],
+  "warmup_results": {
+    "direct": {
+      "ttft_ms": 659.8227789800148,
+      "total_ms": 7898.850685975049,
+      "backend_decode_tps": 13.537908630720665,
+      "completion_tokens": 99,
+      "finish_reason": "stop"
+    },
+    "gateway": {
+      "ttft_ms": 82.81453102244996,
+      "total_ms": 7083.203715010313,
+      "backend_decode_tps": 13.42770246439766,
+      "completion_tokens": 95,
+      "finish_reason": "stop"
+    }
+  },
+  "power_supply_online_at_finish": {
+    "ucsi-source-psy-USBC000:002": "0",
+    "hidpp_battery_4": "1",
+    "ucsi-source-psy-USBC000:001": "0",
+    "ACAD": "1"
+  },
+  "cpu_policy_at_finish": {
+    "scaling_governor": "powersave",
+    "energy_performance_preference": "performance"
+  },
+  "go_build_environment": {
+    "CGO_ENABLED": "1",
+    "GOARCH": "amd64",
+    "GOEXPERIMENT": "nodwarf5",
+    "GOFLAGS": "",
+    "GOOS": "linux"
+  },
+  "paired_ttft_difference_ms": {
+    "median": -0.34493848215788603,
+    "min": -17.024767003022134,
+    "max": 11.373151995940134
+  },
+  "services_left_running": true
+}

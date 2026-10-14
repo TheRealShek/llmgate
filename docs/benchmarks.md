@@ -1,8 +1,65 @@
 # Single-stream baseline
 
-GLM-Edge-4B-Chat Q6_K is now the primary model. Its benchmark has not been
-recorded yet. The results below belong to the retired Qwen model and remain
-historical evidence; they do not describe GLM performance.
+GLM-Edge-4B-Chat Q6_K is the primary model. Its measured baseline is below.
+The older Qwen results remain separately labeled as historical evidence.
+
+## GLM run on October 14, 2026
+
+We started llama.cpp and the Go gateway in separate external Foot windows, then
+ran `python bench/single_stream.py --model glm-edge-4b-chat`. The run excluded
+one warm-up per path and measured 100 sequential requests, 50 directly to
+llama.cpp and 50 through the gateway. All 100 completed with `[DONE]`, generated
+95 completion tokens, and reported `finish_reason: "stop"`.
+
+| Measurement | Direct llama.cpp | Through gateway |
+| --- | ---: | ---: |
+| Successful requests | 50/50 | 50/50 |
+| Median client-observed first-token latency | 77.55 ms | 77.89 ms |
+| p95 client-observed first-token latency | 84.27 ms | 86.41 ms |
+| Median total response time | 7.186 s | 7.195 s |
+| p95 total response time | 7.587 s | 7.637 s |
+| Median backend decode speed | 13.23 tokens/s | 13.20 tokens/s |
+| Completion tokens per request | 95 | 95 |
+| Failures | 0 | 0 |
+
+[Raw GLM results](../bench/results/2026-10-14-glm-single-stream-100.json) contain
+all 100 measured rows and the unrounded summaries.
+[Run metadata](../bench/results/2026-10-14-glm-single-stream-100.metadata.json)
+records the model checksum, image digest, server build, hardware, commands,
+warm-ups, compiler versions, and system state. Both services remained ready
+after the run.
+
+The backend used six CPU threads, a 2048-token context, and one parallel slot
+on an Intel Core i7-12650H with 16 GB RAM. The prompt repeats, so this is a
+warm-cache baseline. It uses `temperature: 0` and `max_tokens: 128`. Paths
+alternate and the first path reverses after every pair. p95 uses the nearest-rank
+method on each path's 50 measurements.
+
+The model file is the official Q6_K GGUF documented in
+[manual testing](manual-testing.md), with SHA-256
+`d8e83d4f9b6c6c89214d5c1dd17355d44be99173c15efa846d31ce01d1bda1f3`.
+The measured llama.cpp build was `b11580-4413a1924`. To use the exact image again,
+replace the `:server` image in the manual startup command with:
+
+```text
+ghcr.io/ggml-org/llama.cpp@sha256:c789283572ba78c2699b8945a96e654c850f938a717883f2e6187a14adac698f
+```
+
+Gateway and benchmark source matched
+[the model-switch commit](https://github.com/TheRealShek/llmgate/commit/456fc4d1f2cb2a5d588641a8e25cd7357a881940).
+Uncommitted key-storage work existed, but the running gateway did not use it.
+Gateway startup cleared inherited `GATEWAY_` variables and set only the listen
+address and upstream URL, leaving the other limits at their documented defaults.
+
+The difference between median first-token latencies was about +0.34 ms for the
+gateway. The median of individual paired gateway-minus-direct differences was
+about -0.34 ms. These small, mixed differences do not isolate proxy processing
+cost. Decode speed was similar across both paths in this run.
+
+This local run does not establish concurrent capacity, reliable p99 latency,
+cold-cache performance, or performance after authentication and rate limits.
+Power and CPU policy were recorded at the end, but background load and thermal
+state were not controlled throughout the test.
 
 ## Historical Qwen run on October 14, 2026
 
@@ -26,6 +83,8 @@ measured request and the unrounded summaries. p95 uses the nearest-rank method
 on the 50 successful measurements for each path.
 
 ## Workload and setup
+
+This section describes the historical Qwen run.
 
 - One active request at a time, with one warm-up request per path excluded.
 - Direct endpoint at `http://127.0.0.1:8081`; gateway at `http://127.0.0.1:8080`.

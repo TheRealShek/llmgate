@@ -234,6 +234,49 @@ The default model is `glm-edge-4b-chat`. This sends one warm-up per path, then
 gateway. See [benchmarks](benchmarks.md) for timing definitions and historical
 results. Save GLM measurements separately from the retired model's data.
 
+## Postgres key storage
+
+Key storage is implemented separately from the HTTP request path. It creates,
+looks up, and revokes hashed API keys, but authentication is not wired into the
+gateway yet. The development Compose file currently starts Postgres and its
+migration tool.
+
+From the repository root, initialize a new local database and apply migrations:
+
+```sh
+export POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+
+sudo --preserve-env=POSTGRES_PASSWORD docker compose \
+  -f deploy/docker-compose.yml up -d --wait postgres
+
+sudo --preserve-env=POSTGRES_PASSWORD docker compose \
+  -f deploy/docker-compose.yml run --rm migrate
+```
+
+Keep the same password for later runs. The named volume preserves data; changing
+the environment variable does not rotate an existing database's password.
+The local database and development role are both `llmgate`, on localhost port
+5432. To use another host port, set `POSTGRES_PORT`, preserve it through sudo,
+and change the test URL below. Migrations run separately from gateway startup;
+repeating the migration command after it succeeds reports no change.
+
+Run the storage integration tests with the same password:
+
+```sh
+export PGPASSWORD="$POSTGRES_PASSWORD"
+
+LLMGATE_TEST_DATABASE_URL='postgres://llmgate@127.0.0.1:5432/llmgate?sslmode=disable' \
+  go test -count=1 -v ./internal/store
+```
+
+Each database test creates a unique schema, applies the real migration, and
+drops only that schema during cleanup. The test role needs schema-creation
+permission. Tests use bounded connection pools and cover hash-only persistence,
+lookup through a new pool, revocation, cancellation, storage failures,
+concurrency, database constraints, and migration rollback. Without the test URL,
+database tests skip; validation tests still run. A supplied but unreachable URL
+fails the tests. The URL above disables TLS only for the local development setup.
+
 ## Automated tests
 
 For the full Go test suite:

@@ -6,11 +6,13 @@ backend loads the model and generates tokens; the gateway handles HTTP routing,
 request validation, cancellation, and deadlines.
 
 Phase 1 is in progress. Health checks, model listing, JSON and streaming chat,
-and request IDs with structured logs work today. Authentication, rate limits,
-usage tracking, metrics, and Docker Compose are still planned. An initial
-[historical Qwen single-stream baseline](docs/benchmarks.md) records 100 sequential
-requests split between direct and gateway paths. GLM-Edge-4B-Chat Q6_K is now
-the primary model; its performance baseline has not been recorded yet.
+and request IDs with structured logs work today. Postgres-backed API-key storage
+and its development Compose setup are available as the next learning slice;
+the gateway does not use that store yet. Authentication, rate limits,
+usage tracking, metrics, and the full Compose stack are still planned. A
+[GLM single-stream baseline](docs/benchmarks.md) records 100 sequential requests
+split between direct and gateway paths. GLM-Edge-4B-Chat Q6_K is the primary
+model; the earlier Qwen baseline remains historical evidence.
 
 ## Run locally
 
@@ -151,8 +153,9 @@ handler writes the finish log. For JSON chat, step 5 uses
 [`proxy.NewNonStreamingHandler`](internal/proxy/nonstream.go) instead and applies
 a total deadline.
 
-Read [shutdown](cmd/gateway/server.go) separately for connection cleanup. The
-implementation uses only the Go standard library.
+Read [shutdown](cmd/gateway/server.go) separately for connection cleanup.
+HTTP forwarding uses the Go standard library. The separate key-storage package
+uses `pgx` for PostgreSQL access.
 
 For readiness, start at the `readiness` assignment in `run`, follow its route
 registration in `gateway.NewHandler`, then read
@@ -166,5 +169,10 @@ go test ./...
 ```
 
 [Design decisions](docs/decisions.md) records the current tradeoffs.
+For key storage, read the [migration](migrations/000001_api_keys.up.sql),
+[store operations](internal/store/keys.go), then [tests](internal/store/keys_test.go).
+The caller owns the shared connection pool and supplies each operation's context.
+[Manual testing](docs/manual-testing.md#postgres-key-storage) includes Postgres
+setup and integration-test commands.
 [Project intent](docs/PROJECT_INTENT.md) describes the remaining Phase 1 work
 and later plans for multiple backends and prefix-aware routing.

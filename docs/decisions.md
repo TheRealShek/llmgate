@@ -14,8 +14,40 @@ The file includes its chat template.
 
 The previous Qwen model is retired. Abhishek confirmed running the scoped
 Docker-volume cleanup command successfully. Historical Qwen benchmarks remain
-unchanged and labeled with their original model. Record a separate GLM baseline
-before making performance claims about the replacement.
+unchanged and labeled with their original model. A separate
+[GLM single-stream baseline](benchmarks.md) now records 100 measured requests
+with the replacement model, its checksum, and the inference image digest.
+
+## Persistent API-key storage
+
+Use PostgreSQL with versioned SQL migrations through `golang-migrate`, one of
+the migration tools listed in the intent document. Run migrations explicitly
+instead of changing the schema whenever the gateway starts.
+
+Generate keys from 32 cryptographically random bytes, encode them as URL-safe
+text with an `lg_` prefix, and store only SHA-256 hashes. A password hash is
+useful for human-chosen passwords; these generated keys have 256 bits of entropy.
+A unique hash index supports direct lookup. Return the raw key only after
+successful insertion and never include it in stored identity structs.
+
+Use `pgx` and its connection pool for PostgreSQL access. The standard library
+does not include a PostgreSQL driver. Prefer explicit parameterized SQL over
+an ORM for these three operations. The caller owns the pool and its limits.
+See [pgx's guidance](https://github.com/jackc/pgx/wiki/Getting-started-with-pgx-through-database-sql)
+on native PostgreSQL access.
+
+Revoke by recording a timestamp, preserving key identity for later usage records.
+Repeated revocation succeeds without changing the timestamp. Unknown and revoked
+key lookups return `store.ErrKeyNotFound`; invalid creation options return
+`store.ErrInvalidKeyOptions`. Define these reusable errors in
+`internal/store/error.go` so their messages have one source. Callers use
+`errors.Is` to recognize them. Storage failures preserve their original causes
+through `%w` and stay distinct.
+Caching and the HTTP endpoint policy are later decisions.
+
+Build and discuss the key-storage slice before wiring authentication into the
+gateway, as agreed in the session. The development Compose file starts only
+Postgres and its migration tool at this checkpoint.
 
 ## Code naming
 
@@ -27,6 +59,14 @@ parameters for what they bound, such as `totalTimeout` and `idleTimeout`.
 Apply this to constructors, functions, types, fields, and variables. Keep names
 concise when context already makes their meaning clear. Comments explain the
 request flow and reasoning; names should make sense without reading the implementation.
+
+## Documentation scope
+
+Keep setup commands in the manual testing guide, implementation reading order
+in the README, design choices here, and phase requirements in the project intent.
+Keep measured results and their raw data in the existing benchmark files.
+Update these documents instead of adding separate progress, planning, or
+per-feature explanations that duplicate the code and drift as it changes.
 
 ## Model-list forwarding
 

@@ -7,8 +7,9 @@ request validation, cancellation, and deadlines.
 
 Phase 1 is in progress. Health checks, model listing, JSON and streaming chat,
 and request IDs with structured logs work today. Authentication, rate limits,
-usage tracking, metrics, and Docker Compose are still planned. Benchmarks are
-not available yet.
+usage tracking, metrics, and Docker Compose are still planned. An initial
+[single-stream baseline](docs/benchmarks.md) records 100 sequential requests
+against a real llama.cpp backend, split between direct and gateway paths.
 
 ## Run locally
 

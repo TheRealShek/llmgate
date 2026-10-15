@@ -9,6 +9,10 @@ import (
 )
 
 type config struct {
+	databaseURL            string
+	databaseMaxConns       int32
+	databaseConnectTimeout time.Duration
+	authLookupTimeout      time.Duration
 	addr                   string
 	upstreamURL            *url.URL
 	upstreamTimeout        time.Duration
@@ -26,6 +30,10 @@ type config struct {
 
 func loadConfig(getenv func(string) string) (config, error) {
 	cfg := config{
+		databaseURL:            getenv("GATEWAY_DATABASE_URL"),
+		databaseMaxConns:       10,
+		databaseConnectTimeout: 5 * time.Second,
+		authLookupTimeout:      2 * time.Second,
 		addr:                   ":8080",
 		upstreamTimeout:        30 * time.Second,
 		readHeaderTimeout:      5 * time.Second,
@@ -40,11 +48,34 @@ func loadConfig(getenv func(string) string) (config, error) {
 		readinessTimeout:       2 * time.Second,
 	}
 
+	if cfg.databaseURL == "" {
+		return config{}, fmt.Errorf("validate GATEWAY_DATABASE_URL: required")
+	}
+
+	if val := getenv("GATEWAY_DATABASE_MAX_CONNS"); val != "" {
+		n, err := strconv.ParseInt(val, 10, 32)
+		if err != nil || n <= 0 {
+			return config{}, fmt.Errorf("validate GATEWAY_DATABASE_MAX_CONNS: requires a positive integer")
+		}
+
+		cfg.databaseMaxConns = int32(n)
+	}
+
 	if val := getenv("GATEWAY_ADDR"); val != "" {
 		cfg.addr = val
 	}
 
 	var err error
+
+	cfg.databaseConnectTimeout, err = envDuration(getenv, "GATEWAY_DATABASE_CONNECT_TIMEOUT", cfg.databaseConnectTimeout)
+	if err != nil {
+		return config{}, err
+	}
+
+	cfg.authLookupTimeout, err = envDuration(getenv, "GATEWAY_AUTH_LOOKUP_TIMEOUT", cfg.authLookupTimeout)
+	if err != nil {
+		return config{}, err
+	}
 
 	cfg.readinessTimeout, err = envDuration(getenv, "GATEWAY_READINESS_TIMEOUT", cfg.readinessTimeout)
 	if err != nil {

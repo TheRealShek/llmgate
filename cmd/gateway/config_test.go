@@ -33,6 +33,10 @@ func TestLoadConfigUpstreamURL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg, err := loadConfig(func(key string) string {
+				if key == "GATEWAY_DATABASE_URL" {
+					return "postgres://localhost/llmgate"
+				}
+
 				if key == "GATEWAY_UPSTREAM_URL" {
 					return tt.value
 				}
@@ -88,6 +92,10 @@ func TestLoadConfig(t *testing.T) {
 			name: "defaults",
 			env:  map[string]string{},
 			want: config{
+				databaseURL:            "postgres://localhost/llmgate",
+				databaseMaxConns:       10,
+				databaseConnectTimeout: 5 * time.Second,
+				authLookupTimeout:      2 * time.Second,
 				addr:                   ":8080",
 				readTimeout:            10 * time.Second,
 				maxBodyBytes:           1 << 20, // 1 MiB
@@ -119,6 +127,10 @@ func TestLoadConfig(t *testing.T) {
 				"GATEWAY_SHUTDOWN_TIMEOUT":         "15s",
 			},
 			want: config{
+				databaseURL:            "postgres://localhost/llmgate",
+				databaseMaxConns:       10,
+				databaseConnectTimeout: 5 * time.Second,
+				authLookupTimeout:      2 * time.Second,
 				addr:                   "127.0.0.1:9090",
 				readTimeout:            3 * time.Second,
 				maxBodyBytes:           2048,
@@ -262,6 +274,10 @@ func TestLoadConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			getenv := func(key string) string {
+				if key == "GATEWAY_DATABASE_URL" {
+					return "postgres://localhost/llmgate"
+				}
+
 				return tt.env[key]
 			}
 

@@ -22,9 +22,13 @@ func newForwarder(target *url.URL, transport http.RoundTripper) *httputil.Revers
 	// and copies the response back to the client.
 	return &httputil.ReverseProxy{
 		// Rewrite points the outbound URL to the backend and replaces caller identity
-		// with the gateway ID while preserving the path, query, and other headers.
+		// with the gateway ID while preserving the path and query. Gateway credentials stop here.
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(&backend)
+
+			// Strip the client's gateway API key so credentials are never forwarded
+			// or leaked into upstream inference backend logs.
+			r.Out.Header.Del("Authorization")
 
 			if id := requestlog.ID(r.In.Context()); id != "" {
 				r.Out.Header.Set("X-Request-ID", id)
@@ -45,8 +49,7 @@ func newForwarder(target *url.URL, transport http.RoundTripper) *httputil.Revers
 	}
 }
 
-// handleUpstreamError maps transport and context failures into OpenAI-compatible HTTP error
-// responses.
+// handleUpstreamError maps transport and context failures into OpenAI-compatible HTTP error responses.
 func handleUpstreamError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, context.Canceled) {
 		return // Client disconnected early. Nothing to deliver.
@@ -55,16 +58,11 @@ func handleUpstreamError(w http.ResponseWriter, r *http.Request, err error) {
 	status := http.StatusBadGateway
 
 	var timeoutError net.Error
-	if errors.Is(err, context.DeadlineExceeded) ||
-		(errors.As(err, &timeoutError) && timeoutError.Timeout()) {
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeoutError) && timeoutError.Timeout()) {
 		status = http.StatusGatewayTimeout
 	}
 	// Transport errors can contain raw URLs or credentials. Log only the status.
-	requestlog.Logger(r.Context()).WarnContext(
-		r.Context(),
-		"upstream request failed",
-		"status", status,
-	)
+	requestlog.Logger(r.Context()).WarnContext(r.Context(), "upstream request failed", "status", status)
 	_ = api.WriteError(w, status, api.Error{
 		Message: "upstream request failed",
 		Type:    "server_error",

@@ -38,8 +38,12 @@ func TestChatTokenLimit(t *testing.T) {
 
 				w.WriteHeader(http.StatusNoContent)
 			})
-			handler := NewHandler(upstream, nil, nil, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
-			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+			handler := NewHandler(HandlerOptions{
+				NonStreaming:   upstream,
+				Authentication: testAuthenticator(),
+				Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+			})
+			request := authenticatedRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 			request.Header.Set("Content-Type", "application/json")
 
 			recorder := httptest.NewRecorder()
@@ -82,8 +86,12 @@ func TestChatTokenLimitOmitted(t *testing.T) {
 
 				w.WriteHeader(http.StatusNoContent)
 			})
-			handler := NewHandler(upstream, nil, nil, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
-			request := httptest.NewRequest(
+			handler := NewHandler(HandlerOptions{
+				NonStreaming:   upstream,
+				Authentication: testAuthenticator(),
+				Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+			})
+			request := authenticatedRequest(
 				http.MethodPost,
 				"/v1/chat/completions",
 				strings.NewReader(tt.body),

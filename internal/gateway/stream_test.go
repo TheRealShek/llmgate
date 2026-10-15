@@ -46,13 +46,18 @@ func TestStreamingChatFlush(t *testing.T) {
 	t.Cleanup(transport.CloseIdleConnections)
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, 10*time.Millisecond)
 	streaming := proxy.NewStreamingHandler(target, transport, time.Second)
-	handler := NewHandler(nonStreaming, streaming, nil, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
+	handler := NewHandler(HandlerOptions{
+		NonStreaming:   nonStreaming,
+		Streaming:      streaming,
+		Authentication: testAuthenticator(),
+		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+	})
 	gateway := httptest.NewServer(requestlog.NewHandler(
 		handler,
 		slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	))
 	t.Cleanup(gateway.Close)
-	client := gateway.Client()
+	client := authenticatedClient(gateway)
 	client.Timeout = 5 * time.Second
 
 	response, err := client.Post(
@@ -112,7 +117,7 @@ func TestStreamingChatContinuousChunks(t *testing.T) {
 	})
 	gateway := newStreamingTestGateway(t, backend, time.Second, 300*time.Millisecond)
 
-	response, err := gateway.Client().Post(
+	response, err := authenticatedClient(gateway).Post(
 		gateway.URL+"/v1/chat/completions",
 		"application/json",
 		strings.NewReader(`{"stream":true}`),
@@ -158,7 +163,7 @@ func TestStreamingChatFailures(t *testing.T) {
 
 			gateway := newStreamingTestGateway(t, backend, headerTimeout, idleTimeout)
 
-			response, err := gateway.Client().Post(
+			response, err := authenticatedClient(gateway).Post(
 				gateway.URL+"/v1/chat/completions",
 				"application/json",
 				strings.NewReader(`{"stream":true}`),
@@ -221,7 +226,7 @@ func TestStreamingChatCancellationIsolation(t *testing.T) {
 	})
 	gateway := newStreamingTestGateway(t, backend, time.Second, time.Second)
 
-	a, err := gateway.Client().Post(
+	a, err := authenticatedClient(gateway).Post(
 		gateway.URL+"/v1/chat/completions?id=A",
 		"application/json",
 		strings.NewReader(`{"stream":true}`),
@@ -231,7 +236,7 @@ func TestStreamingChatCancellationIsolation(t *testing.T) {
 	}
 	defer a.Body.Close()
 
-	b, err := gateway.Client().Post(
+	b, err := authenticatedClient(gateway).Post(
 		gateway.URL+"/v1/chat/completions?id=B",
 		"application/json",
 		strings.NewReader(`{"stream":true}`),
@@ -284,12 +289,12 @@ func newStreamingTestGateway(
 	t.Cleanup(transport.CloseIdleConnections)
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, 10*time.Millisecond)
 	streaming := proxy.NewStreamingHandler(target, transport, idleTimeout)
-	gateway := httptest.NewServer(NewHandler(
-		nonStreaming,
-		streaming,
-		nil,
-		ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
-	))
+	gateway := httptest.NewServer(NewHandler(HandlerOptions{
+		NonStreaming:   nonStreaming,
+		Streaming:      streaming,
+		Authentication: testAuthenticator(),
+		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+	}))
 	t.Cleanup(gateway.Close)
 	gateway.Client().Timeout = 5 * time.Second
 

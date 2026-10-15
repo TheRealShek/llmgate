@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/therealshek/llmgate/internal/api"
+	"github.com/therealshek/llmgate/internal/auth"
 )
 
 // ChatLimits controls the request resources checked before forwarding chat requests.
@@ -15,27 +16,39 @@ type ChatLimits struct {
 	MaxTokens int64
 }
 
-// NewHandler builds the gateway routes and validates chat before forwarding.
-// nonStreaming handles model lists and JSON chat responses; streaming handles SSE chat.
-// limits bounds accepted request bodies and output-token options before either proxy runs.
-// A missing nonStreaming backend leaves health available but returns 503 for models and chat.
-// readiness checks backend health; nil returns 503 on the readiness route.
-func NewHandler(nonStreaming, streaming, readiness http.Handler, limits ChatLimits) http.Handler {
+// HandlerOptions names the dependencies and limits used by the gateway routes.
+type HandlerOptions struct {
+	// NonStreaming forwards model lists and JSON chat responses.
+	NonStreaming http.Handler
+	// Streaming forwards SSE chat responses.
+	Streaming http.Handler
+	// Readiness probes backend health; nil returns 503.
+	Readiness http.Handler
+	// Authentication protects models and chat; nil fails closed.
+	Authentication *auth.Authenticator
+	// Limits bounds chat bodies and output-token options.
+	Limits ChatLimits
+}
+
+// NewHandler builds public health routes and authenticated model and chat routes.
+// Authentication runs before chat validation or forwarding. A missing NonStreaming
+// backend returns 503 for authenticated model and chat requests.
+func NewHandler(options HandlerOptions) http.Handler {
 	var chat http.Handler
-	if nonStreaming != nil {
+	if options.NonStreaming != nil {
 		chat = &chatHandler{
-			nonStreaming: nonStreaming,
-			streaming:    streaming,
-			maxBodyBytes: limits.MaxBodyBytes,
-			maxTokens:    limits.MaxTokens,
+			nonStreaming: options.NonStreaming,
+			streaming:    options.Streaming,
+			maxBodyBytes: options.Limits.MaxBodyBytes,
+			maxTokens:    options.Limits.MaxTokens,
 		}
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/healthz", healthHandler)
-	mux.Handle("GET /v1/readyz", backendHandler(readiness))
-	mux.Handle("GET /v1/models", backendHandler(nonStreaming))
-	mux.Handle("POST /v1/chat/completions", backendHandler(chat))
+	mux.Handle("GET /v1/readyz", backendHandler(options.Readiness))
+	mux.Handle("GET /v1/models", options.Authentication.Protect(backendHandler(options.NonStreaming)))
+	mux.Handle("POST /v1/chat/completions", options.Authentication.Protect(backendHandler(chat)))
 
 	return mux
 }

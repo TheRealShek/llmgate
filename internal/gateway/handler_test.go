@@ -9,7 +9,9 @@ import (
 // TestHandler checks the health response and routing so unsupported methods and
 // unrelated paths cannot silently pass health checks.
 func TestHandler(t *testing.T) {
-	handler := NewHandler(nil, nil, nil, ChatLimits{})
+	handler := NewHandler(HandlerOptions{
+		Authentication: testAuthenticator(),
+	})
 
 	tests := []struct {
 		name   string
@@ -89,7 +91,7 @@ func TestHandler(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			request := httptest.NewRequest(tt.method, tt.path, nil)
+			request := authenticatedRequest(tt.method, tt.path, nil)
 			handler.ServeHTTP(recorder, request)
 
 			if recorder.Code != tt.status {
@@ -122,9 +124,13 @@ func TestHandlerModels(t *testing.T) {
 		w.WriteHeader(http.StatusAccepted)
 		_, _ = w.Write([]byte("models"))
 	})
-	handler := NewHandler(upstream, nil, nil, ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8})
+	handler := NewHandler(HandlerOptions{
+		NonStreaming:   upstream,
+		Authentication: testAuthenticator(),
+		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+	})
 	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	handler.ServeHTTP(recorder, authenticatedRequest(http.MethodGet, "/v1/models", nil))
 
 	if recorder.Code != http.StatusAccepted || recorder.Body.String() != "models" {
 		t.Fatalf("model route response: %d %s", recorder.Code, recorder.Body.String())

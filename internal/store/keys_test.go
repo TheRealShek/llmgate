@@ -18,7 +18,7 @@ import (
 
 // TestCreateKeyValidation rejects invalid options before generating a key or accessing PostgreSQL.
 func TestCreateKeyValidation(t *testing.T) {
-	for _, opts := range []CreateKeyOptions{
+	for _, params := range []CreateKeyParams{
 		{Name: "", RequestsPerMin: 1, TokensPerDay: 1},
 		{Name: " \t", RequestsPerMin: 1, TokensPerDay: 1},
 		{Name: strings.Repeat("a", 129), RequestsPerMin: 1, TokensPerDay: 1},
@@ -27,7 +27,7 @@ func TestCreateKeyValidation(t *testing.T) {
 		{Name: "alice", RequestsPerMin: 1, TokensPerDay: 0},
 		{Name: "alice", RequestsPerMin: 1, TokensPerDay: -1},
 	} {
-		key, secret, err := NewKeyStore(nil).CreateKey(t.Context(), opts)
+		key, secret, err := NewKeyStore(nil).CreateKey(t.Context(), params)
 		if !errors.Is(err, ErrInvalidKeyOptions) || key != (Key{}) || secret != "" {
 			t.Fatal("invalid options must return ErrInvalidKeyOptions without a key")
 		}
@@ -41,7 +41,7 @@ func TestKeyLifecycle(t *testing.T) {
 	store := NewKeyStore(pool)
 	ctx := t.Context()
 
-	key, secret, err := store.CreateKey(ctx, CreateKeyOptions{
+	key, secret, err := store.CreateKey(ctx, CreateKeyParams{
 		Name:           " alice ",
 		RequestsPerMin: 60,
 		TokensPerDay:   10000,
@@ -146,7 +146,7 @@ func TestKeyStoreCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	key, secret, err := store.CreateKey(ctx, CreateKeyOptions{
+	key, secret, err := store.CreateKey(ctx, CreateKeyParams{
 		Name:           "alice",
 		RequestsPerMin: 1,
 		TokensPerDay:   1,
@@ -171,7 +171,7 @@ func TestKeyStoreDatabaseFailure(t *testing.T) {
 
 	store := NewKeyStore(pool)
 
-	key, secret, err := store.CreateKey(t.Context(), CreateKeyOptions{
+	key, secret, err := store.CreateKey(t.Context(), CreateKeyParams{
 		Name:           "alice",
 		RequestsPerMin: 1,
 		TokensPerDay:   1,
@@ -202,7 +202,7 @@ func TestConcurrentKeys(t *testing.T) {
 
 	for range 8 {
 		workers.Go(func() {
-			key, secret, err := store.CreateKey(t.Context(), CreateKeyOptions{
+			key, secret, err := store.CreateKey(t.Context(), CreateKeyParams{
 				Name:           "concurrent",
 				RequestsPerMin: 1,
 				TokensPerDay:   1,

@@ -24,8 +24,8 @@ type Key struct {
 	CreatedAt      time.Time
 }
 
-// CreateKeyOptions contains the label and limits for a new API key.
-type CreateKeyOptions struct {
+// CreateKeyParams contains the label and limits for a new API key.
+type CreateKeyParams struct {
 	Name           string
 	RequestsPerMin int64
 	TokensPerDay   int64
@@ -43,9 +43,9 @@ func NewKeyStore(pool *pgxpool.Pool) *KeyStore {
 
 // CreateKey persists a hash and returns the raw key only after insertion succeeds.
 // The caller must deliver the secret once and must not log it.
-func (s *KeyStore) CreateKey(ctx context.Context, opts CreateKeyOptions) (Key, string, error) {
-	name := strings.TrimSpace(opts.Name)
-	if name == "" || len(name) > 128 || opts.RequestsPerMin <= 0 || opts.TokensPerDay <= 0 {
+func (s *KeyStore) CreateKey(ctx context.Context, params CreateKeyParams) (Key, string, error) {
+	name := strings.TrimSpace(params.Name)
+	if name == "" || len(name) > 128 || params.RequestsPerMin <= 0 || params.TokensPerDay <= 0 {
 		return Key{}, "", ErrInvalidKeyOptions
 	}
 
@@ -63,7 +63,7 @@ func (s *KeyStore) CreateKey(ctx context.Context, opts CreateKeyOptions) (Key, s
 		INSERT INTO api_keys (key_hash, name, requests_per_min, tokens_per_day)
 		VALUES ($1, $2, $3, $4)
 		RETURNING id, name, requests_per_min, tokens_per_day, created_at`,
-		hash[:], name, opts.RequestsPerMin, opts.TokensPerDay,
+		hash[:], name, params.RequestsPerMin, params.TokensPerDay,
 	).Scan(&key.ID, &key.Name, &key.RequestsPerMin, &key.TokensPerDay, &key.CreatedAt)
 	if err != nil {
 		return Key{}, "", fmt.Errorf("create API key: %w", err)

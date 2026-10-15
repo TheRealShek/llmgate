@@ -94,6 +94,21 @@ Target: weeks 1 to 3.
 - Graceful shutdown. On SIGTERM, stop accepting new requests and let active streams finish, with a hard deadline.
 - First Prometheus metrics. Request count, request duration, TTFT, active streams.
 
+**Current checkpoint and next slices**
+
+Streaming and JSON forwarding, request validation, cancellation, deadlines,
+request logs, readiness, and graceful shutdown are implemented. API-key storage
+now feeds route authentication through direct Postgres lookups. Models and chat
+require an active key; health and readiness remain public. A local command creates
+keys. Existing baselines predate authentication.
+
+Next, add admin key creation and revocation with active-request cancellation
+for the single gateway. Then add authentication caching with an explicit
+revocation and outage policy, Redis rate limits and quotas, usage recording,
+metrics, and the complete Compose setup. Measure the authenticated gateway and
+complete the remaining real-backend failure checks before closing Phase 1.
+See [decisions](decisions.md) for authentication and revocation boundaries.
+
 **Learn**
 
 - `context` propagation and cancellation

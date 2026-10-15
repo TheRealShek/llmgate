@@ -43,11 +43,11 @@ key lookups return `store.ErrKeyNotFound`; invalid creation options return
 `internal/store/error.go` so their messages have one source. Callers use
 `errors.Is` to recognize them. Storage failures preserve their original causes
 through `%w` and stay distinct.
-Caching and the HTTP endpoint policy are later decisions.
+The HTTP authentication policy is described below. Caching remains later work.
 
 Build and discuss the key-storage slice before wiring authentication into the
 gateway, as agreed in the session. The development Compose file starts only
-Postgres and its migration tool at this checkpoint.
+Postgres and its migration tool; the gateway and inference backend run separately.
 
 ## Code naming
 
@@ -177,9 +177,18 @@ count collection are separate work.
 
 ## Gateway construction
 
-Use one `gateway.NewHandler(nonStreaming, streaming, readiness, limits)` constructor for
-startup and tests. Remove variants from earlier project stages instead of
-keeping them as compatibility wrappers inside this internal package.
+Use one `gateway.NewHandler(options)` constructor for startup and tests.
+`gateway.HandlerOptions` names the non-streaming proxy, streaming proxy, readiness
+handler, authenticator, and chat limits. Named fields distinguish the three
+`http.Handler` dependencies at each call site and make omitted dependencies
+visible. Remove variants from earlier project stages instead of keeping them
+as compatibility wrappers inside this internal package.
+
+Keep `main` focused on logging setup, process signals, and exit status. `run`
+selects local key creation or HTTP startup and owns the selected execution path.
+Keep command parsing errors wrapped with their causes while exposing only safe
+messages. Flag errors can contain supplied values, so use the command's private
+error wrapper before returning them to the logging boundary.
 
 Keep logging, routing, chat validation, and proxying as separate components
 because each owns distinct behavior. Startup names the route handler `routes`
@@ -215,3 +224,67 @@ Probe each time instead of keeping cached health or a background worker. This
 keeps the first readiness behavior small, but probe traffic reaches the backend
 directly. Readiness does not reserve capacity or block chat forwarding. Phase 2
 will add periodic checks and use backend health in routing.
+
+## Route authentication
+
+Protect model listing and both chat response modes with one active API key in
+`Authorization: Bearer <key>`. Health and readiness remain public. Authenticate
+inside the matched route, after request logging and before chat validation or
+proxying. Unknown routes and unsupported methods retain their routing errors.
+All active keys have the same route permissions. Request and token limits are
+carried with identity but are not enforced by authentication.
+
+Use direct `KeyStore.LookupKey` calls for this slice. Missing, malformed,
+ambiguous, unknown, and revoked credentials return a generic JSON `401` with
+`WWW-Authenticate: Bearer`. Database failures and lookup deadlines return a
+fixed JSON `503`. Fail closed and never forward rejected requests. Client
+cancellation stops the lookup and does not attempt an error response.
+
+Attach the returned key identity and limits to the request context, never the
+secret or hash. Preserve the incoming cancellation and logging metadata. Give
+each lookup its own deadline and cancel it before entering the next handler;
+that deadline must not limit the lifetime of an authenticated stream.
+Strip Authorization from outbound model and chat requests in the shared proxy.
+Never forward gateway credentials as backend credentials or include secrets in
+logs, errors, or configuration diagnostics. Public deployments need HTTPS.
+
+Startup requires a database URL, owns one bounded pgx pool, verifies connectivity
+with a bounded deadline, and closes the pool after HTTP shutdown. Migrations
+remain explicit. A local key-creation command uses the same configuration and
+store operation and prints the raw secret once after successful insertion.
+Default to at most 10 pool connections, a 5-second startup/connect timeout, and
+a 2-second lookup timeout. Environment settings can override these positive
+limits. Connections are acquired for short database operations and released
+before inference; a long stream does not hold a database connection. These are
+initial development limits, not measured capacity claims. The local creation
+command uses the same operation timeout for its single insertion.
+
+Admin HTTP endpoints and authentication caching are separate tasks.
+
+## Revocation and active requests
+
+For the first authentication slice, revocation blocks subsequent lookups after
+the database update commits. Requests already authenticated may finish. A
+lookup concurrent with revocation may also admit a request. Authentication is
+checked once per request, not once per stream chunk.
+
+Add active cancellation alongside the admin revocation endpoint in a later
+slice. For a single gateway, register each admitted request's cancellation
+function under its key ID, remove it on completion, and cancel matching requests
+only after successful persistent revocation. Coordinate authentication and
+registration with revocation so an admission cannot miss cancellation. Do not
+hold the registry lock while invoking cancellation functions. Cancellation
+must preserve other keys' requests and release entries on every exit path.
+
+Cancellation interrupts upstream work and an already-started stream; it cannot
+retract delivered tokens or replace a response status already sent. Verify the
+backend actually stops inference. Direct database changes do not automatically
+notify an in-memory registry.
+
+Multiple gateways need revocation notifications and recovery from missed
+messages. Each process owns only its local active requests. A strict stop deadline
+requires an explicit failure policy for partitions and notification outages.
+Estimate registry size from admitted request rate times request duration, then
+measure memory and cancellation latency. The earlier conversation's sizing
+numbers were illustrative, not measured gateway claims. Admission bounds belong
+to the planned overload-protection work.

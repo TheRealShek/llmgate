@@ -3,13 +3,14 @@
 `llmgate` is an OpenAI-compatible LLM gateway written in Go. It accepts HTTP
 requests and forwards them to one inference server, such as llama.cpp. The
 backend loads the model and generates tokens; the gateway handles HTTP routing,
-request validation, cancellation, and deadlines.
+API-key authentication, request validation, cancellation, and deadlines.
 
 Phase 1 is in progress. Health checks, model listing, JSON and streaming chat,
-and request IDs with structured logs work today. Postgres-backed API-key storage
-and its development Compose setup are available as the next learning slice;
-the gateway does not use that store yet. Authentication, rate limits,
-usage tracking, metrics, and the full Compose stack are still planned. A
+and request IDs with structured logs work today. Models and chat require an
+active API key stored as a hash in Postgres. A local command provisions keys;
+the development Compose setup runs Postgres and migrations. Admin endpoints,
+authentication caching, rate limits, usage tracking, metrics, and the full
+Compose stack are still planned. A
 [GLM single-stream baseline](docs/benchmarks.md) records 100 sequential requests
 split between direct and gateway paths. GLM-Edge-4B-Chat Q6_K is the primary
 model; the earlier Qwen baseline remains historical evidence.
@@ -18,7 +19,10 @@ model; the earlier Qwen baseline remains historical evidence.
 
 Use Go 1.27 or later. Follow the [GLM setup and testing guide](docs/manual-testing.md)
 to start llama.cpp with the downloaded GLM-Edge-4B-Chat Q6_K file and the alias
-`glm-edge-4b-chat`. Set the backend's base URL without the `/v1` suffix:
+`glm-edge-4b-chat`. First follow [Postgres setup](docs/manual-testing.md#postgres-key-storage)
+and [key creation](docs/manual-testing.md#api-key-authentication). Export
+`GATEWAY_DATABASE_URL` and `PGPASSWORD` in the gateway terminal and `API_KEY`
+in the client terminal. Set the backend's base URL without the `/v1` suffix:
 
 ```sh
 GATEWAY_UPSTREAM_URL=http://127.0.0.1:8081 go run ./cmd/gateway
@@ -29,22 +33,24 @@ The gateway listens on port 8080 by default. In another terminal:
 ```sh
 curl http://localhost:8080/v1/healthz
 curl http://localhost:8080/v1/readyz
-curl http://localhost:8080/v1/models
+curl http://localhost:8080/v1/models -H "Authorization: Bearer $API_KEY"
 
 # The documented backend starts with the alias glm-edge-4b-chat.
 curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"model":"glm-edge-4b-chat","messages":[{"role":"user","content":"Hello"}],"stream":false}'
 
 # Stream tokens as the backend generates them.
 curl -N http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"model":"glm-edge-4b-chat","messages":[{"role":"user","content":"Hello"}],"stream":true}'
 ```
 
 Without `GATEWAY_UPSTREAM_URL`, the process still starts. Health returns `200`,
-while readiness, model, and chat requests return `503`. `/v1/healthz` checks
-only the gateway process. `/v1/readyz` sends a fresh `GET /health` to the backend
+while readiness and authenticated model and chat requests return `503`.
+`/v1/healthz` checks only the gateway process. `/v1/readyz` sends a fresh `GET /health` to the backend
 and returns `200` only when that endpoint returns `200`. Backend base paths
 are preserved, so a base URL ending in `/api` probes `/api/health`.
 
@@ -59,31 +65,50 @@ Other backends must expose the same endpoint to pass this check. Readiness
 reports backend health at probe time; it does not reserve an inference slot or
 gate chat traffic. Periodic health tracking and backend routing belong to Phase 2.
 
+Database configuration is required even without an upstream backend. Startup
+checks Postgres connectivity with a deadline and fails with safe diagnostics
+if it cannot connect. Migrations run separately. After startup, database failures
+return `503` on protected routes; public health checks remain available.
+
 ## How a request works
 
 ```mermaid
 flowchart LR
-    Client --> Routes[Go HTTP routes]
-    Routes --> Health[Health response]
-    Routes --> Chat[Chat validation]
-    Routes --> Proxy[Reverse proxy]
+    Client --> Logs[Request logging]
+    Logs --> Routes[HTTP routes]
+    Routes --> Probes[Health and readiness]
+    Routes --> Auth[API-key authentication]
+    Auth --> Postgres[(Postgres)]
+    Auth --> Chat[Chat validation]
+    Auth --> Proxy[Reverse proxy]
     Chat --> Proxy
     Proxy --> Backend[Inference server]
 ```
 
-1. Go's `http.ServeMux` matches the method and path. The gateway exposes
-   `GET /v1/healthz`, `GET /v1/readyz`, `GET /v1/models`, and
-   `POST /v1/chat/completions`.
-2. For chat, the handler reads the body into a bounded buffer. It requires
+1. Request logging assigns a fresh request ID. Go's `http.ServeMux` matches
+   the method and versioned path. Health and readiness remain public.
+2. Models and chat pass through authentication. Exactly one
+   `Authorization: Bearer <key>` header is required. The store hashes the secret
+   and looks up an active key in Postgres under a separate lookup deadline.
+3. Missing, malformed, unknown, and revoked keys return JSON `401`. Database
+   failures and lookup deadlines return JSON `503`. Neither reaches the backend.
+   Authentication adds the key identity and limits to the request context,
+   preserving logging and client cancellation. Limits are not enforced yet.
+4. For chat, the handler reads the body into a bounded buffer. It requires
    `application/json`, a JSON object, and a boolean `stream` field when present.
-   `stream: true` selects SSE forwarding. Explicit `max_tokens` values must be
-   positive integers within the configured limit.
-3. The handler preserves backend-specific fields and inserts the configured
-   `max_tokens` limit when omitted. The backend validates the model, messages,
-   and other generation options.
-4. The standard library's `httputil.ReverseProxy` sends the request upstream and
-   copies the backend's status, response headers, and body back to the client.
-   Model-list requests use this proxy directly.
+   Explicit `max_tokens` values must be positive integers within the limit.
+5. The handler preserves backend-specific fields and inserts `max_tokens` when
+   omitted. `stream: true` selects SSE; other accepted requests select JSON.
+   The backend validates the model, messages, and other generation options.
+6. The reverse proxy removes the gateway Authorization header, sends the request
+   upstream, and copies the backend's status, response headers, and body back.
+   Authenticated model-list requests use the non-streaming proxy directly.
+
+The lookup deadline ends before forwarding starts. Revocation rejects subsequent
+lookups after the database update commits. Already-authenticated requests may
+finish. Active cancellation will be added with the admin revocation endpoint.
+All active keys currently have the same model and chat permissions. Use HTTPS
+when exposing the gateway beyond local development.
 
 The proxy derives its deadline from the incoming request's Go `context`, which
 carries cancellation signals. A client disconnect cancels upstream HTTP work.
@@ -110,6 +135,10 @@ shutdown deadline expires.
 
 | Environment variable | Default | Controls |
 | --- | --- | --- |
+| `GATEWAY_DATABASE_URL` | Required | PostgreSQL connection configuration |
+| `GATEWAY_DATABASE_MAX_CONNS` | `10` | Maximum shared database connections |
+| `GATEWAY_DATABASE_CONNECT_TIMEOUT` | `5s` | Pool startup and individual connection deadlines |
+| `GATEWAY_AUTH_LOOKUP_TIMEOUT` | `2s` | Authentication lookup and local key insertion deadline |
 | `GATEWAY_ADDR` | `:8080` | Listen address |
 | `GATEWAY_UPSTREAM_URL` | Unset | Backend base URL |
 | `GATEWAY_UPSTREAM_TIMEOUT` | `30s` | Total deadline for model lists and JSON chat |
@@ -133,29 +162,35 @@ or `30s` and must be positive.
 Start with a single request: `POST /v1/chat/completions` with `stream: true`.
 Read these functions in order:
 
-1. [`run`](cmd/gateway/run.go) assembles the proxies, `routes`, and `loggedRoutes`,
-   then gives the HTTP server the outer logging handler.
+1. [`run`](cmd/gateway/run.go) selects local key creation when requested.
+   For normal startup it opens the shared database pool, constructs the key store
+   and authenticator, then assembles proxies, routes, and logging.
 2. [`requestlog.NewHandler`](internal/requestlog/handler.go) assigns the request
-   ID and logger, then calls `next.ServeHTTP` to enter the routes.
-3. [`gateway.NewHandler`](internal/gateway/handler.go) registers the chat route
-   with a `chatHandler`. This is the only gateway constructor.
-4. [`chatHandler.ServeHTTP`](internal/gateway/chat.go) validates the JSON and
-   limits, selects the streaming proxy, and gives it a request with a fresh
-   body reader through `upstream.ServeHTTP`.
-5. [`streamHandler.ServeHTTP`](internal/proxy/stream.go) keeps client cancellation
+   ID and logger before entering the routes.
+3. [`gateway.NewHandler`](internal/gateway/handler.go) registers public probes
+   and places authentication around models and chat. Its `HandlerOptions` names
+   each dependency and the chat limits. This is the only constructor.
+4. [`auth.handler.ServeHTTP`](internal/auth/handler.go) extracts the credential,
+   bounds the lookup, handles rejection, and adds identity before entering chat.
+   Follow [`KeyStore.LookupKey`](internal/store/keys.go) for hashing and SQL.
+5. [`chatHandler.ServeHTTP`](internal/gateway/chat.go) validates JSON and limits,
+   selects the streaming proxy, and supplies a fresh body reader.
+6. [`streamHandler.ServeHTTP`](internal/proxy/stream.go) preserves cancellation
    and adds the idle-read timeout wrapper before calling the reverse proxy.
-6. [`newForwarder`](internal/proxy/forward.go) configures that reverse proxy to
-   send the request to the backend and copy its response back to the client.
+7. [`newForwarder`](internal/proxy/forward.go) removes Authorization, sets the
+   upstream target and request ID, and forwards the request and response.
 
-Each `ServeHTTP` call hands the request to the next component. Backend response
-bytes return through the same response writer. When forwarding ends, the logging
-handler writes the finish log. For JSON chat, step 5 uses
-[`proxy.NewNonStreamingHandler`](internal/proxy/nonstream.go) instead and applies
-a total deadline.
+Each `ServeHTTP` call hands the request to the next component using the same
+response writer. When forwarding ends, logging writes the finish event. For JSON
+chat, step 6 uses [`proxy.NewNonStreamingHandler`](internal/proxy/nonstream.go)
+and applies a total deadline instead.
 
-Read [shutdown](cmd/gateway/server.go) separately for connection cleanup.
-HTTP forwarding uses the Go standard library. The separate key-storage package
-uses `pgx` for PostgreSQL access.
+Read [`OpenPool`](internal/store/pool.go) and [shutdown](cmd/gateway/server.go)
+for resource ownership. Startup closes the pool after HTTP shutdown returns.
+Read [`createKey`](cmd/gateway/key_create.go) for local provisioning and
+[`auth tests`](internal/auth/handler_test.go) for rejection and cancellation.
+[The Postgres integration test](cmd/gateway/auth_integration_test.go) follows
+local creation through authenticated forwarding and revocation.
 
 For readiness, start at the `readiness` assignment in `run`, follow its route
 registration in `gateway.NewHandler`, then read

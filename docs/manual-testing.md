@@ -67,7 +67,9 @@ and [the official GLM GGUF model](https://huggingface.co/zai-org/glm-edge-4b-cha
 curl -i http://127.0.0.1:8081/health
 ```
 
-Wait until this returns HTTP 200 before starting the gateway.
+Wait until this returns HTTP 200 before starting the gateway. Initialize
+[Postgres](#postgres-key-storage), apply its migration, and export the database
+configuration in this terminal as described under [authentication](#api-key-authentication).
 
 ```sh
 cd /Drive2/Coding_Skills/Projects/llmgate
@@ -87,10 +89,13 @@ Keep this terminal open to watch request logs. Request logs remain JSON.
 
 ## 3. Check gateway health and model listing in terminal three
 
+Create a key and export `API_KEY` in this terminal using the
+[authentication setup](#api-key-authentication) before model or chat requests.
+
 ```sh
 curl -i http://127.0.0.1:8080/v1/healthz
 curl -i http://127.0.0.1:8080/v1/readyz
-curl -sS http://127.0.0.1:8080/v1/models
+curl -sS http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $API_KEY"
 ```
 
 Health and readiness should return HTTP 200. Health checks the gateway process;
@@ -109,6 +114,7 @@ Use the ID actually returned if it differs from the examples below.
 ```sh
 curl -N --fail-with-body \
   http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "glm-edge-4b-chat",
@@ -135,6 +141,7 @@ MODEL_ID='glm-edge-4b-chat'
 
 curl -N --fail-with-body \
   http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" \
   -H 'Content-Type: application/json' \
   -d "{\"model\":\"$MODEL_ID\",\"messages\":[{\"role\":\"user\",\"content\":\"Explain why a gateway needs timeouts in three short sentences.\"}],\"stream\":true,\"max_tokens\":128}"
 ```
@@ -146,6 +153,7 @@ Both versions send the same request.
 ```sh
 curl --fail-with-body \
   http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "glm-edge-4b-chat",
@@ -166,6 +174,7 @@ Generated text and token counts depend on the model and can differ on later runs
 
 ```sh
 curl -N http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "glm-edge-4b-chat",
@@ -207,7 +216,7 @@ Then run these commands in terminal three:
 ```sh
 curl -i http://127.0.0.1:8080/v1/healthz
 curl -i http://127.0.0.1:8080/v1/readyz
-curl -i http://127.0.0.1:8080/v1/models
+curl -i http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $API_KEY"
 ```
 
 Expected results:
@@ -229,16 +238,17 @@ With both services running and no other inference traffic:
 python bench/single_stream.py > /tmp/llmgate-glm-single-stream-100.json
 ```
 
-The default model is `glm-edge-4b-chat`. This sends one warm-up per path, then
+Export an active `API_KEY` in this terminal first. The script sends the key only
+to the gateway and omits it from the JSON report. The default model is
+`glm-edge-4b-chat`. This sends one warm-up per path, then
 100 sequential measured requests, split evenly between direct llama.cpp and the
 gateway. See [benchmarks](benchmarks.md) for timing definitions and historical
 results. Save GLM measurements separately from the retired model's data.
 
 ## Postgres key storage
 
-Key storage is implemented separately from the HTTP request path. It creates,
-looks up, and revokes hashed API keys, but authentication is not wired into the
-gateway yet. The development Compose file currently starts Postgres and its
+The gateway authenticates model and chat requests through Postgres. The store
+creates, looks up, and revokes hashed API keys. The development Compose file currently starts Postgres and its
 migration tool.
 
 From the repository root, initialize a new local database and apply migrations:
@@ -277,6 +287,75 @@ concurrency, database constraints, and migration rollback. Without the test URL,
 database tests skip; validation tests still run. A supplied but unreachable URL
 fails the tests. The URL above disables TLS only for the local development setup.
 
+## API-key authentication
+
+After Postgres setup, export the connection configuration in both the gateway
+terminal and the key-creation terminal. Keep the password out of the URL. The
+local example disables TLS only for the localhost development database.
+
+```sh
+export GATEWAY_DATABASE_URL='postgres://llmgate@127.0.0.1:5432/llmgate?sslmode=disable'
+export PGPASSWORD="$POSTGRES_PASSWORD"
+```
+
+In terminal three, create a key and capture its JSON output without displaying
+the secret in command history. The name and positive limits are stored with the
+key. Authentication does not enforce these limits yet.
+
+```sh
+KEY_JSON="$(go run ./cmd/gateway key-create \
+  -name manual-test -requests-per-min 60 -tokens-per-day 100000)"
+API_KEY="$(printf '%s' "$KEY_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["api_key"])')"
+KEY_ID="$(printf '%s' "$KEY_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+export API_KEY
+unset KEY_JSON
+```
+
+Proceed only if creation succeeds. The command returns the raw secret only after
+insertion. It cannot retrieve that secret later. If output delivery fails, the
+record may exist without a usable secret; revoke that record and create another
+key. The command reports this failure without printing the secret.
+
+Start the gateway using step 2. Test missing and active credentials:
+
+```sh
+curl -i http://127.0.0.1:8080/v1/models
+curl -i http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $API_KEY"
+```
+
+The first returns JSON `401` and `WWW-Authenticate: Bearer`. The second forwards
+to the backend. Missing, malformed, unknown, and revoked credentials receive the
+same error. Logs omit the secret and database diagnostics. Health and readiness
+need no key. An authentication lookup failure or deadline returns `503` before
+backend work; missing database configuration or failed initial connectivity
+prevents startup.
+
+Until admin endpoints exist, revoke only the key created above using its ID:
+
+```sh
+psql "$GATEWAY_DATABASE_URL" -v ON_ERROR_STOP=1 -v key_id="$KEY_ID" <<'SQL'
+UPDATE api_keys SET revoked_at = COALESCE(revoked_at, now())
+WHERE id = :'key_id'::bigint;
+SQL
+curl -i http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $API_KEY"
+unset API_KEY KEY_ID
+```
+
+The request now returns `401`. Already-authenticated streams may finish.
+Create a fresh key before continuing chat checks or the benchmark. Active
+cancellation and admin HTTP endpoints are later work, described in
+[decisions](decisions.md#revocation-and-active-requests).
+
+Run the isolated command-to-authentication integration test with:
+
+```sh
+LLMGATE_TEST_DATABASE_URL="$GATEWAY_DATABASE_URL" \
+  go test -count=1 -v ./cmd/gateway -run TestKeyCreationAndAuthentication
+```
+
+It creates and drops only a unique test schema, leaving development keys intact.
+Without the test URL it skips; with an unreachable database it fails.
+
 ## Automated tests
 
 For the full Go test suite:
@@ -285,11 +364,19 @@ For the full Go test suite:
 go test ./...
 ```
 
-For the startup and shutdown package checked during the startup-message change:
+For race detection and static checks:
 
 ```sh
-go test ./cmd/gateway
+go test -race ./...
+go vet ./...
 ```
 
-The gateway package tests passed during the session. These commands test the
-code with test backends; they do not replace the real llama.cpp checks above.
+For the authentication packages and whitespace checks:
+
+```sh
+go test ./internal/auth ./internal/gateway ./internal/proxy ./cmd/gateway
+wsl ./internal/auth ./internal/store ./internal/gateway ./internal/proxy ./cmd/gateway
+```
+
+These commands use test backends. Postgres integration tests require the test
+URL and otherwise skip; they do not replace the real llama.cpp checks above.

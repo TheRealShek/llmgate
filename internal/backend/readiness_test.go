@@ -58,7 +58,9 @@ func TestReadinessStatus(t *testing.T) {
 			transport := http.DefaultTransport.(*http.Transport).Clone()
 			t.Cleanup(transport.CloseIdleConnections)
 			readiness := backend.NewReadinessHandler(target, transport, time.Second)
-			routes := gateway.NewHandler(nil, nil, readiness, gateway.ChatLimits{})
+			routes := gateway.NewHandler(gateway.HandlerOptions{
+				Readiness: readiness,
+			})
 			handler := requestlog.NewHandler(routes, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 			request := httptest.NewRequest(
 				http.MethodGet,

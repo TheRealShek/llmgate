@@ -15,9 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/therealshek/llmgate/internal/auth"
 	"github.com/therealshek/llmgate/internal/gateway"
 	"github.com/therealshek/llmgate/internal/proxy"
 	"github.com/therealshek/llmgate/internal/requestlog"
+	"github.com/therealshek/llmgate/internal/store"
 )
 
 // TestRequestIdentity checks concurrent routes and proxy failures keep separate IDs without
@@ -34,12 +36,11 @@ func TestRequestIdentity(t *testing.T) {
 		transport,
 		time.Second,
 	)
-	routes := gateway.NewHandler(
-		forwarder,
-		nil,
-		nil,
-		gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
-	)
+	routes := gateway.NewHandler(gateway.HandlerOptions{
+		NonStreaming:   forwarder,
+		Authentication: auth.NewAuthenticator(logTestKeyLookup{}, time.Second),
+		Limits:         gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+	})
 	handler := requestlog.NewHandler(routes, logger)
 	paths := []string{"/v1/healthz", "/v1/models", "/missing/private-secret?token=query-secret"}
 
@@ -272,4 +273,14 @@ func TestAbortedRequest(t *testing.T) {
 	if !strings.Contains(logs.String(), `"completed":false`) {
 		t.Fatalf("abort was logged as completed: %s", &logs)
 	}
+}
+
+type logTestKeyLookup struct{}
+
+func (logTestKeyLookup) LookupKey(_ context.Context, secret string) (store.Key, error) {
+	if secret != "key-secret" {
+		return store.Key{}, store.ErrKeyNotFound
+	}
+
+	return store.Key{ID: 1}, nil
 }

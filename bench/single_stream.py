@@ -3,6 +3,7 @@
 import argparse
 import json
 import math
+import os
 import statistics
 import sys
 import time
@@ -25,11 +26,15 @@ TARGETS = [
 ]
 
 
-def measure(base):
+def measure(base, api_key=None):
+    headers = {"Content-Type": "application/json"}
+    if api_key is not None:
+        headers["Authorization"] = "Bearer " + api_key
+
     request = urllib.request.Request(
         base + "/v1/chat/completions",
         data=json.dumps(PAYLOAD).encode(),
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     started = time.perf_counter()
     first_token = None
@@ -105,9 +110,16 @@ def main():
     )
     args = parser.parse_args()
     PAYLOAD["model"] = args.model
+    api_key = os.environ.get("API_KEY")
+    if not api_key:
+        parser.error("Set API_KEY to an active gateway key before benchmarking")
 
     for name, base in TARGETS:
-        print("Warm-up:", name, measure(base), file=sys.stderr, flush=True)
+        print(
+            "Warm-up:", name,
+            measure(base, api_key if name == "gateway" else None),
+            file=sys.stderr, flush=True,
+        )
 
     results = []
     for pair in range(1, 51):
@@ -115,7 +127,7 @@ def main():
         for name, base in order:
             row = {"pair": pair, "path": name}
             try:
-                row.update(measure(base))
+                row.update(measure(base, api_key if name == "gateway" else None))
             except Exception as error:
                 row["error"] = type(error).__name__ + ": " + str(error)
             results.append(row)
@@ -131,6 +143,7 @@ def main():
     report = {
         "payload": PAYLOAD,
         "concurrency": 1,
+        "gateway_authentication": "direct_postgres_lookup",
         "warmups_per_path": 1,
         "results": results,
         "summaries": [summarize(name, results) for name, _ in TARGETS],

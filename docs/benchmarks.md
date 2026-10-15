@@ -102,11 +102,18 @@ model checksum, or background system load, so it is not a fully pinned benchmark
 ## Run the benchmark with GLM
 
 Follow [manual testing](manual-testing.md) to start the backend and gateway.
-Leave both running and avoid other inference traffic. From the repository root:
+Leave both running and avoid other inference traffic. Export an active `API_KEY`
+using the manual authentication setup. The script sends it only to the gateway
+and does not include it in the report. From the repository root:
 
 ```sh
 python bench/single_stream.py > /tmp/llmgate-glm-single-stream-100.json
 ```
+
+Current gateway requests include a direct Postgres authentication lookup. The
+saved baselines predate authentication and do not measure this additional work.
+New reports label their authentication mode; compare results with that difference
+in mind. Historical results and metadata remain unchanged.
 
 The script uses Python's standard library. Progress and warm-up results go to
 stderr; the JSON report goes to stdout. It exits with a nonzero status if a

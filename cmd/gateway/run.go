@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/therealshek/llmgate/internal/admin"
 	"github.com/therealshek/llmgate/internal/auth"
 	"github.com/therealshek/llmgate/internal/backend"
 	"github.com/therealshek/llmgate/internal/gateway"
@@ -88,14 +89,32 @@ func run(ctx context.Context) error {
 		IdleTimeout:       cfg.idleTimeout,
 	}
 
-	listener, err := net.Listen("tcp", server.Addr)
+	servers := []namedServer{{name: "gateway", server: server}}
+
+	if cfg.adminEnabled {
+		adminRoutes := admin.NewHandler(admin.HandlerOptions{
+			Keys:          keys,
+			Token:         cfg.adminToken,
+			MaxBodyBytes:  cfg.adminMaxBodyBytes,
+			CreateTimeout: cfg.adminCreateTimeout,
+		})
+		loggedAdminRoutes := requestlog.NewHandler(adminRoutes, slog.Default())
+		adminServer := &http.Server{
+			Addr:              cfg.adminAddr,
+			Handler:           loggedAdminRoutes,
+			ReadTimeout:       cfg.readTimeout,
+			ReadHeaderTimeout: cfg.readHeaderTimeout,
+			IdleTimeout:       cfg.idleTimeout,
+			// Admin replies are small JSON; bound delivery as well as upload and insertion.
+			WriteTimeout: cfg.readTimeout + cfg.adminCreateTimeout,
+		}
+		servers = append(servers, namedServer{name: "admin", server: adminServer})
+	}
+
+	bound, err := listenServers(servers)
 	if err != nil {
-		return fmt.Errorf("listen gateway HTTP on %s: %w", server.Addr, err)
+		return err
 	}
 
-	if err := runServer(ctx, server, listener, cfg.shutdownTimeout); err != nil {
-		return fmt.Errorf("run gateway HTTP on %s: %w", server.Addr, err)
-	}
-
-	return nil
+	return runServers(ctx, bound, cfg.shutdownTimeout)
 }

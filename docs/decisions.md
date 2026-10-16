@@ -259,7 +259,8 @@ before inference; a long stream does not hold a database connection. These are
 initial development limits, not measured capacity claims. The local creation
 command uses the same operation timeout for its single insertion.
 
-Admin HTTP endpoints and authentication caching are separate tasks.
+Admin creation now has its own listener policy below. Admin revocation and
+authentication caching remain separate tasks.
 
 ## Revocation and active requests
 
@@ -288,3 +289,50 @@ Estimate registry size from admitted request rate times request duration, then
 measure memory and cancellation latency. The earlier conversation's sizing
 numbers were illustrative, not measured gateway claims. Admission bounds belong
 to the planned overload-protection work.
+
+## Operator-local admin key creation
+
+Expose `POST /v1/admin/keys` only on a separate loopback listener in the same
+process. The public router never registers admin routes. A token on the public
+listener would allow anyone holding a leaked token to create keys remotely.
+Separating reachability and permission addresses that concern without relying
+on an ingress configuration that this project does not yet provide. A Unix
+socket would add filesystem permission and container-mount management; keep
+TCP loopback for the current host deployment.
+
+Admin HTTP is disabled by default. Explicit enablement requires a separate
+operator token. Accept only a literal loopback IP and numeric port, rejecting
+wildcard binds and hostnames so name resolution cannot change the boundary.
+Default the address to `127.0.0.1:8082`. Generate a random operator token outside
+the gateway and supply it through configuration. Require 32 to 256 URL-safe
+ASCII characters; the length check does not establish randomness. Rotate by
+changing configuration and restarting. Inference keys grant no admin permission.
+
+Authenticate before reading or validating the request body. Compare fixed-size
+SHA-256 digests with a constant-time comparison. Require JSON with a name and
+positive request/token limits, reject unknown fields and trailing JSON values,
+and bound the body and database insertion. Default the body limit to 4096 bytes
+and the insertion deadline to 2 seconds, both configurable. The admin server
+uses the existing request read, header, and idle deadlines. Its response write
+deadline is the read timeout plus insertion timeout; reject overflow rather than
+silently disabling that deadline. Public SSE retains no write deadline.
+Reuse `KeyStore.CreateKey`, return `201` with identity and the raw key once,
+and set `Cache-Control: no-store`.
+Log the created key ID with the request ID for auditing and lost-response cleanup.
+Never log the admin token, issued key, body, or raw database diagnostics. A
+committed insertion whose response is lost may leave a key the operator cannot
+recover; do not retry automatically or store plaintext secrets to recover it.
+
+Both enabled listeners must bind before either serves. A bind failure closes
+previous listeners. An unexpected server exit stops its peer. Drain both servers
+concurrently under one shutdown deadline, force-close overdue connections, and
+join serving and shutdown goroutines before releasing the shared database pool.
+The number of lifecycle goroutines is bounded by the number of enabled servers.
+
+For now the gateway runs on the host. Remote operators use SSH forwarding to
+host loopback; local processes still need the token. Loopback does not protect
+against a compromised host or unintended request forwarding. Container loopback
+is distinct from host loopback. Resolve admin reachability explicitly when
+adding the gateway to Compose; do not silently change to a wildcard bind or
+publish the admin listener publicly. Revocation and active-request cancellation
+remain the next slice.

@@ -8,9 +8,10 @@ API-key authentication, request validation, cancellation, and deadlines.
 Phase 1 is in progress. Health checks, model listing, JSON and streaming chat,
 and request IDs with structured logs work today. Models and chat require an
 active API key stored as a hash in Postgres. A local command provisions keys;
-the development Compose setup runs Postgres and migrations. Admin endpoints,
-authentication caching, rate limits, usage tracking, metrics, and the full
-Compose stack are still planned. A
+the development Compose setup runs Postgres and migrations. An opt-in loopback
+admin listener can also create keys over HTTP. Admin revocation, authentication
+caching, rate limits, usage tracking, metrics, and the full Compose stack are
+still planned. A
 [GLM single-stream baseline](docs/benchmarks.md) records 100 sequential requests
 split between direct and gateway paths. GLM-Edge-4B-Chat Q6_K is the primary
 model; the earlier Qwen baseline remains historical evidence.
@@ -128,8 +129,10 @@ returned normally, even for an HTTP error. An aborted stream can log
 `completed: false`; its HTTP status may already have been sent.
 
 On `SIGINT` or `SIGTERM`, the gateway stops accepting connections and gives
-active requests time to finish. It closes remaining connections when the
-shutdown deadline expires.
+active requests time to finish. When admin HTTP is enabled, both listeners stop
+accepting requests and drain concurrently under one shutdown deadline. Remaining
+connections close when it expires. Startup binds both ports before serving; a
+bind failure closes the other listener, and a later server failure stops its peer.
 
 ## Configuration
 
@@ -139,6 +142,11 @@ shutdown deadline expires.
 | `GATEWAY_DATABASE_MAX_CONNS` | `10` | Maximum shared database connections |
 | `GATEWAY_DATABASE_CONNECT_TIMEOUT` | `5s` | Pool startup and individual connection deadlines |
 | `GATEWAY_AUTH_LOOKUP_TIMEOUT` | `2s` | Authentication lookup and local key insertion deadline |
+| `GATEWAY_ADMIN_ENABLED` | `false` | Enable operator-local admin HTTP |
+| `GATEWAY_ADMIN_ADDR` | `127.0.0.1:8082` | Literal loopback IP and numeric port |
+| `GATEWAY_ADMIN_TOKEN` | Unset | Required when enabled; 32 to 256 URL-safe ASCII characters |
+| `GATEWAY_ADMIN_MAX_BODY_BYTES` | `4096` | Admin creation JSON body limit |
+| `GATEWAY_ADMIN_CREATE_TIMEOUT` | `2s` | Admin database insertion deadline |
 | `GATEWAY_ADDR` | `:8080` | Listen address |
 | `GATEWAY_UPSTREAM_URL` | Unset | Backend base URL |
 | `GATEWAY_UPSTREAM_TIMEOUT` | `30s` | Total deadline for model lists and JSON chat |
@@ -156,6 +164,31 @@ shutdown deadline expires.
 Oversized chat bodies return `413`, invalid JSON returns `400`, and unsupported
 content types return `415`. Duration settings accept Go values such as `500ms`
 or `30s` and must be positive.
+
+## Admin key creation
+
+`POST /v1/admin/keys` is available only on the opt-in loopback listener. The
+public listener returns `404` for admin paths even with a valid admin token.
+The private endpoint requires a separate operator token before parsing JSON;
+inference API keys grant no admin access. Success returns `201`, identity and
+limits, and the raw key once, with `Cache-Control: no-store`.
+
+Missing or incorrect credentials return JSON `401`; invalid JSON or non-positive
+limits return `400`, unsupported content types `415`, and oversized bodies `413`.
+Storage failures and insertion deadlines return fixed JSON `503` responses.
+Request logging omits credentials, issued keys, and database diagnostics.
+
+The admin server shares the database pool with public authentication. Its read
+and header deadlines use the existing settings; its write deadline is the sum
+of the read timeout and admin creation timeout. It has no streaming endpoints.
+The public server continues to have no response write deadline for SSE.
+
+Follow [admin setup](docs/manual-testing.md#operator-local-admin-key-creation).
+The gateway currently runs on the host, so remote operators can use SSH
+forwarding to host loopback. Container loopback is separate from host loopback;
+admin container networking remains a decision for Compose integration. Local
+processes can reach loopback and still need the token. Rotate the token by
+changing configuration and restarting the gateway.
 
 ## Read the code
 
@@ -191,6 +224,16 @@ Read [`createKey`](cmd/gateway/key_create.go) for local provisioning and
 [`auth tests`](internal/auth/handler_test.go) for rejection and cancellation.
 [The Postgres integration test](cmd/gateway/auth_integration_test.go) follows
 local creation through authenticated forwarding and revocation.
+
+For admin creation, read the `adminEnabled` branch in `run`, then
+[`admin.NewHandler` and `createKeyHandler.ServeHTTP`](internal/admin/handler.go).
+The handler checks the operator token, validates bounded JSON, and calls the
+same `KeyStore.CreateKey` as the CLI. Its operation context inherits client
+cancellation and gains an insertion deadline, released before output.
+[`listenServers` and `runServers`](cmd/gateway/server.go) bind both enabled ports
+and own their serving and shutdown goroutines. Their work completes before
+startup closes the shared pool. [Handler tests](internal/admin/handler_test.go)
+cover the boundary; [lifecycle tests](cmd/gateway/server_test.go) cover both roles.
 
 For readiness, start at the `readiness` assignment in `run`, follow its route
 registration in `gateway.NewHandler`, then read

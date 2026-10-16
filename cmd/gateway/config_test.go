@@ -92,6 +92,9 @@ func TestLoadConfig(t *testing.T) {
 			name: "defaults",
 			env:  map[string]string{},
 			want: config{
+				adminAddr:              "127.0.0.1:8082",
+				adminMaxBodyBytes:      4096,
+				adminCreateTimeout:     2 * time.Second,
 				databaseURL:            "postgres://localhost/llmgate",
 				databaseMaxConns:       10,
 				databaseConnectTimeout: 5 * time.Second,
@@ -127,6 +130,9 @@ func TestLoadConfig(t *testing.T) {
 				"GATEWAY_SHUTDOWN_TIMEOUT":         "15s",
 			},
 			want: config{
+				adminAddr:              "127.0.0.1:8082",
+				adminMaxBodyBytes:      4096,
+				adminCreateTimeout:     2 * time.Second,
 				databaseURL:            "postgres://localhost/llmgate",
 				databaseMaxConns:       10,
 				databaseConnectTimeout: 5 * time.Second,

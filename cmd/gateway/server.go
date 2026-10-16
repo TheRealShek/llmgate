@@ -6,65 +6,109 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 )
 
-// runServer serves HTTP and, on cancellation, drains requests up to shutdownTimeout.
-// It waits for shutdown and closes overdue connections so process exit has a bounded wait.
-func runServer(
-	ctx context.Context,
-	server *http.Server,
-	listener net.Listener,
-	shutdownTimeout time.Duration,
-) error {
-	// Let Serve report its result without waiting for the shutdown path to receive it.
-	serveDone := make(chan error, 1)
-	go func() { serveDone <- server.Serve(listener) }()
+// namedServer pairs an HTTP server with a label for logs and error messages.
+type namedServer struct {
+	name   string
+	server *http.Server
+}
+
+// boundServer pairs a server with its open network listener. It passes claimed
+// ports from listenServers to runServers so all ports bind before serving starts.
+type boundServer struct {
+	name     string
+	server   *http.Server
+	listener net.Listener
+}
+
+// listenServers binds every enabled server before any can accept requests.
+// Startup transfers successful listeners to runServers; a partial bind closes them here.
+func listenServers(servers []namedServer) ([]boundServer, error) {
+	bound := make([]boundServer, 0, len(servers))
+	for _, entry := range servers {
+		listener, err := net.Listen("tcp", entry.server.Addr)
+		if err != nil {
+			result := fmt.Errorf("listen %s HTTP: %w", entry.name, err)
+			for _, opened := range bound {
+				if err := opened.listener.Close(); err != nil {
+					result = errors.Join(result, fmt.Errorf("close %s listener: %w", opened.name, err))
+				}
+			}
+
+			return nil, result
+		}
+
+		bound = append(bound, boundServer{name: entry.name, server: entry.server, listener: listener})
+	}
+
+	return bound, nil
+}
+
+// runServers owns bound listeners and joins all serving and shutdown goroutines.
+// Cancellation or an unexpected server exit drains every server under one deadline.
+func runServers(ctx context.Context, servers []boundServer, shutdownTimeout time.Duration) error {
+	serveDone := make(chan error, len(servers))
+
+	var workers sync.WaitGroup
+	for _, entry := range servers {
+		workers.Go(func() {
+			err := entry.server.Serve(entry.listener)
+			serveDone <- fmt.Errorf("serve %s HTTP: %w", entry.name, err)
+		})
+		fmt.Printf("Server listening on %s (%s)\n", entry.listener.Addr(), entry.name)
+	}
+
+	var result error
+
+	consumed := 0
 
 	select {
 	case err := <-serveDone:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
+		consumed++
 
-		return fmt.Errorf("serve gateway HTTP: %w", err)
-	case <-time.After(20 * time.Millisecond):
-		fmt.Printf("Server listening on %s\n", listener.Addr())
+		if ctx.Err() == nil || !errors.Is(err, http.ErrServerClosed) {
+			result = err
+		}
 	case <-ctx.Done():
 	}
 
-	if ctx.Err() == nil {
-		select {
-		case err := <-serveDone:
-			if errors.Is(err, http.ErrServerClosed) {
-				return nil
-			}
-
-			return fmt.Errorf("serve gateway HTTP: %w", err)
-		case <-ctx.Done():
-		}
-	}
-
-	// The signal context is already canceled; draining needs a fresh deadline.
+	// The signal context may already be canceled. One fresh context bounds all
+	// drains together; concurrent Shutdown calls stop both listeners promptly.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
-	shutdownErr := server.Shutdown(shutdownCtx)
-	if shutdownErr != nil {
-		shutdownErr = fmt.Errorf("shutdown gateway HTTP: %w", shutdownErr)
-		// Shutdown does not close active connections when its deadline expires; Close does.
-		if err := server.Close(); err != nil {
-			shutdownErr = errors.Join(shutdownErr, fmt.Errorf("close gateway HTTP: %w", err))
-		}
-	}
-	// Serve returns when the listener closes, before draining finishes. Wait for both
-	// calls before returning so main cannot exit with a serving goroutine still running.
-	serveErr := <-serveDone
-	if errors.Is(serveErr, http.ErrServerClosed) {
-		serveErr = nil
-	} else if serveErr != nil {
-		serveErr = fmt.Errorf("serve gateway HTTP: %w", serveErr)
+	shutdownDone := make(chan error, len(servers))
+	for _, entry := range servers {
+		workers.Go(func() {
+			err := entry.server.Shutdown(shutdownCtx)
+			if err != nil {
+				err = fmt.Errorf("shutdown %s HTTP: %w", entry.name, err)
+				if closeErr := entry.server.Close(); closeErr != nil {
+					err = errors.Join(err, fmt.Errorf("close %s HTTP: %w", entry.name, closeErr))
+				}
+			}
+
+			shutdownDone <- err
+		})
 	}
 
-	return errors.Join(shutdownErr, serveErr)
+	for range servers {
+		result = errors.Join(result, <-shutdownDone)
+	}
+
+	for consumed < len(servers) {
+		err := <-serveDone
+		consumed++
+
+		if !errors.Is(err, http.ErrServerClosed) {
+			result = errors.Join(result, err)
+		}
+	}
+
+	workers.Wait()
+
+	return result
 }

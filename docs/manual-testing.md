@@ -82,7 +82,7 @@ go run ./cmd/gateway
 Expected startup message:
 
 ```text
-Server listening on 127.0.0.1:8080
+Server listening on 127.0.0.1:8080 (gateway)
 ```
 
 Keep this terminal open to watch request logs. Request logs remain JSON.
@@ -330,7 +330,7 @@ need no key. An authentication lookup failure or deadline returns `503` before
 backend work; missing database configuration or failed initial connectivity
 prevents startup.
 
-Until admin endpoints exist, revoke only the key created above using its ID:
+Until the admin revocation endpoint exists, revoke only the key created above using its ID:
 
 ```sh
 psql "$GATEWAY_DATABASE_URL" -v ON_ERROR_STOP=1 -v key_id="$KEY_ID" <<'SQL'
@@ -343,7 +343,7 @@ unset API_KEY KEY_ID
 
 The request now returns `401`. Already-authenticated streams may finish.
 Create a fresh key before continuing chat checks or the benchmark. Active
-cancellation and admin HTTP endpoints are later work, described in
+cancellation and admin revocation are later work, described in
 [decisions](decisions.md#revocation-and-active-requests).
 
 Run the isolated command-to-authentication integration test with:
@@ -355,6 +355,102 @@ LLMGATE_TEST_DATABASE_URL="$GATEWAY_DATABASE_URL" \
 
 It creates and drops only a unique test schema, leaving development keys intact.
 Without the test URL it skips; with an unreachable database it fails.
+
+## Operator-local admin key creation
+
+This slice supports creation only. Stop the gateway before changing its
+configuration. With the same Postgres setup and environment as above, generate
+an operator token during first-time setup. Regenerating this file and restarting
+rotates the credential. Keep the file outside the repository.
+
+```sh
+install -d -m 700 "$HOME/.cache/llmgate/admin"
+(umask 077; openssl rand -hex 32 > "$HOME/.cache/llmgate/admin/token")
+export GATEWAY_ADMIN_TOKEN="$(cat "$HOME/.cache/llmgate/admin/token")"
+export GATEWAY_ADMIN_ENABLED=true
+export GATEWAY_ADMIN_ADDR=127.0.0.1:8082
+
+GATEWAY_ADDR=127.0.0.1:8080 \
+GATEWAY_UPSTREAM_URL=http://127.0.0.1:8081 \
+go run ./cmd/gateway
+```
+
+Startup prints a listener line for `gateway` and one for `admin`. Enabled admin
+HTTP requires a token of 32 to 256 URL-safe ASCII characters and a literal
+loopback address with port 1 through 65535. Wildcards and hostnames are rejected.
+Admin HTTP remains disabled unless explicitly enabled; setting a token alone
+does not enable it. Defaults are a 4096-byte body limit and a 2-second database
+insertion timeout, controlled by `GATEWAY_ADMIN_MAX_BODY_BYTES` and
+`GATEWAY_ADMIN_CREATE_TIMEOUT`.
+
+In another local terminal, load the token and capture the newly issued key:
+
+```sh
+export GATEWAY_ADMIN_TOKEN="$(cat "$HOME/.cache/llmgate/admin/token")"
+KEY_JSON="$(curl --fail-with-body -sS http://127.0.0.1:8082/v1/admin/keys \
+  -H "Authorization: Bearer $GATEWAY_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"http-client","requests_per_min":60,"tokens_per_day":100000}')"
+API_KEY="$(printf '%s' "$KEY_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["api_key"])')"
+KEY_ID="$(printf '%s' "$KEY_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+export API_KEY
+unset KEY_JSON
+
+curl -i http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $API_KEY"
+```
+
+Creation returns `201` with `Cache-Control: no-store`. The issued key authorizes
+normal model and chat requests. The stored rate and daily token limits are not
+enforced yet. If creation fails, inspect its safe error response before running
+the extraction commands. A lost response after insertion can leave a stored key
+whose secret cannot be recovered. Do not automatically retry issuance; inspect
+the created key ID in request logs or database records, and revoke an unused
+key by ID using the earlier SQL procedure.
+
+Check the two access boundaries:
+
+```sh
+curl -i -X POST http://127.0.0.1:8080/v1/admin/keys \
+  -H "Authorization: Bearer $GATEWAY_ADMIN_TOKEN"
+curl -i -X POST http://127.0.0.1:8082/v1/admin/keys
+curl -i -X POST http://127.0.0.1:8082/v1/admin/keys \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+The public port returns `404`. Missing admin credentials and ordinary inference
+keys on the private port return `401`, before body parsing or insertion. Invalid
+input returns `400`, an unsupported content type `415`, an oversized body `413`,
+and a database failure or insertion deadline `503`. Request IDs remain present
+on rejected requests and logs omit credentials, issued secrets, and bodies.
+
+For a remote operator, SSH can forward a local port to the gateway host's
+loopback listener:
+
+```sh
+ssh -N -L 18082:127.0.0.1:8082 operator@gateway-host
+```
+
+Supply the admin token securely on the operator machine and use
+`http://127.0.0.1:18082/v1/admin/keys`. This assumes a host-run gateway. Container
+loopback is not host loopback; Compose admin reachability is not implemented.
+Do not publicly publish or proxy this listener. Local processes can reach it
+and still require the token; this boundary does not protect a compromised host.
+
+On shutdown both listeners stop accepting and drain under one deadline. If
+either enabled port cannot bind, startup releases the other and fails. If a
+serving listener fails later, its peer shuts down too. The shared database pool
+closes after serving and shutdown goroutines finish.
+
+Run admin handler, lifecycle, and optional Postgres checks with:
+
+```sh
+go test ./internal/admin ./cmd/gateway
+LLMGATE_TEST_DATABASE_URL="$GATEWAY_DATABASE_URL" \
+  go test -count=1 -v ./cmd/gateway -run TestAdminCreationAndAuthentication
+```
+
+The integration test uses a unique temporary schema and the existing migration.
+Without its database URL it skips. With a supplied but unreachable URL it fails.
 
 ## Automated tests
 
@@ -374,8 +470,8 @@ go vet ./...
 For the authentication packages and whitespace checks:
 
 ```sh
-go test ./internal/auth ./internal/gateway ./internal/proxy ./cmd/gateway
-wsl ./internal/auth ./internal/store ./internal/gateway ./internal/proxy ./cmd/gateway
+go test ./internal/admin ./internal/auth ./internal/gateway ./internal/proxy ./cmd/gateway
+wsl ./internal/admin ./internal/auth ./internal/store ./internal/gateway ./internal/proxy ./cmd/gateway
 ```
 
 These commands use test backends. Postgres integration tests require the test

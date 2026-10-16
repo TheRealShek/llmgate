@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// TestRunServerShutdown checks that shutdown stops new connections, preserves
+// TestRunServersShutdown checks that shutdown stops new connections, preserves
 // requests that finish in time, and cancels those that exceed the deadline.
-func TestRunServerShutdown(t *testing.T) {
+func TestRunServersShutdown(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		timeout time.Duration
@@ -61,7 +61,9 @@ func TestRunServerShutdown(t *testing.T) {
 
 			serverDone := make(chan error, 1)
 
-			workers.Go(func() { serverDone <- runServer(ctx, server, listener, tt.timeout) })
+			workers.Go(func() {
+				serverDone <- runServers(ctx, []boundServer{{name: "gateway", server: server, listener: listener}}, tt.timeout)
+			})
 
 			client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{}}
 			defer client.CloseIdleConnections()
@@ -153,9 +155,9 @@ func TestRunServerShutdown(t *testing.T) {
 	}
 }
 
-// TestRunServerListenerFailure checks that serving errors retain their cause so
+// TestRunServersListenerFailure checks that serving errors retain their cause so
 // callers can distinguish listener failures from normal shutdown.
-func TestRunServerListenerFailure(t *testing.T) {
+func TestRunServersListenerFailure(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -165,8 +167,260 @@ func TestRunServerListenerFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = runServer(t.Context(), &http.Server{}, listener, time.Second)
+	err = runServers(t.Context(), []boundServer{{name: "gateway", server: &http.Server{}, listener: listener}}, time.Second)
 	if !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("serve error = %v, want net.ErrClosed", err)
+	}
+}
+
+// TestListenServersRollback checks failure at either bind leaves no partial listener running.
+func TestListenServersRollback(t *testing.T) {
+	for _, failed := range []string{"gateway", "admin"} {
+		t.Run(failed, func(t *testing.T) {
+			occupied, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			t.Cleanup(func() { _ = occupied.Close() })
+
+			available, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			availableAddr := available.Addr().String()
+			if err := available.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			servers := []namedServer{
+				{name: "gateway", server: &http.Server{Addr: availableAddr}},
+				{name: "admin", server: &http.Server{Addr: availableAddr}},
+			}
+			for _, entry := range servers {
+				if entry.name == failed {
+					entry.server.Addr = occupied.Addr().String()
+				}
+			}
+
+			bound, err := listenServers(servers)
+
+			var operation *net.OpError
+			if bound != nil || !errors.As(err, &operation) {
+				t.Fatalf("partial bind result = %v, error %v", bound, err)
+			}
+
+			reopened, err := net.Listen("tcp", availableAddr)
+			if err != nil {
+				t.Fatalf("partial startup leaked a listener: %v", err)
+			}
+
+			_ = reopened.Close()
+		})
+	}
+}
+
+// TestPairedServersShutdown checks both listeners stop and active requests drain or cancel together.
+func TestPairedServersShutdown(t *testing.T) {
+	for _, drain := range []bool{true, false} {
+		name := "shared deadline forces close"
+		if drain {
+			name = "both requests drain"
+		}
+
+		t.Run(name, func(t *testing.T) {
+			release := make(chan struct{})
+
+			var (
+				servers                     []namedServer
+				started, stopping, finished []chan struct{}
+			)
+
+			for _, role := range []string{"gateway", "admin"} {
+				requestStarted, shutdownStarted, handlerDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+				server := &http.Server{Addr: "127.0.0.1:0", Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					close(requestStarted)
+					defer close(handlerDone)
+
+					select {
+					case <-release:
+						_, _ = io.WriteString(w, "finished")
+					case <-r.Context().Done():
+					}
+				})}
+				server.RegisterOnShutdown(func() { close(shutdownStarted) })
+				servers = append(servers, namedServer{name: role, server: server})
+				started = append(started, requestStarted)
+				stopping = append(stopping, shutdownStarted)
+				finished = append(finished, handlerDone)
+			}
+
+			bound, err := listenServers(servers)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithCancel(t.Context())
+
+			var workers sync.WaitGroup
+
+			t.Cleanup(func() {
+				cancel()
+
+				for _, entry := range bound {
+					_ = entry.server.Close()
+					_ = entry.listener.Close()
+				}
+
+				workers.Wait()
+			})
+
+			timeout := 100 * time.Millisecond
+			if drain {
+				timeout = 5 * time.Second
+			}
+
+			done := make(chan error, 1)
+
+			workers.Go(func() { done <- runServers(ctx, bound, timeout) })
+
+			client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{}}
+			t.Cleanup(client.CloseIdleConnections)
+
+			responses := make(chan error, len(bound))
+			for _, entry := range bound {
+				workers.Go(func() {
+					response, err := client.Get("http://" + entry.listener.Addr().String())
+					if err == nil {
+						_, err = io.Copy(io.Discard, response.Body)
+						_ = response.Body.Close()
+					}
+
+					responses <- err
+				})
+			}
+
+			for _, event := range started {
+				select {
+				case <-event:
+				case <-time.After(5 * time.Second):
+					t.Fatal("request did not start")
+				}
+			}
+
+			cancel()
+
+			for _, event := range stopping {
+				select {
+				case <-event:
+				case <-time.After(5 * time.Second):
+					t.Fatal("peer shutdown did not start concurrently")
+				}
+			}
+
+			for _, entry := range bound {
+				conn, err := net.DialTimeout("tcp", entry.listener.Addr().String(), time.Second)
+				if err == nil {
+					_ = conn.Close()
+
+					t.Fatal("listener still accepts during drain")
+				}
+			}
+
+			if drain {
+				close(release)
+			}
+
+			select {
+			case err := <-done:
+				if drain && err != nil {
+					t.Fatal(err)
+				}
+
+				if !drain && !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("shutdown error = %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("paired shutdown exceeded its bound")
+			}
+
+			for _, event := range finished {
+				select {
+				case <-event:
+				case <-time.After(5 * time.Second):
+					t.Fatal("handler did not stop")
+				}
+			}
+
+			for range bound {
+				err := <-responses
+				if drain && err != nil {
+					t.Fatal(err)
+				}
+
+				if !drain && err == nil {
+					t.Fatal("request survived forced close")
+				}
+			}
+		})
+	}
+}
+
+// TestServerFailureStopsPeer checks either listener failure stops the other and retains its cause.
+func TestServerFailureStopsPeer(t *testing.T) {
+	for _, failed := range []string{"gateway", "admin"} {
+		t.Run(failed, func(t *testing.T) {
+			bound, err := listenServers([]namedServer{
+				{name: "gateway", server: &http.Server{Addr: "127.0.0.1:0"}},
+				{name: "admin", server: &http.Server{Addr: "127.0.0.1:0"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithCancel(t.Context())
+
+			var workers sync.WaitGroup
+
+			t.Cleanup(func() {
+				cancel()
+
+				for _, entry := range bound {
+					_ = entry.server.Close()
+					_ = entry.listener.Close()
+				}
+
+				workers.Wait()
+			})
+
+			done := make(chan error, 1)
+
+			workers.Go(func() { done <- runServers(ctx, bound, time.Second) })
+
+			for _, entry := range bound {
+				if entry.name == failed {
+					_ = entry.listener.Close()
+				}
+			}
+
+			select {
+			case err := <-done:
+				if !errors.Is(err, net.ErrClosed) {
+					t.Fatalf("listener cause lost: %v", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("peer was left running")
+			}
+
+			for _, entry := range bound {
+				conn, err := net.DialTimeout("tcp", entry.listener.Addr().String(), time.Second)
+				if err == nil {
+					_ = conn.Close()
+
+					t.Fatal("peer still listening after failure")
+				}
+			}
+		})
 	}
 }

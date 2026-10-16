@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -9,6 +11,11 @@ import (
 )
 
 type config struct {
+	adminEnabled           bool
+	adminAddr              string
+	adminToken             string
+	adminMaxBodyBytes      int64
+	adminCreateTimeout     time.Duration
 	databaseURL            string
 	databaseMaxConns       int32
 	databaseConnectTimeout time.Duration
@@ -30,6 +37,9 @@ type config struct {
 
 func loadConfig(getenv func(string) string) (config, error) {
 	cfg := config{
+		adminAddr:              "127.0.0.1:8082",
+		adminMaxBodyBytes:      4096,
+		adminCreateTimeout:     2 * time.Second,
 		databaseURL:            getenv("GATEWAY_DATABASE_URL"),
 		databaseMaxConns:       10,
 		databaseConnectTimeout: 5 * time.Second,
@@ -46,6 +56,62 @@ func loadConfig(getenv func(string) string) (config, error) {
 		upstreamHeaderTimeout:  30 * time.Second,
 		streamIdleTimeout:      30 * time.Second,
 		readinessTimeout:       2 * time.Second,
+	}
+
+	if val := getenv("GATEWAY_ADMIN_ENABLED"); val != "" {
+		enabled, err := strconv.ParseBool(val)
+		if err != nil {
+			return config{}, fmt.Errorf("validate GATEWAY_ADMIN_ENABLED: requires a boolean: %w",
+				&configError{cause: err})
+		}
+
+		cfg.adminEnabled = enabled
+	}
+
+	if val := getenv("GATEWAY_ADMIN_ADDR"); val != "" {
+		cfg.adminAddr = val
+	}
+
+	if cfg.adminEnabled {
+		cfg.adminToken = getenv("GATEWAY_ADMIN_TOKEN")
+		if len(cfg.adminToken) < 32 || len(cfg.adminToken) > 256 {
+			return config{}, fmt.Errorf("validate GATEWAY_ADMIN_TOKEN: requires 32 to 256 URL-safe ASCII characters")
+		}
+
+		for _, char := range cfg.adminToken {
+			if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+				(char >= '0' && char <= '9') || char == '_' || char == '-' {
+				continue
+			}
+
+			return config{}, fmt.Errorf("validate GATEWAY_ADMIN_TOKEN: requires 32 to 256 URL-safe ASCII characters")
+		}
+
+		host, port, err := net.SplitHostPort(cfg.adminAddr)
+		if err != nil {
+			return config{}, fmt.Errorf("validate GATEWAY_ADMIN_ADDR: requires a loopback IP and numeric port: %w",
+				&configError{cause: err})
+		}
+
+		ip, err := netip.ParseAddr(host)
+		if err != nil {
+			return config{}, fmt.Errorf("validate GATEWAY_ADMIN_ADDR: requires a literal loopback IP: %w",
+				&configError{cause: err})
+		}
+
+		if !ip.IsLoopback() || ip.Zone() != "" {
+			return config{}, fmt.Errorf("validate GATEWAY_ADMIN_ADDR: requires a literal loopback IP")
+		}
+
+		number, err := strconv.ParseUint(port, 10, 16)
+		if err != nil {
+			return config{}, fmt.Errorf("validate GATEWAY_ADMIN_ADDR: requires a numeric port: %w",
+				&configError{cause: err})
+		}
+
+		if number == 0 {
+			return config{}, fmt.Errorf("validate GATEWAY_ADMIN_ADDR: requires a port from 1 to 65535")
+		}
 	}
 
 	if cfg.databaseURL == "" {
@@ -66,6 +132,23 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 
 	var err error
+
+	cfg.adminCreateTimeout, err = envDuration(getenv, "GATEWAY_ADMIN_CREATE_TIMEOUT", cfg.adminCreateTimeout)
+	if err != nil {
+		return config{}, err
+	}
+
+	if val := getenv("GATEWAY_ADMIN_MAX_BODY_BYTES"); val != "" {
+		cfg.adminMaxBodyBytes, err = strconv.ParseInt(val, 10, 64)
+		if err != nil {
+			return config{}, fmt.Errorf("validate GATEWAY_ADMIN_MAX_BODY_BYTES: requires a positive integer: %w",
+				&configError{cause: err})
+		}
+
+		if cfg.adminMaxBodyBytes <= 0 {
+			return config{}, fmt.Errorf("validate GATEWAY_ADMIN_MAX_BODY_BYTES: requires a positive integer")
+		}
+	}
 
 	cfg.databaseConnectTimeout, err = envDuration(getenv, "GATEWAY_DATABASE_CONNECT_TIMEOUT", cfg.databaseConnectTimeout)
 	if err != nil {
@@ -157,6 +240,10 @@ func loadConfig(getenv func(string) string) (config, error) {
 	cfg.shutdownTimeout, err = envDuration(getenv, "GATEWAY_SHUTDOWN_TIMEOUT", cfg.shutdownTimeout)
 	if err != nil {
 		return config{}, err
+	}
+
+	if cfg.adminEnabled && cfg.readTimeout+cfg.adminCreateTimeout <= 0 {
+		return config{}, fmt.Errorf("validate admin write timeout: read and creation timeouts are too large together")
 	}
 
 	return cfg, nil

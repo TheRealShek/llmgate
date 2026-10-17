@@ -1,0 +1,96 @@
+{
+  "payload": {
+    "model": "glm-edge-4b-chat",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Explain why a gateway needs timeouts in three short sentences."
+      }
+    ],
+    "stream": true,
+    "max_tokens": 128,
+    "temperature": 0
+  },
+  "concurrency": 1,
+  "gateway_authentication": null,
+  "warmups_per_path": 1,
+  "results": [
+    {
+      "pair": 1,
+      "path": "direct",
+      "ttft_ms": 90.51774899853626,
+      "total_ms": 7110.926384004415,
+      "backend_decode_tps": 13.674707204576467,
+      "completion_tokens": 97,
+      "finish_reason": "stop"
+    },
+    {
+      "pair": 2,
+      "path": "direct",
+      "ttft_ms": 74.84963600290939,
+      "total_ms": 6978.790461005701,
+      "backend_decode_tps": 13.904944351978173,
+      "completion_tokens": 97,
+      "finish_reason": "stop"
+    },
+    {
+      "pair": 3,
+      "path": "direct",
+      "ttft_ms": 69.48971400561277,
+      "total_ms": 7090.482865001832,
+      "backend_decode_tps": 13.673219177145668,
+      "completion_tokens": 97,
+      "finish_reason": "stop"
+    },
+    {
+      "pair": 4,
+      "path": "direct",
+      "ttft_ms": 74.59989599738037,
+      "total_ms": 7019.457839996903,
+      "backend_decode_tps": 13.823071310777056,
+      "completion_tokens": 97,
+      "finish_reason": "stop"
+    },
+    {
+      "pair": 5,
+      "path": "direct",
+      "ttft_ms": 69.78816800256027,
+      "total_ms": 6860.373513998638,
+      "backend_decode_tps": 14.137391589400668,
+      "completion_tokens": 97,
+      "finish_reason": "stop"
+    }
+  ],
+  "summaries": [
+    {
+      "path": "direct",
+      "requests": 5,
+      "successes": 5,
+      "failures": 0,
+      "completion_tokens": [
+        97
+      ],
+      "finish_reasons": [
+        "stop"
+      ],
+      "ttft_ms": {
+        "median": 74.59989599738037,
+        "p95_nearest_rank": 90.51774899853626,
+        "min": 69.48971400561277,
+        "max": 90.51774899853626
+      },
+      "total_ms": {
+        "median": 7019.457839996903,
+        "p95_nearest_rank": 7110.926384004415,
+        "min": 6860.373513998638,
+        "max": 7110.926384004415
+      },
+      "backend_decode_tps": {
+        "median": 13.823071310777056,
+        "p95_nearest_rank": 14.137391589400668,
+        "min": 13.673219177145668,
+        "max": 14.137391589400668
+      }
+    }
+  ]
+}

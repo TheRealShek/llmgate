@@ -1,9 +1,60 @@
 # Single-stream baseline
 
-GLM-Edge-4B-Chat Q6_K is the primary model. Its measured baseline is below.
-The older Qwen results remain separately labeled as historical evidence.
+GLM-Edge-4B-Chat Q6_K is the primary model. Normal local inference now uses
+CUDA. Earlier CPU gateway measurements remain historical evidence.
 
-## GLM run on October 14, 2026
+## Local CPU and GPU check on October 16, 2026
+
+The RTX 3060 Laptop GPU can run this model with full layer offload. We used
+the official llama.cpp `b11681` CUDA 12.8 binary for both modes, six CPU
+threads, a 2048-token context, and one parallel slot. CPU execution selected
+`--device none --n-gpu-layers 0`. CUDA selected
+`--device CUDA0 --n-gpu-layers 99`, which offloaded all 41 layers. A separate
+functional check also verified the documented `--n-gpu-layers all` setting.
+
+| Measurement | CPU | CUDA on RTX 3060 |
+| --- | ---: | ---: |
+| Successful measured streams | 5/5 | 5/5 |
+| Median first-token latency | 74.60 ms | 23.79 ms |
+| Median total response time | 7.019 s | 1.935 s |
+| Median backend decode speed | 13.82 tokens/s | 51.27 tokens/s |
+| Completion tokens per measured request | 97 | 99 |
+| Finish reason | stop | stop |
+
+The median backend decode rate was about 3.71 times the CPU rate. Both modes
+used the same prompt, temperature zero, and maximum of 128 completion tokens.
+Floating-point execution differs between CPU and CUDA, so deterministic
+sampling did not produce identical token counts. Compare decode rates with
+that limitation in mind; total response times also include different lengths.
+
+Each mode excluded one warm-up and then ran five sequential requests directly
+against llama.cpp. The prompt repeats and its prefix stays cached. CPU ran
+first, followed by CUDA. This is a small local feasibility check, without
+concurrent load, controlled thermal conditions, or a gateway in the request
+path. It does not establish tail latency or authenticated gateway overhead.
+The laptop was on AC power with the CPU governor set to `powersave`.
+
+During the GPU run, `nvidia-smi` identified the inference process using
+3692 MiB. Total sampled GPU memory, including other applications, peaked at
+4337 MiB; sampled GPU utilization reached 99%. Startup reported a 3244.16 MiB
+CUDA model buffer, 240 MiB KV cache, and 74.01 MiB CUDA compute buffer. Host
+buffers and runtime allocations also exist. These figures apply to this
+context and slot count, not an arbitrary workload.
+
+JSON chat, streaming completion, model listing, and health checks passed in
+both modes. An additional CUDA stream disconnected after its first content
+token. The backend logged cancellation and its slot became idle within about
+43 ms of closing the response in this one check. A subsequent JSON request
+completed. This checks direct backend cancellation, not the full gateway path.
+
+Reproduce with the [manual setup and comparison commands](manual-testing.md#8-record-a-glm-single-stream-baseline).
+See [CPU rows](../bench/results/2026-10-16-glm-cpu-5.json),
+[CUDA rows](../bench/results/2026-10-16-glm-gpu-5.json), and
+[runtime metadata and GPU evidence](../bench/results/2026-10-16-glm-cpu-gpu.metadata.json).
+The earlier gateway baseline below used another build and must not be treated
+as the CPU half of this comparison.
+
+## Historical CPU GLM run on October 14, 2026
 
 We started llama.cpp and the Go gateway in separate external Foot windows, then
 ran `python bench/single_stream.py --model glm-edge-4b-chat`. The run excluded
@@ -38,12 +89,14 @@ method on each path's 50 measurements.
 The model file is the official Q6_K GGUF documented in
 [manual testing](manual-testing.md), with SHA-256
 `d8e83d4f9b6c6c89214d5c1dd17355d44be99173c15efa846d31ce01d1bda1f3`.
-The measured llama.cpp build was `b11580-4413a1924`. To use the exact image again,
-replace the `:server` image in the manual startup command with:
+The measured llama.cpp build was `b11580-4413a1924`. Its CPU Docker image was:
 
 ```text
 ghcr.io/ggml-org/llama.cpp@sha256:c789283572ba78c2699b8945a96e654c850f938a717883f2e6187a14adac698f
 ```
+
+The saved metadata contains the original Docker startup command. The current
+manual guide starts native CUDA inference and does not reproduce this CPU run.
 
 Gateway and benchmark source matched
 [the model-switch commit](https://github.com/TheRealShek/llmgate/commit/456fc4d1f2cb2a5d588641a8e25cd7357a881940).

@@ -2,7 +2,7 @@
 
 ## Primary inference model
 
-Use GLM-Edge-4B-Chat Q6_K as the primary CPU model in llama.cpp, following
+Use GLM-Edge-4B-Chat Q6_K as the primary model in llama.cpp, following
 Abhishek's trial and selection. Serve it with the alias `glm-edge-4b-chat` so
 requests and the benchmark use a stable model ID.
 
@@ -17,6 +17,28 @@ Docker-volume cleanup command successfully. Historical Qwen benchmarks remain
 unchanged and labeled with their original model. A separate
 [GLM single-stream baseline](benchmarks.md) now records 100 measured requests
 with the replacement model, its checksum, and the inference image digest.
+
+## Local GPU inference
+
+Use CUDA on the RTX 3060 Laptop GPU for normal inference. The earlier CPU-only
+Docker command did not use this GPU. On October 16, 2026, the CUDA build loaded
+all 41 model layers into GPU execution with a 2048-token context and one slot.
+The process used about 3692 MiB of VRAM. Five measured streams per mode showed
+median decode rates of 51.27 tokens/s on CUDA and 13.82 tokens/s on CPU with
+the same llama.cpp release. See [results and limitations](benchmarks.md).
+
+Use the pinned official `b11681` CUDA 12.8 binaries and runtime libraries for
+the local setup. They run with the existing driver without a CUDA compiler,
+system library changes, or Docker access. Select `CUDA0` and request all layers
+explicitly. Check the startup offload message and the process in `nvidia-smi`;
+successful HTTP responses alone do not prove GPU execution.
+
+Keep CPU execution available for explicit comparisons and machines without a
+usable GPU. Larger contexts, more slots, or other GPU applications may exhaust
+VRAM even though this configuration fits. Recheck memory before increasing
+those limits. The gateway still runs on the CPU and forwards HTTP requests;
+the inference backend owns GPU execution. This remains the single-backend
+Phase 1 setup, separate from the later vLLM comparison.
 
 ## Persistent API-key storage
 

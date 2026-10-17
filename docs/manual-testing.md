@@ -35,30 +35,80 @@ printf '%s  %s\n' \
   | sha256sum --check
 ```
 
-Continue only when the checksum reports `OK`. Start the backend with a read-only
-mount of the model directory. Stop any existing backend on host port 8081 first.
-Docker requires sudo in this session.
+Continue only when the checksum reports `OK`. Normal local inference uses the
+RTX 3060 through CUDA. The tested setup uses official native binaries, so it
+does not need Docker permissions or a CUDA compiler. Keep the existing NVIDIA
+driver. Check that `nvidia-smi` detects the GPU first.
+
+The runtime is already installed on this machine. On a fresh machine with a
+working NVIDIA driver, `gh`, and `tar`, download and verify the same release:
 
 ```sh
-sudo docker run --rm --init \
-  --name llmgate-glm-test \
-  -p 127.0.0.1:8081:8080 \
-  -v "$HOME/.cache/llmgate/models/glm-edge-4b-chat:/models:ro" \
-  ghcr.io/ggml-org/llama.cpp:server \
-  --model /models/ggml-model-Q6_K.gguf \
-  --alias glm-edge-4b-chat \
-  --host 0.0.0.0 \
-  --port 8080 \
-  --ctx-size 2048 \
-  --parallel 1 \
-  --threads 6
+LLAMA_RELEASE_DIR="$HOME/.cache/llmgate/runtime/b11681-cuda12.8"
+mkdir -p "$LLAMA_RELEASE_DIR"
+
+gh release download b11681 --repo ggml-org/llama.cpp \
+  --pattern '*ubuntu-cuda-12.8-x64.tar.gz' \
+  --dir "$LLAMA_RELEASE_DIR" --skip-existing
+
+(
+  set -e
+  cd "$LLAMA_RELEASE_DIR"
+  printf '%s  %s\n' \
+    'b920cfbdb0ec6bd46d7f20eeaa7c5d4eb760a73f7359a1e63146025674168863' \
+    'llama-b11681-bin-ubuntu-cuda-12.8-x64.tar.gz' \
+    '9445563f1ea8bae7acf09448f2da907cda223afd682a86d5fb5ba63b111303cc' \
+    'cudart-llama-b11681-bin-ubuntu-cuda-12.8-x64.tar.gz' \
+    | sha256sum --check
+  tar -xzf llama-b11681-bin-ubuntu-cuda-12.8-x64.tar.gz
+  tar -xzf cudart-llama-b11681-bin-ubuntu-cuda-12.8-x64.tar.gz
+)
 ```
 
-Keep this terminal open. The container listens on port 8080 internally; Docker
-maps it to host port 8081. The image's `server` tag can change between runs.
-This guide is a functional check, not a version-pinned benchmark.
+Both archive checks must report `OK`. The CUDA libraries stay inside this
+cache directory. Stop any existing backend on host port 8081, then start:
 
-References: [llama.cpp Docker instructions](https://github.com/ggml-org/llama.cpp/blob/master/docs/docker.md)
+```sh
+LLAMA_RELEASE_DIR="$HOME/.cache/llmgate/runtime/b11681-cuda12.8"
+
+LD_LIBRARY_PATH="$LLAMA_RELEASE_DIR/llama-b11681:$LLAMA_RELEASE_DIR/cudart-llama-b11681-bin-ubuntu-cuda-12.8-x64" \
+"$LLAMA_RELEASE_DIR/llama-b11681/llama-server" \
+  --model "$HOME/.cache/llmgate/models/glm-edge-4b-chat/ggml-model-Q6_K.gguf" \
+  --alias glm-edge-4b-chat \
+  --host 127.0.0.1 \
+  --port 8081 \
+  --ctx-size 2048 \
+  --parallel 1 \
+  --threads 6 \
+  --device CUDA0 \
+  --n-gpu-layers all \
+  --log-verbosity 4
+```
+
+Keep this terminal open. Startup must show `offloaded 41/41 layers to GPU`.
+While generating a response, run this in another terminal:
+
+```sh
+nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv
+```
+
+Expect a `llama-server` process using about 3692 MiB with this configuration.
+The CUDA model buffer is about 3244 MiB, the KV cache is 240 MiB, and compute
+buffers plus runtime allocations use more memory. Other applications and the
+desktop also use VRAM. Larger contexts or more slots need another memory check.
+An HTTP 200 response alone does not establish GPU execution.
+
+For an explicit CPU comparison, restart this same command with
+`--device none --n-gpu-layers 0` in place of the two GPU flags. CPU execution
+is a comparison or compatibility option; normal local runs use CUDA.
+
+The old `:server` Docker image is CPU-only. A container setup needs the
+NVIDIA Container Toolkit, the `:server-cuda` image, and `--gpus all` in addition
+to the model offload flags. That container path was not tested in this session;
+the native CUDA path above was tested with the real model.
+
+References: [tested llama.cpp release](https://github.com/ggml-org/llama.cpp/releases/tag/b11681),
+[llama.cpp Docker instructions](https://github.com/ggml-org/llama.cpp/blob/master/docs/docker.md),
 and [the official GLM GGUF model](https://huggingface.co/zai-org/glm-edge-4b-chat-gguf).
 
 ## 2. Check the backend and start the gateway in terminal two
@@ -244,6 +294,26 @@ to the gateway and omits it from the JSON report. The default model is
 100 sequential measured requests, split evenly between direct llama.cpp and the
 gateway. See [benchmarks](benchmarks.md) for timing definitions and historical
 results. Save GLM measurements separately from the retired model's data.
+
+For a short backend-only CPU/GPU comparison, the gateway and `API_KEY` are not
+needed. Start the backend with the CPU flags from step 1, then run:
+
+```sh
+python bench/single_stream.py --direct-only --requests-per-path 5 \
+  > /tmp/llmgate-glm-cpu-5.json
+```
+
+Stop that backend. Start it with the normal CUDA command from step 1 and run:
+
+```sh
+python bench/single_stream.py --direct-only --requests-per-path 5 \
+  > /tmp/llmgate-glm-gpu-5.json
+```
+
+Keep the same model, release, context, slot count, and thread count in both
+runs. Each command excludes one warm-up and measures five streams. Record
+the server flags and GPU memory alongside the reports. Five requests can
+establish local feasibility; use larger samples for latency claims.
 
 ## Postgres key storage
 

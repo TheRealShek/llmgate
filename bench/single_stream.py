@@ -108,13 +108,24 @@ def main():
         default=PAYLOAD["model"],
         help="Model ID advertised by /v1/models",
     )
+    parser.add_argument(
+        "--direct-only", action="store_true",
+        help="Measure only llama.cpp, without a gateway or API key",
+    )
+    parser.add_argument(
+        "--requests-per-path", type=int, default=50,
+        help="Measured requests per path, excluding one warm-up (default: 50)",
+    )
     args = parser.parse_args()
+    if args.requests_per_path < 1:
+        parser.error("--requests-per-path must be positive")
     PAYLOAD["model"] = args.model
+    targets = TARGETS[:1] if args.direct_only else TARGETS
     api_key = os.environ.get("API_KEY")
-    if not api_key:
+    if not args.direct_only and not api_key:
         parser.error("Set API_KEY to an active gateway key before benchmarking")
 
-    for name, base in TARGETS:
+    for name, base in targets:
         print(
             "Warm-up:", name,
             measure(base, api_key if name == "gateway" else None),
@@ -122,8 +133,9 @@ def main():
         )
 
     results = []
-    for pair in range(1, 51):
-        order = TARGETS if pair % 2 else list(reversed(TARGETS))
+    total = args.requests_per_path * len(targets)
+    for pair in range(1, args.requests_per_path + 1):
+        order = targets if pair % 2 else list(reversed(targets))
         for name, base in order:
             row = {"pair": pair, "path": name}
             try:
@@ -132,10 +144,10 @@ def main():
                 row["error"] = type(error).__name__ + ": " + str(error)
             results.append(row)
 
-        if pair % 5 == 0:
+        if pair % 5 == 0 or pair == args.requests_per_path:
             failures = sum("error" in row for row in results)
             print(
-                f"{len(results)}/100 requests, {failures} failures",
+                f"{len(results)}/{total} requests, {failures} failures",
                 file=sys.stderr,
                 flush=True,
             )
@@ -143,10 +155,10 @@ def main():
     report = {
         "payload": PAYLOAD,
         "concurrency": 1,
-        "gateway_authentication": "direct_postgres_lookup",
+        "gateway_authentication": None if args.direct_only else "direct_postgres_lookup",
         "warmups_per_path": 1,
         "results": results,
-        "summaries": [summarize(name, results) for name, _ in TARGETS],
+        "summaries": [summarize(name, results) for name, _ in targets],
     }
     print(json.dumps(report, indent=2))
     return 1 if any("error" in row for row in results) else 0

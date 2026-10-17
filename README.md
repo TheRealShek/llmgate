@@ -16,10 +16,15 @@ still planned. A
 split between direct and gateway paths. GLM-Edge-4B-Chat Q6_K is the primary
 model; the earlier Qwen baseline remains historical evidence.
 
+Normal local inference uses CUDA on the RTX 3060. A
+[CPU/GPU comparison](docs/benchmarks.md#local-cpu-and-gpu-check-on-october-16-2026)
+verified full model offload and measured median decode rates of 13.82 and
+51.27 tokens/s respectively. The Go gateway runs on the CPU.
+
 ## Run locally
 
 Use Go 1.27 or later. Follow the [GLM setup and testing guide](docs/manual-testing.md)
-to start llama.cpp with the downloaded GLM-Edge-4B-Chat Q6_K file and the alias
+to start the CUDA backend with the downloaded GLM-Edge-4B-Chat Q6_K file and the alias
 `glm-edge-4b-chat`. First follow [Postgres setup](docs/manual-testing.md#postgres-key-storage)
 and [key creation](docs/manual-testing.md#api-key-authentication). Export
 `GATEWAY_DATABASE_URL` and `PGPASSWORD` in the gateway terminal and `API_KEY`

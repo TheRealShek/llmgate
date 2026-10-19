@@ -11,6 +11,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,63 +25,82 @@ type KeyCreator interface {
 	CreateKey(context.Context, store.CreateKeyParams) (store.Key, string, error)
 }
 
+// KeyRevoker persists revocation and cancels the key's local active requests.
+type KeyRevoker interface {
+	RevokeKey(context.Context, int64) error
+}
+
 // HandlerOptions supplies private-route credentials, storage, and resource limits.
 type HandlerOptions struct {
 	Keys          KeyCreator
+	Revoker       KeyRevoker
 	Token         string
 	MaxBodyBytes  int64
 	CreateTimeout time.Duration
+	RevokeTimeout time.Duration
 }
 
-// NewHandler registers key creation for the private listener only.
+// NewHandler registers key creation and revocation for the private listener only.
 // Startup validates configuration; missing dependencies fail closed here as well.
 func NewHandler(options HandlerOptions) http.Handler {
-	handler := &createKeyHandler{
-		keys:      options.Keys,
-		tokenHash: sha256.Sum256([]byte(options.Token)),
-		configured: options.Token != "" && options.Keys != nil &&
-			options.MaxBodyBytes > 0 && options.CreateTimeout > 0,
+	handler := &keyHandler{
+		keys:          options.Keys,
+		revoker:       options.Revoker,
+		tokenHash:     sha256.Sum256([]byte(options.Token)),
+		configured:    options.Token != "",
 		maxBodyBytes:  options.MaxBodyBytes,
 		createTimeout: options.CreateTimeout,
+		revokeTimeout: options.RevokeTimeout,
 	}
 	mux := http.NewServeMux()
-	mux.Handle("POST /v1/admin/keys", handler)
+	mux.HandleFunc("POST /v1/admin/keys", handler.createKey)
+	mux.HandleFunc("DELETE /v1/admin/keys/{id}", handler.revokeKey)
 
 	return mux
 }
 
-type createKeyHandler struct {
+type keyHandler struct {
 	keys          KeyCreator
+	revoker       KeyRevoker
 	tokenHash     [sha256.Size]byte
 	configured    bool
 	maxBodyBytes  int64
 	createTimeout time.Duration
+	revokeTimeout time.Duration
 }
 
-func (h *createKeyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Cache-Control", "no-store")
-
-	if !h.configured {
-		writeError(w, http.StatusServiceUnavailable, "admin key creation unavailable", "admin_unavailable")
-		return
-	}
-
+func (h *keyHandler) authorize(w http.ResponseWriter, r *http.Request) bool {
 	values := r.Header.Values("Authorization")
 	if len(values) != 1 {
 		writeUnauthorized(w)
-		return
+		return false
 	}
 
 	parts := strings.Split(values[0], " ")
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") ||
 		parts[1] == "" || strings.ContainsAny(parts[1], "\t\r\n,") {
 		writeUnauthorized(w)
-		return
+		return false
 	}
 
 	tokenHash := sha256.Sum256([]byte(parts[1]))
 	if subtle.ConstantTimeCompare(tokenHash[:], h.tokenHash[:]) != 1 {
 		writeUnauthorized(w)
+		return false
+	}
+
+	return true
+}
+
+func (h *keyHandler) createKey(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+
+	if !h.configured || h.keys == nil || h.maxBodyBytes <= 0 || h.createTimeout <= 0 {
+		writeError(w, http.StatusServiceUnavailable, "admin key creation unavailable", "admin_unavailable")
+		return
+	}
+
+	if !h.authorize(w, r) {
 		return
 	}
 
@@ -195,6 +215,56 @@ func (h *createKeyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		requestlog.Logger(r.Context()).WarnContext(r.Context(),
 			"created admin key response could not be delivered")
 	}
+}
+
+func (h *keyHandler) revokeKey(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+
+	if !h.configured || h.revoker == nil || h.revokeTimeout <= 0 {
+		writeError(w, http.StatusServiceUnavailable, "admin key revocation unavailable", "admin_unavailable")
+		return
+	}
+
+	if !h.authorize(w, r) {
+		return
+	}
+
+	rawID := r.PathValue("id")
+
+	id, err := strconv.ParseInt(rawID, 10, 64)
+	if err != nil || id <= 0 || strconv.FormatInt(id, 10) != rawID {
+		writeError(w, http.StatusBadRequest, "key ID must be a positive integer", "invalid_key_id")
+		return
+	}
+
+	// The private DELETE request supplies cancellation. The revoker owns the
+	// database update and then signals local inference requests before returning.
+	revokeCtx, cancel := context.WithTimeout(r.Context(), h.revokeTimeout)
+	defer cancel()
+
+	err = h.revoker.RevokeKey(revokeCtx, id)
+	revokeErr := revokeCtx.Err()
+
+	cancel()
+
+	if r.Context().Err() != nil {
+		return
+	}
+
+	if err != nil || revokeErr != nil {
+		if revokeErr == nil && errors.Is(err, store.ErrKeyNotFound) {
+			writeError(w, http.StatusNotFound, "API key not found", "key_not_found")
+			return
+		}
+
+		requestlog.Logger(r.Context()).WarnContext(r.Context(), "admin key revocation failed", "key_id", id)
+		writeError(w, http.StatusServiceUnavailable, "admin key revocation unavailable", "admin_unavailable")
+
+		return
+	}
+
+	requestlog.Logger(r.Context()).InfoContext(r.Context(), "admin key revoked", "key_id", id)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func writeUnauthorized(w http.ResponseWriter) {

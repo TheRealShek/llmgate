@@ -247,3 +247,7 @@ func TestMissingAuthenticator(t *testing.T) {
 		})
 	}
 }
+
+func (lookupFunc) RevokeKey(context.Context, int64) error {
+	return store.ErrDatabaseUnavailable
+}

@@ -284,3 +284,7 @@ func (logTestKeyLookup) LookupKey(_ context.Context, secret string) (store.Key, 
 
 	return store.Key{ID: 1}, nil
 }
+
+func (logTestKeyLookup) RevokeKey(context.Context, int64) error {
+	return store.ErrDatabaseUnavailable
+}

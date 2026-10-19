@@ -100,13 +100,14 @@ Streaming and JSON forwarding, request validation, cancellation, deadlines,
 request logs, readiness, and graceful shutdown are implemented. API-key storage
 now feeds route authentication through direct Postgres lookups. Models and chat
 require an active key; health and readiness remain public. A local command creates
-keys. An opt-in loopback admin listener also creates keys over HTTP using a
-separate operator token and the same store. Public routes never expose admin
+keys. An opt-in loopback admin listener creates and revokes keys over HTTP using a
+separate operator token. Revocation persists in the same store and signals
+active requests for that key through the shared authenticator. Public routes never expose admin
 operations. Both servers share bounded startup and graceful shutdown ownership.
 Existing baselines predate authentication.
 
-Next, add admin revocation with active-request cancellation for the single gateway. Then add authentication caching with an explicit
-revocation and outage policy, Redis rate limits and quotas, usage recording,
+Next, add authentication caching with an explicit revocation and outage policy,
+Redis rate limits and quotas, usage recording,
 metrics, and the complete Compose setup. Measure the authenticated gateway and
 complete the remaining real-backend failure checks before closing Phase 1.
 See [decisions](decisions.md) for authentication and revocation boundaries.

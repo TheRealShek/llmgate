@@ -9,8 +9,9 @@ Phase 1 is in progress. Health checks, model listing, JSON and streaming chat,
 and request IDs with structured logs work today. Models and chat require an
 active API key stored as a hash in Postgres. A local command provisions keys;
 the development Compose setup runs Postgres and migrations. An opt-in loopback
-admin listener can also create keys over HTTP. Admin revocation, authentication
-caching, rate limits, usage tracking, metrics, and the full Compose stack are
+admin listener can create and revoke keys over HTTP. Revocation cancels that
+key's active requests in this process. Authentication caching, rate limits,
+usage tracking, metrics, and the full Compose stack are
 still planned. A
 [GLM single-stream baseline](docs/benchmarks.md) records 100 sequential requests
 split between direct and gateway paths. GLM-Edge-4B-Chat Q6_K is the primary
@@ -99,7 +100,8 @@ flowchart LR
 3. Missing, malformed, unknown, and revoked keys return JSON `401`. Database
    failures and lookup deadlines return JSON `503`. Neither reaches the backend.
    Authentication adds the key identity and limits to the request context,
-   preserving logging and client cancellation. Limits are not enforced yet.
+   preserving logging and cancellation. It registers a cancellation function until
+   the handler exits. Limits are not enforced yet.
 4. For chat, the handler reads the body into a bounded buffer. It requires
    `application/json`, a JSON object, and a boolean `stream` field when present.
    Explicit `max_tokens` values must be positive integers within the limit.
@@ -110,9 +112,11 @@ flowchart LR
    upstream, and copies the backend's status, response headers, and body back.
    Authenticated model-list requests use the non-streaming proxy directly.
 
-The lookup deadline ends before forwarding starts. Revocation rejects subsequent
-lookups after the database update commits. Already-authenticated requests may
-finish. Active cancellation will be added with the admin revocation endpoint.
+The lookup deadline ends before forwarding starts. Admin revocation persists the
+change, then cancels this process's requests for that key. A generation check
+coordinates lookups and registration so requests cannot miss concurrent
+revocation. Direct SQL revocation blocks future lookups but does not signal
+active requests.
 All active keys currently have the same model and chat permissions. Use HTTPS
 when exposing the gateway beyond local development.
 
@@ -152,6 +156,7 @@ bind failure closes the other listener, and a later server failure stops its pee
 | `GATEWAY_ADMIN_TOKEN` | Unset | Required when enabled; 32 to 256 URL-safe ASCII characters |
 | `GATEWAY_ADMIN_MAX_BODY_BYTES` | `4096` | Admin creation JSON body limit |
 | `GATEWAY_ADMIN_CREATE_TIMEOUT` | `2s` | Admin database insertion deadline |
+| `GATEWAY_ADMIN_REVOKE_TIMEOUT` | `2s` | Admin database revocation deadline |
 | `GATEWAY_ADDR` | `:8080` | Listen address |
 | `GATEWAY_UPSTREAM_URL` | Unset | Backend base URL |
 | `GATEWAY_UPSTREAM_TIMEOUT` | `30s` | Total deadline for model lists and JSON chat |
@@ -170,9 +175,10 @@ Oversized chat bodies return `413`, invalid JSON returns `400`, and unsupported
 content types return `415`. Duration settings accept Go values such as `500ms`
 or `30s` and must be positive.
 
-## Admin key creation
+## Admin key management
 
-`POST /v1/admin/keys` is available only on the opt-in loopback listener. The
+`POST /v1/admin/keys` and `DELETE /v1/admin/keys/{id}` are available only on
+the opt-in loopback listener. The
 public listener returns `404` for admin paths even with a valid admin token.
 The private endpoint requires a separate operator token before parsing JSON;
 inference API keys grant no admin access. Success returns `201`, identity and
@@ -183,9 +189,17 @@ limits return `400`, unsupported content types `415`, and oversized bodies `413`
 Storage failures and insertion deadlines return fixed JSON `503` responses.
 Request logging omits credentials, issued keys, and database diagnostics.
 
+Revocation returns an empty `204`, including repeated revocation. Unknown IDs
+return `404`; invalid IDs return `400`. Persistence succeeds before cancellation
+is signaled. Existing streams end without normal completion, and future requests
+receive `401`. A `204` does not wait for the backend to finish stopping. Direct
+SQL updates do not cancel active work. See the
+[revocation checks](docs/manual-testing.md#admin-revocation-and-active-requests).
+
 The admin server shares the database pool with public authentication. Its read
 and header deadlines use the existing settings; its write deadline is the sum
-of the read timeout and admin creation timeout. It has no streaming endpoints.
+of the read timeout and the larger creation or revocation timeout. It has no
+streaming endpoints.
 The public server continues to have no response write deadline for SSE.
 
 Follow [admin setup](docs/manual-testing.md#operator-local-admin-key-creation).
@@ -210,7 +224,8 @@ Read these functions in order:
    each dependency and the chat limits. This is the only constructor.
 4. [`auth.handler.ServeHTTP`](internal/auth/handler.go) extracts the credential,
    bounds the lookup, handles rejection, and adds identity before entering chat.
-   Follow [`KeyStore.LookupKey`](internal/store/keys.go) for hashing and SQL.
+   Follow [`lookupAndRegister`](internal/auth/active.go) for race coordination
+   and [`KeyStore.LookupKey`](internal/store/keys.go) for hashing and SQL.
 5. [`chatHandler.ServeHTTP`](internal/gateway/chat.go) validates JSON and limits,
    selects the streaming proxy, and supplies a fresh body reader.
 6. [`streamHandler.ServeHTTP`](internal/proxy/stream.go) preserves cancellation
@@ -231,7 +246,7 @@ Read [`createKey`](cmd/gateway/key_create.go) for local provisioning and
 local creation through authenticated forwarding and revocation.
 
 For admin creation, read the `adminEnabled` branch in `run`, then
-[`admin.NewHandler` and `createKeyHandler.ServeHTTP`](internal/admin/handler.go).
+[`admin.NewHandler` and `keyHandler.createKey`](internal/admin/handler.go).
 The handler checks the operator token, validates bounded JSON, and calls the
 same `KeyStore.CreateKey` as the CLI. Its operation context inherits client
 cancellation and gains an insertion deadline, released before output.
@@ -239,6 +254,16 @@ cancellation and gains an insertion deadline, released before output.
 and own their serving and shutdown goroutines. Their work completes before
 startup closes the shared pool. [Handler tests](internal/admin/handler_test.go)
 cover the boundary; [lifecycle tests](cmd/gateway/server_test.go) cover both roles.
+
+For revocation, follow `keyHandler.revokeKey` into
+[`Authenticator.RevokeKey`](internal/auth/active.go), then
+[`KeyStore.RevokeKey`](internal/store/keys.go). The authenticator publishes the
+new generation and snapshots active cancellation functions after the database
+update succeeds. It signals them outside the mutex. The protected handler's
+context carries that cancellation into the proxy and removes its registry entry
+when it exits. [Race tests](internal/auth/active_test.go) cover admission and
+cleanup; [HTTP/Postgres tests](cmd/gateway/revoke_integration_test.go) cover
+persistent revocation, stream termination, and isolation between keys.
 
 For readiness, start at the `readiness` assignment in `run`, follow its route
 registration in `gateway.NewHandler`, then read

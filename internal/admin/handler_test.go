@@ -340,8 +340,8 @@ func TestAdminRouting(t *testing.T) {
 			status: 405,
 		},
 		{
-			name: "revocation deferred", method: http.MethodDelete, path: "/v1/admin/keys/1",
-			status: 404,
+			name: "missing revocation dependency", method: http.MethodDelete, path: "/v1/admin/keys/1",
+			status: 503,
 		},
 		{name: "unversioned", method: http.MethodPost, path: "/admin/keys", status: 404},
 		{

@@ -94,9 +94,11 @@ func run(ctx context.Context) error {
 	if cfg.adminEnabled {
 		adminRoutes := admin.NewHandler(admin.HandlerOptions{
 			Keys:          keys,
+			Revoker:       authentication,
 			Token:         cfg.adminToken,
 			MaxBodyBytes:  cfg.adminMaxBodyBytes,
 			CreateTimeout: cfg.adminCreateTimeout,
+			RevokeTimeout: cfg.adminRevokeTimeout,
 		})
 		loggedAdminRoutes := requestlog.NewHandler(adminRoutes, slog.Default())
 		adminServer := &http.Server{
@@ -105,8 +107,8 @@ func run(ctx context.Context) error {
 			ReadTimeout:       cfg.readTimeout,
 			ReadHeaderTimeout: cfg.readHeaderTimeout,
 			IdleTimeout:       cfg.idleTimeout,
-			// Admin replies are small JSON; bound delivery as well as upload and insertion.
-			WriteTimeout: cfg.readTimeout + cfg.adminCreateTimeout,
+			// Bound admin uploads, storage operations, and response delivery.
+			WriteTimeout: cfg.readTimeout + max(cfg.adminCreateTimeout, cfg.adminRevokeTimeout),
 		}
 		servers = append(servers, namedServer{name: "admin", server: adminServer})
 	}

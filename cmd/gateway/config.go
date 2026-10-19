@@ -16,6 +16,7 @@ type config struct {
 	adminToken             string
 	adminMaxBodyBytes      int64
 	adminCreateTimeout     time.Duration
+	adminRevokeTimeout     time.Duration
 	databaseURL            string
 	databaseMaxConns       int32
 	databaseConnectTimeout time.Duration
@@ -40,6 +41,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		adminAddr:              "127.0.0.1:8082",
 		adminMaxBodyBytes:      4096,
 		adminCreateTimeout:     2 * time.Second,
+		adminRevokeTimeout:     2 * time.Second,
 		databaseURL:            getenv("GATEWAY_DATABASE_URL"),
 		databaseMaxConns:       10,
 		databaseConnectTimeout: 5 * time.Second,
@@ -134,6 +136,11 @@ func loadConfig(getenv func(string) string) (config, error) {
 	var err error
 
 	cfg.adminCreateTimeout, err = envDuration(getenv, "GATEWAY_ADMIN_CREATE_TIMEOUT", cfg.adminCreateTimeout)
+	if err != nil {
+		return config{}, err
+	}
+
+	cfg.adminRevokeTimeout, err = envDuration(getenv, "GATEWAY_ADMIN_REVOKE_TIMEOUT", cfg.adminRevokeTimeout)
 	if err != nil {
 		return config{}, err
 	}
@@ -242,8 +249,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 
-	if cfg.adminEnabled && cfg.readTimeout+cfg.adminCreateTimeout <= 0 {
-		return config{}, fmt.Errorf("validate admin write timeout: read and creation timeouts are too large together")
+	if cfg.adminEnabled && cfg.readTimeout+max(cfg.adminCreateTimeout, cfg.adminRevokeTimeout) <= 0 {
+		return config{}, fmt.Errorf("validate admin write timeout: read and operation timeouts are too large together")
 	}
 
 	return cfg, nil
@@ -291,7 +298,7 @@ func envDuration(
 
 	d, err := time.ParseDuration(val)
 	if err != nil {
-		return 0, fmt.Errorf("parse %s: %w", key, err)
+		return 0, fmt.Errorf("parse %s: %w", key, &configError{cause: err})
 	}
 
 	if d <= 0 {

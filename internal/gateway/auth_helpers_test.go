@@ -50,3 +50,7 @@ func authenticatedClient(server *httptest.Server) *http.Client {
 
 	return &client
 }
+
+func (testKeyLookup) RevokeKey(context.Context, int64) error {
+	return store.ErrDatabaseUnavailable
+}

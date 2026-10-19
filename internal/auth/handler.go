@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/therealshek/llmgate/internal/api"
@@ -13,20 +14,29 @@ import (
 	"github.com/therealshek/llmgate/internal/store"
 )
 
-// KeyLookup resolves a secret to an active identity without retaining the secret.
-type KeyLookup interface {
+// KeyStore resolves active identities and persists revocation without retaining secrets.
+type KeyStore interface {
 	LookupKey(context.Context, string) (store.Key, error)
+	RevokeKey(context.Context, int64) error
 }
 
-// Authenticator checks keys with a separate deadline before invoking route handlers.
+// Authenticator owns key lookup, revocation, and active requests for one gateway process.
 type Authenticator struct {
-	keys          KeyLookup
+	keys          KeyStore
 	lookupTimeout time.Duration
+	// mu coordinates lookup admission with revocation publication. It never covers
+	// database operations, inference handlers, or cancellation callbacks.
+	mu         sync.Mutex
+	generation uint64
+	active     map[int64]map[*activeRequest]struct{}
 }
 
 // NewAuthenticator uses keys and a positive lookupTimeout supplied by startup.
-func NewAuthenticator(keys KeyLookup, lookupTimeout time.Duration) *Authenticator {
-	return &Authenticator{keys: keys, lookupTimeout: lookupTimeout}
+func NewAuthenticator(keys KeyStore, lookupTimeout time.Duration) *Authenticator {
+	return &Authenticator{
+		keys: keys, lookupTimeout: lookupTimeout,
+		active: make(map[int64]map[*activeRequest]struct{}),
+	}
 }
 
 // Protect authenticates a matched route without wrapping its response writer.
@@ -67,17 +77,31 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The route supplies the incoming context. Bound only its database lookup,
-	// then release that deadline before the authenticated request enters next.
-	lookupCtx, cancel := context.WithTimeout(r.Context(), h.auth.lookupTimeout)
+	// The matched route supplies client cancellation. Revocation can also cancel
+	// this request; its database deadline ends before the request enters next.
+	requestCtx, cancelRequest := context.WithCancel(r.Context())
+	defer cancelRequest()
+
+	request := &activeRequest{cancel: cancelRequest}
+
+	lookupCtx, cancel := context.WithTimeout(requestCtx, h.auth.lookupTimeout)
 	defer cancel()
 
-	key, err := h.auth.keys.LookupKey(lookupCtx, parts[1])
+	key, err := h.auth.lookupAndRegister(lookupCtx, parts[1], request)
 	lookupErr := lookupCtx.Err()
 
 	cancel()
 
+	if err == nil {
+		defer h.auth.remove(key.ID, request)
+	}
+
 	if r.Context().Err() != nil {
+		return
+	}
+
+	if requestCtx.Err() != nil {
+		writeUnauthorized(w)
 		return
 	}
 
@@ -95,7 +119,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// WithContext adds identity while retaining request logging and client cancellation.
 	// Pass the original writer to the protected handler so streaming can still flush.
-	r = r.WithContext(context.WithValue(r.Context(), identityKey{}, key))
+	r = r.WithContext(context.WithValue(requestCtx, identityKey{}, key))
 	h.next.ServeHTTP(w, r)
 }
 

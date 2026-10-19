@@ -400,7 +400,7 @@ need no key. An authentication lookup failure or deadline returns `503` before
 backend work; missing database configuration or failed initial connectivity
 prevents startup.
 
-Until the admin revocation endpoint exists, revoke only the key created above using its ID:
+To check database-only revocation, update only the key created above using its ID:
 
 ```sh
 psql "$GATEWAY_DATABASE_URL" -v ON_ERROR_STOP=1 -v key_id="$KEY_ID" <<'SQL'
@@ -411,10 +411,10 @@ curl -i http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $API_KEY"
 unset API_KEY KEY_ID
 ```
 
-The request now returns `401`. Already-authenticated streams may finish.
-Create a fresh key before continuing chat checks or the benchmark. Active
-cancellation and admin revocation are later work, described in
-[decisions](decisions.md#revocation-and-active-requests).
+The request now returns `401`. Direct SQL does not notify the active-request
+registry, so already-authenticated requests may finish. For active cancellation,
+use the [admin revocation endpoint](#admin-revocation-and-active-requests).
+Create a fresh key before continuing chat checks or the benchmark.
 
 Run the isolated command-to-authentication integration test with:
 
@@ -475,7 +475,7 @@ enforced yet. If creation fails, inspect its safe error response before running
 the extraction commands. A lost response after insertion can leave a stored key
 whose secret cannot be recovered. Do not automatically retry issuance; inspect
 the created key ID in request logs or database records, and revoke an unused
-key by ID using the earlier SQL procedure.
+key by ID using the admin revocation endpoint below.
 
 Check the two access boundaries:
 
@@ -521,6 +521,84 @@ LLMGATE_TEST_DATABASE_URL="$GATEWAY_DATABASE_URL" \
 
 The integration test uses a unique temporary schema and the existing migration.
 Without its database URL it skips. With a supplied but unreachable URL it fails.
+
+## Admin revocation and active requests
+
+This check consumes the test key issued in the preceding section. Keep the
+admin listener enabled and the CUDA backend running. In terminal three, show
+its ID and start a long stream with that key:
+
+```sh
+printf '%s\n' "$KEY_ID"
+
+curl -N http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"glm-edge-4b-chat","messages":[{"role":"user","content":"Count from 1 to 1000, writing each number separately. Do not skip numbers."}],"stream":true,"max_tokens":1024}'
+```
+
+After content starts arriving, open terminal four and enter that test key ID.
+The token file is the same operator credential used for creation:
+
+```sh
+export GATEWAY_ADMIN_TOKEN="$(cat "$HOME/.cache/llmgate/admin/token")"
+read -r 'KEY_ID?Test key ID shown in terminal three: '
+
+curl -i -X DELETE "http://127.0.0.1:8082/v1/admin/keys/$KEY_ID" \
+  -H "Authorization: Bearer $GATEWAY_ADMIN_TOKEN"
+```
+
+Expect `204` with no body and `Cache-Control: no-store`. Terminal three's stream
+should end without a normal `[DONE]`. Curl may report an incomplete transfer;
+the response had already started with `200`, which cannot be replaced by `401`.
+The backend should log cancellation and release the task. The gateway logs the
+revoked key ID without its secret. A `204` means persistence succeeded and
+cancellation was signaled, not that GPU cleanup has already finished.
+
+Repeat the DELETE command. It should still return `204`, preserving the original
+revocation timestamp. A new protected request from terminal three now fails:
+
+```sh
+curl -i http://127.0.0.1:8080/v1/models \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+Expect `401`. Issue another test key through the creation command to continue
+chat checks. To verify isolation, run streams with two different keys before
+revoking one; only the revoked key's stream should end. A request with the
+other key must still succeed afterward.
+
+Also check the route boundary in terminal four:
+
+```sh
+curl -i -X DELETE "http://127.0.0.1:8080/v1/admin/keys/$KEY_ID" \
+  -H "Authorization: Bearer $GATEWAY_ADMIN_TOKEN"
+curl -i -X DELETE "http://127.0.0.1:8082/v1/admin/keys/$KEY_ID"
+```
+
+Expect `404` on the public port and `401` without the operator token on the
+private port. With valid operator credentials, malformed or nonpositive IDs
+return `400`, and unknown positive IDs return `404`. IDs use canonical decimal
+notation, so signs and leading zeros are rejected. A storage failure or deadline
+returns a fixed `503`. If storage reports failure, active requests are not
+signaled. A timeout can make the commit result uncertain; retrying DELETE is safe.
+The storage deadline defaults to `2s` through `GATEWAY_ADMIN_REVOKE_TIMEOUT`.
+
+Run deterministic admission-race, cleanup, HTTP, and optional real-Postgres
+checks with:
+
+```sh
+go test -race ./internal/auth ./internal/admin
+LLMGATE_TEST_DATABASE_URL="$GATEWAY_DATABASE_URL" \
+  go test -race -count=1 -v ./cmd/gateway -run TestAdminRevocationAndStreams
+```
+
+The integration test creates a unique schema and two keys, opens two real HTTP
+streams to a controlled backend, and revokes one through the private route.
+It verifies upstream cancellation, the other stream's survival, future `401`,
+repeated revocation, and the persisted timestamp. Cleanup removes its schema.
+Without a test database URL it skips. This covers one process; another gateway
+or a direct database update cannot signal this process's requests.
 
 ## Automated tests
 

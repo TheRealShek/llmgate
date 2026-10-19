@@ -40,6 +40,7 @@ func TestAdminConfiguration(t *testing.T) {
 			env: map[string]string{
 				"GATEWAY_ADMIN_MAX_BODY_BYTES": "2048",
 				"GATEWAY_ADMIN_CREATE_TIMEOUT": "750ms",
+				"GATEWAY_ADMIN_REVOKE_TIMEOUT": "900ms",
 			},
 		},
 		{
@@ -151,6 +152,30 @@ func TestAdminConfiguration(t *testing.T) {
 			wantError: true,
 		},
 		{
+			name:      "zero revoke timeout",
+			env:       map[string]string{"GATEWAY_ADMIN_REVOKE_TIMEOUT": "0s"},
+			wantError: true,
+		},
+		{
+			name:      "negative revoke timeout",
+			env:       map[string]string{"GATEWAY_ADMIN_REVOKE_TIMEOUT": "-1s"},
+			wantError: true,
+		},
+		{
+			name:      "invalid revoke timeout",
+			env:       map[string]string{"GATEWAY_ADMIN_REVOKE_TIMEOUT": "private-secret"},
+			wantError: true,
+		},
+		{
+			name: "revoke write timeout overflow",
+			env: map[string]string{
+				"GATEWAY_ADMIN_ENABLED":        "true",
+				"GATEWAY_ADMIN_TOKEN":          strings.Repeat("a", 64),
+				"GATEWAY_ADMIN_REVOKE_TIMEOUT": "2562047h47m16s",
+			},
+			wantError: true,
+		},
+		{
 			name: "zero create timeout",
 			env: map[string]string{
 				"GATEWAY_ADMIN_CREATE_TIMEOUT": "0s",
@@ -182,7 +207,7 @@ func TestAdminConfiguration(t *testing.T) {
 				t.Fatal("admin enablement changed")
 			}
 
-			if tt.name == "positive resource overrides" && (cfg.adminMaxBodyBytes != 2048 || cfg.adminCreateTimeout.String() != "750ms") {
+			if tt.name == "positive resource overrides" && (cfg.adminMaxBodyBytes != 2048 || cfg.adminCreateTimeout.String() != "750ms" || cfg.adminRevokeTimeout.String() != "900ms") {
 				t.Fatal("admin resource overrides were lost")
 			}
 
@@ -196,6 +221,8 @@ func TestAdminConfiguration(t *testing.T) {
 // TestAdminParsingCauses checks parsing errors preserve causes without exposing configuration input.
 func TestAdminParsingCauses(t *testing.T) {
 	for _, tt := range []struct{ name, key, value string }{
+		{name: "creation timeout", key: "GATEWAY_ADMIN_CREATE_TIMEOUT", value: "private-secret"},
+		{name: "revocation timeout", key: "GATEWAY_ADMIN_REVOKE_TIMEOUT", value: "private-secret"},
 		{name: "boolean", key: "GATEWAY_ADMIN_ENABLED", value: "private-secret"},
 		{name: "address format", key: "GATEWAY_ADMIN_ADDR", value: "private-secret"},
 		{name: "IP address", key: "GATEWAY_ADMIN_ADDR", value: "private-secret:8082"},

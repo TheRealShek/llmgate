@@ -281,28 +281,52 @@ before inference; a long stream does not hold a database connection. These are
 initial development limits, not measured capacity claims. The local creation
 command uses the same operation timeout for its single insertion.
 
-Admin creation now has its own listener policy below. Admin revocation and
-authentication caching remain separate tasks.
+Admin key management has its own listener policy below. Authentication caching
+remains a separate task.
 
 ## Revocation and active requests
 
-For the first authentication slice, revocation blocks subsequent lookups after
-the database update commits. Requests already authenticated may finish. A
-lookup concurrent with revocation may also admit a request. Authentication is
-checked once per request, not once per stream chunk.
+Use `DELETE /v1/admin/keys/{id}` on the private listener to persist revocation
+and cancel the key's active requests in this process. Authentication and the
+admin handler share one `Authenticator`; the admin route must call its
+`RevokeKey`, not the store directly. Only a successful store update triggers
+cancellation. A failed update leaves tracked requests alone. After successful
+persistence, cancellation still runs if the operator disconnects before the reply.
 
-Add active cancellation alongside the admin revocation endpoint in a later
-slice. For a single gateway, register each admitted request's cancellation
-function under its key ID, remove it on completion, and cancel matching requests
-only after successful persistent revocation. Coordinate authentication and
-registration with revocation so an admission cannot miss cancellation. Do not
-hold the registry lock while invoking cancellation functions. Cancellation
-must preserve other keys' requests and release entries on every exit path.
+The authenticator registers each admitted request's cancellation function under
+its key ID. Its handler removes the entry and releases the context on every
+exit, including panic and client disconnect. The registry retains active
+requests only. It keeps no permanent revoked-ID set or background goroutines.
 
-Cancellation interrupts upstream work and an already-started stream; it cannot
-retract delivered tokens or replace a response status already sent. Verify the
-backend actually stops inference. Direct database changes do not automatically
-notify an in-memory registry.
+Snapshot a shared generation counter before each lookup. After a successful
+lookup, check that generation and register the request under the same mutex.
+A committed revocation increments the generation and copies cancellation
+functions for the target key while holding that mutex. Invoke those functions
+after unlocking. Completed requests remove themselves independently, and
+concurrent revocations can signal requests that have not exited yet.
+
+A lookup crossing a published revocation retries within its original lookup
+deadline. This also rechecks unrelated in-flight lookups, a small extra database
+cost when an operator revokes a key. Lookups registered before publication are
+included in cancellation; stale lookups returning afterward cannot bypass it.
+The mutex never covers database calls or inference work. This avoids blocking
+all authentication behind one slow database operation and avoids retaining
+tombstones indefinitely. No authentication cache is introduced in this slice.
+
+Return `204` with no body after persistence and local cancellation signaling.
+Repeated revocation preserves the first timestamp and returns `204`. Unknown
+IDs return `404`; noncanonical or nonpositive decimal IDs return `400` after
+operator authentication. Default `GATEWAY_ADMIN_REVOKE_TIMEOUT` to `2s` for
+the storage operation. Failures or deadlines return safe `503` responses.
+A timeout or lost response can leave the operator uncertain whether the database
+committed; retrying this idempotent endpoint is safe.
+
+Cancellation interrupts upstream work and an already-started stream. It cannot
+retract delivered tokens or replace a response status already sent. An interrupted
+stream has no normal `[DONE]` marker. The `204` confirms cancellation was signaled,
+not that every handler or GPU task has already exited. Verify backend termination
+separately. Another key's requests remain active. Direct database updates and
+revocation in another process do not notify this registry automatically.
 
 Multiple gateways need revocation notifications and recovery from missed
 messages. Each process owns only its local active requests. A strict stop deadline
@@ -336,7 +360,8 @@ positive request/token limits, reject unknown fields and trailing JSON values,
 and bound the body and database insertion. Default the body limit to 4096 bytes
 and the insertion deadline to 2 seconds, both configurable. The admin server
 uses the existing request read, header, and idle deadlines. Its response write
-deadline is the read timeout plus insertion timeout; reject overflow rather than
+deadline is the read timeout plus the larger creation or revocation timeout;
+reject overflow rather than
 silently disabling that deadline. Public SSE retains no write deadline.
 Reuse `KeyStore.CreateKey`, return `201` with identity and the raw key once,
 and set `Cache-Control: no-store`.
@@ -356,5 +381,5 @@ host loopback; local processes still need the token. Loopback does not protect
 against a compromised host or unintended request forwarding. Container loopback
 is distinct from host loopback. Resolve admin reachability explicitly when
 adding the gateway to Compose; do not silently change to a wildcard bind or
-publish the admin listener publicly. Revocation and active-request cancellation
-remain the next slice.
+publish the admin listener publicly. Creation and revocation use the same
+operator-token boundary.

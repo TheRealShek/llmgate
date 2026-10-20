@@ -41,18 +41,14 @@ agent present.
   or proxying. Avoid wrappers and helpers that only add another step to follow.
 - Make startup show how requests flow through the components. Use names that
   describe each component and separate assembly steps so readers can follow them.
-- Keep the README reading guide aligned with the actual entry point and request
-  flow. Remove comments that describe features as unfinished after they exist.
 - Before adding a new abstraction, check whether it makes the main request path
   easier to understand. Prefer direct code when it only moves complexity elsewhere.
 - Keep reusable error definitions in the owning package's `error.go` and use them
-  from callers. Preserve operation failure causes with `%w`. HTTP handlers use
-  `api.WriteError` for the shared response format.
+  from callers. HTTP handlers use `api.WriteError` for the shared response format.
 
 ## Code comments
 
 - Write comments that show how requests move through the system.
-- When code uses `http.HandlerFunc`, `ReverseProxy`, request clones, context timeouts, or response flushers, state where the request comes from, what changes it, and where it goes next.
 
 ## Size each coding task for reading
 
@@ -69,14 +65,58 @@ Before editing, inspect the existing code and briefly state the behavior being
 added, the relevant paths, how it fits the current phase, and how you will check
 it. Proceed without asking for approval when the request and scope are clear.
 
-## Project records
+## Documentation responsibilities
 
-Keep measured gateway claims reproducible with a command. Record agreed
-non-obvious design decisions in `docs/decisions.md`.
-Maintain the existing documents. Keep setup and test commands in the manual
-testing guide and reading order in the README. Avoid separate progress, planning,
-or per-feature documents that repeat information already held in the code or
-project intent.
+Keep documents small and give each explanation one home. Link to it elsewhere.
+Each document has a specific job:
+
+| Document | Owns | Leave elsewhere |
+| --- | --- | --- |
+| [README.md](README.md) | Project summary, brief current status, minimal quick start, system map, and guide links. | Detailed setup, configuration tables, code walkthroughs, and feature plans. |
+| [Architecture](docs/architecture.md) | Implemented request flow, package responsibilities and boundaries, code reading order, state ownership, failure behavior, and cleanup. | Setup commands, configuration defaults, decision history, and planned components. |
+| [Manual testing](docs/manual-testing.md) | Setup, configuration reference, operational checks, test commands, expected results, and prerequisites. | Architecture walkthroughs, design rationale, and measurement reports. |
+| [Project intent](docs/PROJECT_INTENT.md) | Goals, non-goals, agreed scope, phases, brief current checkpoint, target architecture, and completion criteria. | Session logs, detailed implementation walkthroughs, and measured results. |
+| [Decisions](docs/decisions.md) | Agreed non-obvious choices, alternatives, tradeoffs, and reasons. | Repeated feature descriptions, setup instructions, and task progress. |
+| [Benchmarks](docs/benchmarks.md) | Measurements, workload and environment, reproduction commands, raw-data references, limitations, and labeled historical results. | General setup instructions, unrelated test procedures, and unmeasured claims. |
+| [AGENTS.md](AGENTS.md) | Repository-specific agent workflow, scope, learning goals, and documentation responsibilities. | Language conventions covered by `go-conventions`, product documentation, and progress logs. |
+
+### Keep documents small
+
+- Update existing sections first. Add a document or diagram only for a distinct
+  reader question that does not fit its existing home. Avoid separate progress,
+  planning, or per-feature documents.
+- Summarize only enough to orient the reader, then link to the owning document.
+  The README quick start is a short example after setup, not a second setup guide.
+- Replace stale explanations and remove superseded duplication. Keep historical
+  measurements labeled and identify decisions superseded by later choices.
+- Keep package descriptions to responsibility, important boundaries, and a linked
+  code entry point. Avoid inventories of files, functions, or types. Keep the code
+  reading order focused on one request.
+- Use short sections. Let prose explain what diagrams cannot show instead of
+  repeating the walkthrough. Preserve failure boundaries, shared versus local
+  state, cancellation, and ownership. Do not cut those details to meet an
+  arbitrary length limit.
+
+### Update and verify
+
+- Update affected documents in the same change. Check architecture for changes to
+  responsibilities, request order, dependencies, trust boundaries, state ownership,
+  cancellation, or cleanup. Check manual testing for changes to setup,
+  configuration, commands, or expected results.
+- Update intent for agreed scope or phase changes, decisions for consequential
+  agreed choices, and benchmarks for new or corrected measurements. Update the
+  README when its summary, quick start, system map, or navigation changes.
+- Describe implemented behavior from the code and relevant tests. Keep planned
+  behavior in the intent document and distinguish unverified behavior from checked
+  results. Every performance claim needs a measurement and reproduction command.
+- Private helper refactors need no documentation change unless they break a code
+  link or make an explanation inaccurate. Keep entry-point links current.
+- Give each diagram one question and a clear scope. Use Mermaid in Markdown with
+  purposeful connection labels. Keep service boundaries separate from handler
+  order, and distinguish cancellation from request flow when both appear.
+- Before finishing, check affected claims, commands, defaults, and links against
+  their sources. Preview changed diagrams for rendering and readability. Report
+  checks that could not run.
 
 ## Explain the completed change
 

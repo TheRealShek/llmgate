@@ -84,9 +84,13 @@ request flow and reasoning; names should make sense without reading the implemen
 
 ## Documentation scope
 
-Keep setup commands in the manual testing guide, implementation reading order
-in the README, design choices here, and phase requirements in the project intent.
+Keep setup commands and configuration in the manual testing guide, design
+choices here, and phase requirements in the project intent.
 Keep measured results and their raw data in the existing benchmark files.
+Keep the system map in the README and the implemented request flow, package
+responsibilities, code reading order, and state and lifecycle ownership in
+[architecture](architecture.md). Keep the README focused on the project overview,
+a minimal start example, the system map, and links to these guides.
 Update these documents instead of adding separate progress, planning, or
 per-feature explanations that duplicate the code and drift as it changes.
 
@@ -215,7 +219,8 @@ error wrapper before returning them to the logging boundary.
 Keep logging, routing, chat validation, and proxying as separate components
 because each owns distinct behavior. Startup names the route handler `routes`
 and its logging wrapper `loggedRoutes` so their execution order is visible.
-The README follows one streaming request through the functions that run it.
+The architecture guide follows one streaming request through the functions that
+run it.
 
 Keep both response modes in the `proxy` package because both forward requests
 to the backend. `nonstream.go` owns the total-deadline handler; `stream.go` owns
@@ -254,7 +259,8 @@ Protect model listing and both chat response modes with one active API key in
 inside the matched route, after request logging and before chat validation or
 proxying. Unknown routes and unsupported methods retain their routing errors.
 All active keys have the same route permissions. Request and token limits are
-carried with identity but are not enforced by authentication.
+carried with identity. The separate request limiter below enforces request rates;
+daily token quota enforcement remains planned.
 
 Resolve keys through the cache policy below, with `KeyStore.LookupKey` on misses.
 Missing, malformed, ambiguous, unknown, and revoked credentials return a generic
@@ -425,3 +431,62 @@ is distinct from host loopback. Resolve admin reachability explicitly when
 adding the gateway to Compose; do not silently change to a wildcard bind or
 publish the admin listener publicly. Creation and revocation use the same
 operator-token boundary.
+
+## Per-key request limits in Redis
+
+Use one token bucket per API-key ID for authenticated models and chat, including
+HEAD model requests. Authentication runs first; request admission runs before
+chat validation and forwarding. Public probes, unknown routes, unsupported
+methods, and private admin operations do not consume request credits. A credit
+counts an admitted HTTP request, not a generated model token. No credit is
+refunded after admission, including validation failures, backend errors, client
+disconnects, or revocation.
+
+Bucket capacity is `requests_per_min`; refill is continuous at
+`requests_per_min / 60` credits per second. New or expired buckets start full.
+This permits a burst up to the full capacity and limits the sustained rate; it
+is not an exact sliding-window count. Both routes share the same Redis key
+`llmgate:requests:v1:<key_id>`. Gateways serving the same database must share the
+same Redis database. Independent installations need separate Redis databases.
+
+Execute refill, admission, decrement, and expiry in one embedded Lua script.
+Use Redis `TIME` to avoid differences between gateway clocks. Clamp backward
+clock movement to the bucket's last timestamp and refill at most to capacity.
+Expire each bucket after one idle minute of refill. If the clock has moved
+backward, both expiry and retry guidance include the delay until its prior
+timestamp. This prevents premature expiry from granting a fresh full bucket. Lower configured limits clamp stored credits instead of
+resetting the bucket. Limits cached by authentication can remain stale until
+refresh, as documented above.
+
+Lua uses doubles. Store credits with 17 significant digits and reject limits
+outside `1..2^53-1` with `503` rather than silently losing decrements. Normal
+key creation still accepts positive int64 limits; operators must keep request
+limits within that range for admission. This slice does not add key editing.
+
+Return the shared JSON `429` format with `Retry-After` rounded up to whole
+seconds and at least one second. The delay predicts the next credit, not a
+reservation for the caller. Redis errors, script failures, malformed results,
+and decision deadlines return a safe JSON `503` without forwarding. This
+fail-closed policy protects GPU work from unlimited requests during Redis
+outages. Existing admitted streams continue, and health/readiness retain their
+existing process/backend meaning.
+
+Use go-redis for pooled Redis connections, TLS, and script execution rather
+than maintaining a Redis wire-protocol client. Default to 10 connections, a
+2-second startup/connect deadline, and a 500ms decision deadline. Configure
+both the base pool and the hard connection maximum, disable the unused pipeline
+pool, and honor context deadlines. Disable automatic command retries because a
+lost response may follow a committed decrement. Such a request returns `503`
+and may already have spent one credit. A `NOSCRIPT` response can safely fall
+back from `EVALSHA` to `EVAL`, since the first call did not run the script.
+See [Redis scripting](https://redis.io/docs/latest/develop/programmability/eval-intro/)
+and [go-redis production guidance](https://redis.io/docs/latest/develop/clients/go/produsage/).
+
+Startup requires successful Redis connectivity before binding listeners. It
+owns the client until HTTP draining ends, then closes it. Local key creation
+connects only to Postgres. The Compose Redis service binds localhost only,
+uses a persistent volume and AOF with one-second fsync, and caps data memory at
+128 MiB with `noeviction`. Memory pressure fails admission instead of evicting
+live buckets and granting fresh bursts. AOF recovery can lose recent credits
+on an unclean failure; request limits are not a durable billing ledger. Full
+gateway/backend Compose assembly and daily token accounting remain separate.

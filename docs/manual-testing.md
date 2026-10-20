@@ -118,8 +118,9 @@ curl -i http://127.0.0.1:8081/health
 ```
 
 Wait until this returns HTTP 200 before starting the gateway. Initialize
-[Postgres](#postgres-key-storage), apply its migration, and export the database
-configuration in this terminal as described under [authentication](#api-key-authentication).
+[Postgres](#postgres-key-storage), apply its migration, and start
+[Redis](#redis-request-limits). Export the database configuration in this terminal
+as described under [authentication](#api-key-authentication).
 
 ```sh
 cd /Drive2/Coding_Skills/Projects/llmgate
@@ -150,6 +151,21 @@ curl -sS http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $API_KEY"
 
 Health and readiness should return HTTP 200. Health checks the gateway process;
 readiness checks the backend's `/health` endpoint.
+
+Readiness requires the backend's [llama.cpp-compatible health endpoint](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md#api-endpoints)
+to return `200`. Backend base paths are preserved, so a base URL ending in
+`/api` probes `/api/health`. Loading responses, redirects, connection failures,
+and timeouts return a fixed JSON `503`. Backend response bodies and headers
+stay private; the probe closes the body after receiving headers without waiting
+for its contents. Client disconnects cancel the probe. Readiness does not gate
+chat traffic or reserve backend capacity.
+
+Without `GATEWAY_UPSTREAM_URL`, the gateway still starts if Postgres and Redis
+are reachable. Liveness returns `200`; readiness and authenticated model and
+chat requests return `503`. Database configuration remains required and
+migrations run separately. See [configuration](#configuration) for timeout and
+connection settings, and [cache outage checks](#authentication-cache-and-database-outages)
+for behavior when Postgres becomes unavailable after startup.
 
 The model-list response should contain this ID under `data`:
 
@@ -357,6 +373,97 @@ concurrency, database constraints, and migration rollback. Without the test URL,
 database tests skip; validation tests still run. A supplied but unreachable URL
 fails the tests. The URL above disables TLS only for the local development setup.
 
+## Redis request limits
+
+After the Postgres setup has established `POSTGRES_PASSWORD`, start the local
+Redis service. This starts only Redis and leaves the existing Postgres data alone:
+
+```sh
+sudo --preserve-env=POSTGRES_PASSWORD docker compose \
+  -f deploy/docker-compose.yml up -d --wait redis
+export GATEWAY_REDIS_URL='redis://127.0.0.1:6379/0'
+```
+
+The gateway uses that URL by default. `REDIS_PORT` changes the Compose host port;
+preserve it through sudo and update `GATEWAY_REDIS_URL` if you change it. The
+service binds localhost, stores its AOF in a named volume, and uses a 128 MiB data
+memory cap with `noeviction`. Startup requires Redis; the key-creation command
+only requires Postgres.
+
+`GATEWAY_REDIS_MAX_CONNS` defaults to 10, `GATEWAY_REDIS_CONNECT_TIMEOUT` to 2s,
+and `GATEWAY_RATE_LIMIT_TIMEOUT` to 500ms. Positive overrides are required.
+Connection URLs support `redis://` and `rediss://`, optional credentials and a
+database index, with no query or fragment. Use a trusted private Redis service
+and TLS for deployments beyond this local development setup.
+
+One per-key bucket covers models, HEAD models, and both chat modes. A key with
+`requests_per_min=2` starts with two request credits and refills one credit every
+30 seconds, up to two. This is a continuous token bucket, so its initial burst
+and sustained rate differ from a strict count in each rolling minute. Admission
+spends a credit before chat validation; later failures do not refund it. Daily
+model-token quotas remain planned.
+
+Run the actual Lua and client tests against Redis:
+
+```sh
+LLMGATE_TEST_REDIS_URL="$GATEWAY_REDIS_URL" \
+  go test -race -count=1 -v ./internal/ratelimit
+```
+
+These tests use random positive key IDs and remove only their own buckets. They
+never flush the database. They verify shared admission across two clients,
+concurrent spending, different limits under the same HTTP load, refill, expiry,
+limit changes, numeric precision, and failure/recovery. Without a test URL they
+skip Redis integration cases; handler, configuration, cancellation, and stalled
+connection tests still run. A supplied but unreachable URL fails integration tests.
+
+For a manual two-key check, keep the gateway and backend running. Create fresh
+keys so earlier requests have not spent their credits:
+
+```sh
+LOW_JSON="$(go run ./cmd/gateway key-create -name low-rate -requests-per-min 2 -tokens-per-day 100000)"
+HIGH_JSON="$(go run ./cmd/gateway key-create -name high-rate -requests-per-min 4 -tokens-per-day 100000)"
+LOW_KEY="$(printf '%s' "$LOW_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["api_key"])')"
+HIGH_KEY="$(printf '%s' "$HIGH_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["api_key"])')"
+LOW_ID="$(printf '%s' "$LOW_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+HIGH_ID="$(printf '%s' "$HIGH_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')"
+unset LOW_JSON HIGH_JSON
+
+for token in "$LOW_KEY" "$HIGH_KEY"; do
+  for attempt in 1 2 3; do
+    curl -sS -o /dev/null -w '%{http_code}\n' \
+      http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $token"
+  done
+done
+curl -i http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $LOW_KEY"
+```
+
+With no other traffic on these keys and all six requests within 30 seconds, expect
+`200, 200, 429` for the first key and `200, 200, 200` for the second. The final
+curl shows JSON `rate_limit_exceeded` and a positive `Retry-After` header in whole
+seconds. Waiting that long makes a credit available, unless another caller spends
+it first. Keep `LOW_ID` and `HIGH_ID` for admin revocation when finished.
+
+For a Redis outage check, use the cached `HIGH_KEY` and stop only development Redis:
+
+```sh
+sudo --preserve-env=POSTGRES_PASSWORD docker compose \
+  -f deploy/docker-compose.yml stop redis
+curl -i http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $HIGH_KEY"
+curl -i http://127.0.0.1:8080/v1/healthz
+curl -i http://127.0.0.1:8080/v1/readyz
+sudo --preserve-env=POSTGRES_PASSWORD docker compose \
+  -f deploy/docker-compose.yml up -d --wait redis
+unset LOW_KEY HIGH_KEY
+```
+
+The authenticated request returns `503` with `rate_limit_unavailable`; the probes
+retain their process/backend meaning. Already-admitted streams continue because
+Redis is consulted only at admission. Leave the gateway running; new requests
+recover after Redis connectivity is restored. Do not delete the volume to simulate a
+normal outage, since lost state grants fresh request bursts. An unclean failure
+can still lose recent AOF writes; these request buckets are not billing records.
+
 ## API-key authentication
 
 After Postgres setup, export the connection configuration in both the gateway
@@ -370,7 +477,8 @@ export PGPASSWORD="$POSTGRES_PASSWORD"
 
 In terminal three, create a key and capture its JSON output without displaying
 the secret in command history. The name and positive limits are stored with the
-key. Authentication does not enforce these limits yet.
+key. Request admission enforces `requests_per_min`; daily token quota enforcement
+remains planned.
 
 ```sh
 KEY_JSON="$(go run ./cmd/gateway key-create \
@@ -432,9 +540,10 @@ Without the test URL it skips; with an unreachable database it fails.
 
 ## Operator-local admin key creation
 
-This slice supports creation only. Stop the gateway before changing its
-configuration. With the same Postgres setup and environment as above, generate
-an operator token during first-time setup. Regenerating this file and restarting
+Creation and [revocation](#admin-revocation-and-active-requests) use the same
+private listener. Stop the gateway before changing its configuration. With the
+same Postgres setup and environment as above, generate an operator token during
+first-time setup. Regenerating this file and restarting
 rotates the credential. Keep the file outside the repository.
 
 ```sh
@@ -474,8 +583,8 @@ curl -i http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $API_KEY"
 ```
 
 Creation returns `201` with `Cache-Control: no-store`. The issued key authorizes
-normal model and chat requests. The stored rate and daily token limits are not
-enforced yet. If creation fails, inspect its safe error response before running
+normal model and chat requests. Redis enforces the stored request rate. Daily
+token quotas are not enforced yet. If creation fails, inspect its safe error response before running
 the extraction commands. A lost response after insertion can leave a stored key
 whose secret cannot be recovered. Do not automatically retry issuance; inspect
 the created key ID in request logs or database records, and revoke an unused
@@ -651,6 +760,44 @@ repeated revocation, and the persisted timestamp. Cleanup removes its schema.
 Without a test database URL it skips. This covers one process; another gateway
 or a direct database update cannot signal this process's requests.
 
+## Configuration
+
+| Environment variable | Default | Controls |
+| --- | --- | --- |
+| `GATEWAY_DATABASE_URL` | Required | PostgreSQL connection configuration |
+| `GATEWAY_DATABASE_MAX_CONNS` | `10` | Maximum shared database connections |
+| `GATEWAY_DATABASE_CONNECT_TIMEOUT` | `5s` | Pool startup and individual connection deadlines |
+| `GATEWAY_AUTH_LOOKUP_TIMEOUT` | `2s` | Authentication lookup and local key insertion deadline |
+| `GATEWAY_AUTH_CACHE_TTL` | `30s` | Fixed successful-identity lifetime, must be positive |
+| `GATEWAY_AUTH_CACHE_CAPACITY` | `1024` | Maximum cached identities, must be a positive integer |
+| `GATEWAY_REDIS_URL` | `redis://127.0.0.1:6379/0` | Redis or TLS Redis URL; optional credentials and database index, no query or fragment |
+| `GATEWAY_REDIS_MAX_CONNS` | `10` | Maximum shared Redis connections |
+| `GATEWAY_REDIS_CONNECT_TIMEOUT` | `2s` | Redis startup and connection deadline |
+| `GATEWAY_RATE_LIMIT_TIMEOUT` | `500ms` | Redis decision, pool wait, and command deadline |
+| `GATEWAY_ADMIN_ENABLED` | `false` | Enable operator-local admin HTTP |
+| `GATEWAY_ADMIN_ADDR` | `127.0.0.1:8082` | Literal loopback IP and numeric port |
+| `GATEWAY_ADMIN_TOKEN` | Unset | Required when enabled; 32 to 256 URL-safe ASCII characters |
+| `GATEWAY_ADMIN_MAX_BODY_BYTES` | `4096` | Admin creation JSON body limit |
+| `GATEWAY_ADMIN_CREATE_TIMEOUT` | `2s` | Admin database insertion deadline |
+| `GATEWAY_ADMIN_REVOKE_TIMEOUT` | `2s` | Admin database revocation deadline |
+| `GATEWAY_ADDR` | `:8080` | Listen address |
+| `GATEWAY_UPSTREAM_URL` | Unset | Backend base URL |
+| `GATEWAY_UPSTREAM_TIMEOUT` | `30s` | Total deadline for model lists and JSON chat |
+| `GATEWAY_UPSTREAM_CONNECT_TIMEOUT` | `5s` | TCP connect and TLS handshake deadlines |
+| `GATEWAY_UPSTREAM_HEADER_TIMEOUT` | `30s` | Backend response-header wait |
+| `GATEWAY_STREAM_IDLE_TIMEOUT` | `30s` | Each upstream stream-body read wait |
+| `GATEWAY_READINESS_TIMEOUT` | `2s` | Backend readiness-probe deadline |
+| `GATEWAY_MAX_BODY_BYTES` | `1048576` | Chat request body limit |
+| `GATEWAY_MAX_TOKENS` | `1024` | Output-token limit and omitted-value default |
+| `GATEWAY_READ_TIMEOUT` | `10s` | Incoming headers and body read deadline |
+| `GATEWAY_READ_HEADER_TIMEOUT` | `5s` | Incoming header read deadline |
+| `GATEWAY_IDLE_TIMEOUT` | `60s` | Wait for the next request on an idle client connection |
+| `GATEWAY_SHUTDOWN_TIMEOUT` | `10s` | Graceful shutdown deadline |
+
+Oversized chat bodies return `413`, invalid JSON returns `400`, and unsupported
+content types return `415`. Duration settings accept Go values such as `500ms`
+or `30s` and must be positive.
+
 ## Automated tests
 
 For the full Go test suite:
@@ -666,12 +813,14 @@ go test -race ./...
 go vet ./...
 ```
 
-For the authentication packages and whitespace checks:
+For the authentication, request-limit, and proxy packages and whitespace checks:
 
 ```sh
-go test ./internal/admin ./internal/auth ./internal/gateway ./internal/proxy ./cmd/gateway
-wsl ./internal/admin ./internal/auth ./internal/store ./internal/gateway ./internal/proxy ./cmd/gateway
+go test ./internal/admin ./internal/auth ./internal/ratelimit ./internal/gateway ./internal/proxy ./cmd/gateway
+GOTOOLCHAIN=go1.27.0 wsl ./internal/admin ./internal/auth ./internal/ratelimit ./internal/store ./internal/gateway ./internal/proxy ./cmd/gateway
 ```
 
-These commands use test backends. Postgres integration tests require the test
-URL and otherwise skip; they do not replace the real llama.cpp checks above.
+These commands use test backends. Postgres and Redis integration tests require
+`LLMGATE_TEST_DATABASE_URL` and `LLMGATE_TEST_REDIS_URL` respectively and otherwise
+skip. The installed whitespace checker needs Go 1.27.0 to read export data on
+this machine. These checks do not replace the real llama.cpp checks above.

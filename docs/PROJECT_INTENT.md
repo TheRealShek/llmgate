@@ -28,6 +28,9 @@ The goal is a portfolio project that shows I can own the serving layer of an inf
 
 ## Architecture
 
+This is the target architecture across phases. See the
+[architecture guide](architecture.md) for the implemented request flow and components.
+
 ```
 client
   |
@@ -108,8 +111,11 @@ Existing baselines predate authentication.
 
 Authentication caches successful identities for a fixed lifetime. Admin revocation
 invalidates local entries; unexpired entries work during database outages, while
-misses and expired entries fail closed. Next, add Redis rate limits, usage
-recording, daily quotas, metrics, and the complete Compose setup. Measure the authenticated gateway and
+misses and expired entries fail closed. Redis now enforces per-key request rates
+using an atomic token bucket. Models and chat share each key's bucket; exhaustion
+returns `429` with retry guidance, and Redis errors fail closed with `503`.
+The development Compose setup includes Redis with persistent storage. Next, add
+usage recording, daily quotas, metrics, and the complete Compose setup. Measure the authenticated gateway and
 complete the remaining real-backend failure checks before closing Phase 1.
 See [decisions](decisions.md) for authentication and revocation boundaries.
 
@@ -215,7 +221,7 @@ Measure TTFT at the gateway, from the moment the request arrives to the moment t
 - Client disconnects during prefill, and during decode
 - Backend closes the connection mid-stream
 - Backend hangs and never sends a byte
-- Redis is down (decide and document whether the gateway fails open or fails closed)
+- Redis is down (authenticated request admission fails closed with `503`)
 - Postgres is down (cached keys keep working, new keys cannot be created)
 - Request body is huge, malformed, or has `max_tokens` set absurdly high
 - SIGTERM while 20 streams are active

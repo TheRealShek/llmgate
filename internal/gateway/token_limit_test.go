@@ -41,6 +41,7 @@ func TestChatTokenLimit(t *testing.T) {
 			handler := NewHandler(HandlerOptions{
 				NonStreaming:   upstream,
 				Authentication: testAuthenticator(),
+				RequestLimits:  testRequestLimits(),
 				Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 			})
 			request := authenticatedRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
@@ -89,6 +90,7 @@ func TestChatTokenLimitOmitted(t *testing.T) {
 			handler := NewHandler(HandlerOptions{
 				NonStreaming:   upstream,
 				Authentication: testAuthenticator(),
+				RequestLimits:  testRequestLimits(),
 				Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 			})
 			request := authenticatedRequest(

@@ -5,6 +5,7 @@ import (
 
 	"github.com/therealshek/llmgate/internal/api"
 	"github.com/therealshek/llmgate/internal/auth"
+	"github.com/therealshek/llmgate/internal/ratelimit"
 )
 
 // ChatLimits controls the request resources checked before forwarding chat requests.
@@ -26,13 +27,15 @@ type HandlerOptions struct {
 	Readiness http.Handler
 	// Authentication protects models and chat; nil fails closed.
 	Authentication *auth.Authenticator
+	// RequestLimits admits authenticated models and chat; nil fails closed.
+	RequestLimits *ratelimit.Limiter
 	// Limits bounds chat bodies and output-token options.
 	Limits ChatLimits
 }
 
 // NewHandler builds public health routes and authenticated model and chat routes.
-// Authentication runs before chat validation or forwarding. A missing NonStreaming
-// backend returns 503 for authenticated model and chat requests.
+// Authentication and request limits run before chat validation or forwarding.
+// A missing backend returns 503 after authentication and request admission.
 func NewHandler(options HandlerOptions) http.Handler {
 	var chat http.Handler
 	if options.NonStreaming != nil {
@@ -44,11 +47,16 @@ func NewHandler(options HandlerOptions) http.Handler {
 		}
 	}
 
+	// Matched requests authenticate, consume a request credit, then enter the
+	// model proxy or chat validator. Both layers preserve the original writer.
+	models := options.RequestLimits.Protect(backendHandler(options.NonStreaming))
+	chat = options.RequestLimits.Protect(backendHandler(chat))
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/healthz", healthHandler)
 	mux.Handle("GET /v1/readyz", backendHandler(options.Readiness))
-	mux.Handle("GET /v1/models", options.Authentication.Protect(backendHandler(options.NonStreaming)))
-	mux.Handle("POST /v1/chat/completions", options.Authentication.Protect(backendHandler(chat)))
+	mux.Handle("GET /v1/models", options.Authentication.Protect(models))
+	mux.Handle("POST /v1/chat/completions", options.Authentication.Protect(chat))
 
 	return mux
 }

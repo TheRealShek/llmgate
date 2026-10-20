@@ -39,6 +39,7 @@ func TestRequestIdentity(t *testing.T) {
 	routes := gateway.NewHandler(gateway.HandlerOptions{
 		NonStreaming:   forwarder,
 		Authentication: auth.NewAuthenticator(logTestKeyLookup{}, auth.Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024}),
+		RequestLimits:  testRequestLimits(),
 		Limits:         gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
 	handler := requestlog.NewHandler(routes, logger)

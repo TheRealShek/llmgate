@@ -50,6 +50,7 @@ func TestStreamingChatFlush(t *testing.T) {
 		NonStreaming:   nonStreaming,
 		Streaming:      streaming,
 		Authentication: testAuthenticator(),
+		RequestLimits:  testRequestLimits(),
 		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
 	gateway := httptest.NewServer(requestlog.NewHandler(
@@ -293,6 +294,7 @@ func newStreamingTestGateway(
 		NonStreaming:   nonStreaming,
 		Streaming:      streaming,
 		Authentication: testAuthenticator(),
+		RequestLimits:  testRequestLimits(),
 		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	}))
 	t.Cleanup(gateway.Close)

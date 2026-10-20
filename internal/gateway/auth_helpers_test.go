@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/therealshek/llmgate/internal/auth"
+	"github.com/therealshek/llmgate/internal/ratelimit"
 	"github.com/therealshek/llmgate/internal/store"
 )
 
@@ -53,4 +54,15 @@ func authenticatedClient(server *httptest.Server) *http.Client {
 
 func (testKeyLookup) RevokeKey(context.Context, int64) error {
 	return store.ErrDatabaseUnavailable
+}
+
+// allowRequestBuckets keeps routing tests independent of Redis admission policy.
+type allowRequestBuckets struct{}
+
+func (allowRequestBuckets) Take(context.Context, int64, int64) (ratelimit.Decision, error) {
+	return ratelimit.Decision{Allowed: true}, nil
+}
+
+func testRequestLimits() *ratelimit.Limiter {
+	return ratelimit.NewLimiter(allowRequestBuckets{}, time.Second)
 }

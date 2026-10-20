@@ -23,6 +23,10 @@ type config struct {
 	authLookupTimeout      time.Duration
 	authCacheTTL           time.Duration
 	authCacheCapacity      int
+	redisURL               string
+	redisMaxConns          int
+	redisConnectTimeout    time.Duration
+	rateLimitTimeout       time.Duration
 	addr                   string
 	upstreamURL            *url.URL
 	upstreamTimeout        time.Duration
@@ -50,6 +54,10 @@ func loadConfig(getenv func(string) string) (config, error) {
 		authLookupTimeout:      2 * time.Second,
 		authCacheTTL:           30 * time.Second,
 		authCacheCapacity:      1024,
+		redisURL:               "redis://127.0.0.1:6379/0",
+		redisMaxConns:          10,
+		redisConnectTimeout:    2 * time.Second,
+		rateLimitTimeout:       500 * time.Millisecond,
 		addr:                   ":8080",
 		upstreamTimeout:        30 * time.Second,
 		readHeaderTimeout:      5 * time.Second,
@@ -133,6 +141,19 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.databaseMaxConns = int32(n)
 	}
 
+	if val := getenv("GATEWAY_REDIS_URL"); val != "" {
+		cfg.redisURL = val
+	}
+
+	if val := getenv("GATEWAY_REDIS_MAX_CONNS"); val != "" {
+		limit, err := strconv.Atoi(val)
+		if err != nil || limit <= 0 {
+			return config{}, fmt.Errorf("validate GATEWAY_REDIS_MAX_CONNS: requires a positive integer")
+		}
+
+		cfg.redisMaxConns = limit
+	}
+
 	if val := getenv("GATEWAY_ADDR"); val != "" {
 		cfg.addr = val
 	}
@@ -181,6 +202,16 @@ func loadConfig(getenv func(string) string) (config, error) {
 		if err != nil || cfg.authCacheCapacity <= 0 {
 			return config{}, fmt.Errorf("validate GATEWAY_AUTH_CACHE_CAPACITY: requires a positive integer")
 		}
+	}
+
+	cfg.redisConnectTimeout, err = envDuration(getenv, "GATEWAY_REDIS_CONNECT_TIMEOUT", cfg.redisConnectTimeout)
+	if err != nil {
+		return config{}, err
+	}
+
+	cfg.rateLimitTimeout, err = envDuration(getenv, "GATEWAY_RATE_LIMIT_TIMEOUT", cfg.rateLimitTimeout)
+	if err != nil {
+		return config{}, err
 	}
 
 	cfg.readinessTimeout, err = envDuration(getenv, "GATEWAY_READINESS_TIMEOUT", cfg.readinessTimeout)

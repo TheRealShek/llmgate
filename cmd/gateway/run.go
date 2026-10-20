@@ -13,6 +13,7 @@ import (
 	"github.com/therealshek/llmgate/internal/backend"
 	"github.com/therealshek/llmgate/internal/gateway"
 	"github.com/therealshek/llmgate/internal/proxy"
+	"github.com/therealshek/llmgate/internal/ratelimit"
 	"github.com/therealshek/llmgate/internal/requestlog"
 	"github.com/therealshek/llmgate/internal/store"
 )
@@ -50,6 +51,21 @@ func run(ctx context.Context) error {
 		CacheCapacity: cfg.authCacheCapacity,
 	})
 
+	// Startup owns this pool too. Closing it after HTTP draining lets admitted
+	// requests finish without losing shared dependencies during shutdown.
+	redisClient, err := ratelimit.OpenClient(ctx, cfg.redisURL, ratelimit.ClientLimits{
+		MaxConns:       cfg.redisMaxConns,
+		ConnectTimeout: cfg.redisConnectTimeout,
+		CommandTimeout: cfg.rateLimitTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("initialize request limiting: %w", err)
+	}
+	defer redisClient.Close()
+
+	buckets := ratelimit.NewRedisStore(redisClient)
+	requestLimits := ratelimit.NewLimiter(buckets, cfg.rateLimitTimeout)
+
 	// DefaultTransport is declared as the http.RoundTripper interface.
 	// Assert its underlying type is *http.Transport and clone it so custom
 	// timeouts and idle connection cleanup do not mutate the process-wide transport.
@@ -77,6 +93,7 @@ func run(ctx context.Context) error {
 		Streaming:      streaming,
 		Readiness:      readiness,
 		Authentication: authentication,
+		RequestLimits:  requestLimits,
 		Limits: gateway.ChatLimits{
 			MaxBodyBytes: cfg.maxBodyBytes,
 			MaxTokens:    cfg.maxTokens,

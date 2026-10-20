@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -54,7 +55,7 @@ func TestRevocationIsolation(t *testing.T) {
 		},
 		revoke: func(context.Context, int64) error { revoked.Store(true); return nil },
 	}
-	a := NewAuthenticator(keys, time.Second)
+	a := NewAuthenticator(keys, Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024})
 	ctx, cancel := context.WithCancel(t.Context())
 
 	var workers sync.WaitGroup
@@ -160,7 +161,7 @@ func TestRevocationCrossingLookup(t *testing.T) {
 				},
 				revoke: func(context.Context, int64) error { revoked.Store(true); return nil },
 			}
-			a := NewAuthenticator(keys, time.Second)
+			a := NewAuthenticator(keys, Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024})
 			next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				if revokeID == 1 {
 					t.Error("stale identity reached protected work")
@@ -195,6 +196,11 @@ func TestRevocationCrossingLookup(t *testing.T) {
 			if w.Code != want || calls.Load() != 2 || len(a.active) != 0 {
 				t.Fatalf("status/calls/registry = %d/%d/%d", w.Code, calls.Load(), len(a.active))
 			}
+
+			_, cached := a.cache[sha256.Sum256([]byte("secret"))]
+			if cached != (revokeID == 2) {
+				t.Fatal("crossed lookup restored a revoked cache entry or lost an unrelated identity")
+			}
 		})
 	}
 }
@@ -204,7 +210,7 @@ func TestRevocationFailure(t *testing.T) {
 	cause := errors.New("database failed")
 	a := NewAuthenticator(keyStoreStub{
 		revoke: func(context.Context, int64) error { return cause },
-	}, time.Second)
+	}, Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024})
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -225,7 +231,7 @@ func TestRegistryCleanup(t *testing.T) {
 		t.Run(outcome, func(t *testing.T) {
 			a := NewAuthenticator(lookupFunc(func(context.Context, string) (store.Key, error) {
 				return store.Key{ID: 1}, nil
-			}), time.Second)
+			}), Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024})
 
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
@@ -265,7 +271,7 @@ func TestConcurrentRevocationAndCleanup(t *testing.T) {
 	a := NewAuthenticator(keyStoreStub{
 		lookup: func(context.Context, string) (store.Key, error) { return store.Key{ID: 1}, nil },
 		revoke: func(context.Context, int64) error { return nil },
-	}, time.Second)
+	}, Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024})
 	handler := a.Protect(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 
 	var workers sync.WaitGroup
@@ -297,7 +303,7 @@ func TestCommittedRevocationAfterDisconnect(t *testing.T) {
 
 	a := NewAuthenticator(keyStoreStub{
 		revoke: func(context.Context, int64) error { cancel(); return nil },
-	}, time.Second)
+	}, Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024})
 	called := false
 	request := &activeRequest{cancel: func() {
 		called = true
@@ -353,7 +359,7 @@ func TestLookupRetryDeadline(t *testing.T) {
 		},
 		revoke: func(context.Context, int64) error { return nil },
 	}
-	a = NewAuthenticator(keys, 20*time.Millisecond)
+	a = NewAuthenticator(keys, Options{LookupTimeout: 20 * time.Millisecond, CacheTTL: 30 * time.Second, CacheCapacity: 1024})
 	r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	r.Header.Set("Authorization", "Bearer secret")
 
@@ -362,7 +368,7 @@ func TestLookupRetryDeadline(t *testing.T) {
 		t.Error("expired retry reached protected work")
 	})).ServeHTTP(w, r)
 
-	if w.Code != http.StatusServiceUnavailable || calls != 2 || len(a.active) != 0 {
+	if w.Code != http.StatusServiceUnavailable || calls != 2 || len(a.active) != 0 || len(a.cache) != 0 {
 		t.Fatalf("status/calls/registry = %d/%d/%d", w.Code, calls, len(a.active))
 	}
 }

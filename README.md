@@ -10,9 +10,9 @@ and request IDs with structured logs work today. Models and chat require an
 active API key stored as a hash in Postgres. A local command provisions keys;
 the development Compose setup runs Postgres and migrations. An opt-in loopback
 admin listener can create and revoke keys over HTTP. Revocation cancels that
-key's active requests in this process. Authentication caching, rate limits,
-usage tracking, metrics, and the full Compose stack are
-still planned. A
+key's active requests in this process. A bounded authentication cache keeps
+unexpired identities available during database outages. Rate limits, usage
+tracking, metrics, and the full Compose stack are still planned. A
 [GLM single-stream baseline](docs/benchmarks.md) records 100 sequential requests
 split between direct and gateway paths. GLM-Edge-4B-Chat Q6_K is the primary
 model; the earlier Qwen baseline remains historical evidence.
@@ -75,7 +75,8 @@ gate chat traffic. Periodic health tracking and backend routing belong to Phase 
 Database configuration is required even without an upstream backend. Startup
 checks Postgres connectivity with a deadline and fails with safe diagnostics
 if it cannot connect. Migrations run separately. After startup, database failures
-return `503` on protected routes; public health checks remain available.
+return `503` on authentication cache misses. Unexpired cached identities and
+public health checks remain available.
 
 ## How a request works
 
@@ -95,10 +96,13 @@ flowchart LR
 1. Request logging assigns a fresh request ID. Go's `http.ServeMux` matches
    the method and versioned path. Health and readiness remain public.
 2. Models and chat pass through authentication. Exactly one
-   `Authorization: Bearer <key>` header is required. The store hashes the secret
-   and looks up an active key in Postgres under a separate lookup deadline.
+   `Authorization: Bearer <key>` header is required. The authenticator hashes the
+   secret and checks a bounded in-memory identity cache. Misses query Postgres under
+   a separate lookup deadline. Hits retain their original expiry.
 3. Missing, malformed, unknown, and revoked keys return JSON `401`. Database
-   failures and lookup deadlines return JSON `503`. Neither reaches the backend.
+   failures and lookup deadlines on cache misses return JSON `503`. Unexpired
+   cached identities remain usable during database outages. Rejections never
+   reach the backend.
    Authentication adds the key identity and limits to the request context,
    preserving logging and cancellation. It registers a cancellation function until
    the handler exits. Limits are not enforced yet.
@@ -113,10 +117,18 @@ flowchart LR
    Authenticated model-list requests use the non-streaming proxy directly.
 
 The lookup deadline ends before forwarding starts. Admin revocation persists the
-change, then cancels this process's requests for that key. A generation check
-coordinates lookups and registration so requests cannot miss concurrent
-revocation. Direct SQL revocation blocks future lookups but does not signal
-active requests.
+change, invalidates cached identities, then cancels this process's requests for
+that key. Cache admission, invalidation, and registration share a mutex. A
+generation check prevents overlapping database lookups from restoring revoked
+identities. Direct SQL revocation becomes visible after cache expiry and does
+not signal active requests.
+
+The cache holds at most 1,024 successful identities by default and evicts the
+oldest inserted entry when full. Entries expire 30 seconds after their database
+lookup started; hits never renew them. Expired entries are removed on access,
+and the capacity bounds entries retained while idle. There is no background
+worker or stale-entry fallback. Cache expiry affects new requests only; admitted
+streams keep running. Startup still requires a reachable database.
 All active keys currently have the same model and chat permissions. Use HTTPS
 when exposing the gateway beyond local development.
 
@@ -151,6 +163,8 @@ bind failure closes the other listener, and a later server failure stops its pee
 | `GATEWAY_DATABASE_MAX_CONNS` | `10` | Maximum shared database connections |
 | `GATEWAY_DATABASE_CONNECT_TIMEOUT` | `5s` | Pool startup and individual connection deadlines |
 | `GATEWAY_AUTH_LOOKUP_TIMEOUT` | `2s` | Authentication lookup and local key insertion deadline |
+| `GATEWAY_AUTH_CACHE_TTL` | `30s` | Fixed successful-identity lifetime, must be positive |
+| `GATEWAY_AUTH_CACHE_CAPACITY` | `1024` | Maximum cached identities, must be a positive integer |
 | `GATEWAY_ADMIN_ENABLED` | `false` | Enable operator-local admin HTTP |
 | `GATEWAY_ADMIN_ADDR` | `127.0.0.1:8082` | Literal loopback IP and numeric port |
 | `GATEWAY_ADMIN_TOKEN` | Unset | Required when enabled; 32 to 256 URL-safe ASCII characters |
@@ -224,8 +238,9 @@ Read these functions in order:
    each dependency and the chat limits. This is the only constructor.
 4. [`auth.handler.ServeHTTP`](internal/auth/handler.go) extracts the credential,
    bounds the lookup, handles rejection, and adds identity before entering chat.
-   Follow [`lookupAndRegister`](internal/auth/active.go) for race coordination
-   and [`KeyStore.LookupKey`](internal/store/keys.go) for hashing and SQL.
+   Follow [`lookupAndRegister`](internal/auth/active.go) for cache admission and
+   revocation coordination, [`cache.go`](internal/auth/cache.go) for fixed expiry
+   and eviction, and [`KeyStore.LookupKey`](internal/store/keys.go) for SQL.
 5. [`chatHandler.ServeHTTP`](internal/gateway/chat.go) validates JSON and limits,
    selects the streaming proxy, and supplies a fresh body reader.
 6. [`streamHandler.ServeHTTP`](internal/proxy/stream.go) preserves cancellation

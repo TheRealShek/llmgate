@@ -64,7 +64,7 @@ func TestAuthenticationFailures(t *testing.T) {
 
 			var logs bytes.Buffer
 
-			handler := requestlog.NewHandler(NewAuthenticator(keys, time.Second).Protect(next),
+			handler := requestlog.NewHandler(NewAuthenticator(keys, Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024}).Protect(next),
 				slog.New(slog.NewJSONHandler(&logs, nil)))
 
 			r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
@@ -151,7 +151,7 @@ func TestAuthenticationIdentity(t *testing.T) {
 	r.Header.Set("Authorization", "bearer secret")
 
 	w := httptest.NewRecorder()
-	requestlog.NewHandler(NewAuthenticator(keys, time.Second).Protect(next),
+	requestlog.NewHandler(NewAuthenticator(keys, Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024}).Protect(next),
 		slog.New(slog.NewJSONHandler(io.Discard, nil))).ServeHTTP(w, r)
 
 	if w.Code != http.StatusAccepted {
@@ -193,7 +193,10 @@ func TestAuthenticationCancellation(t *testing.T) {
 			w := httptest.NewRecorder()
 			done := make(chan struct{})
 
-			workers.Go(func() { NewAuthenticator(keys, timeout).Protect(next).ServeHTTP(w, r); close(done) })
+			workers.Go(func() {
+				NewAuthenticator(keys, Options{LookupTimeout: timeout, CacheTTL: 30 * time.Second, CacheCapacity: 1024}).Protect(next).ServeHTTP(w, r)
+				close(done)
+			})
 
 			select {
 			case <-started:
@@ -229,8 +232,14 @@ func TestMissingAuthenticator(t *testing.T) {
 		authenticator *Authenticator
 	}{
 		{name: "missing authenticator"},
-		{name: "missing key lookup", authenticator: NewAuthenticator(nil, time.Second)},
-		{name: "non-positive timeout", authenticator: NewAuthenticator(lookupFunc(nil), 0)},
+		{name: "non-positive cache TTL", authenticator: NewAuthenticator(lookupFunc(nil), Options{
+			LookupTimeout: time.Second, CacheCapacity: 1,
+		})},
+		{name: "non-positive cache capacity", authenticator: NewAuthenticator(lookupFunc(nil), Options{
+			LookupTimeout: time.Second, CacheTTL: time.Second,
+		})},
+		{name: "missing key lookup", authenticator: NewAuthenticator(nil, Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024})},
+		{name: "non-positive timeout", authenticator: NewAuthenticator(lookupFunc(nil), Options{LookupTimeout: 0, CacheTTL: 30 * time.Second, CacheCapacity: 1024})},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)

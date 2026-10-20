@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"time"
 
 	"github.com/therealshek/llmgate/internal/store"
 )
@@ -26,7 +28,13 @@ func (a *Authenticator) RevokeKey(ctx context.Context, id int64) error {
 	// Every successful revocation advances the counter. In-flight lookups use it
 	// to detect whether their database result needs rechecking.
 	a.mu.Lock()
+
 	a.generation++
+	for _, element := range a.cache {
+		if element.Value.(cacheEntry).key.ID == id {
+			a.removeCached(element)
+		}
+	}
 
 	requests := make([]*activeRequest, 0, len(a.active[id]))
 	for request := range a.active[id] {
@@ -48,15 +56,32 @@ func (a *Authenticator) RevokeKey(ctx context.Context, id int64) error {
 func (a *Authenticator) lookupAndRegister(
 	ctx context.Context, secret string, request *activeRequest,
 ) (store.Key, error) {
+	hash := sha256.Sum256([]byte(secret))
+
 	// Retry if revocation overlaps a lookup. All attempts share ctx's deadline.
 	for {
 		if err := ctx.Err(); err != nil {
 			return store.Key{}, err
 		}
 
-		// Read the counter safely, then unlock so database I/O cannot block the registry.
+		// Cache hits register under the revocation lock. Misses snapshot the counter,
+		// then unlock so database I/O cannot block admission or cancellation.
 		a.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			a.mu.Unlock()
+			return store.Key{}, err
+		}
+
 		generation := a.generation
+		lookupStarted := time.Now()
+
+		key, cached := a.cachedKey(hash, lookupStarted)
+		if cached {
+			a.register(key.ID, request)
+			a.mu.Unlock()
+
+			return key, nil
+		}
 		a.mu.Unlock()
 
 		key, err := a.keys.LookupKey(ctx, secret)
@@ -78,16 +103,23 @@ func (a *Authenticator) lookupAndRegister(
 			continue
 		}
 
-		if a.active[key.ID] == nil {
-			a.active[key.ID] = make(map[*activeRequest]struct{})
-		}
-
-		// The inner map is a set of requests belonging to this key.
-		a.active[key.ID][request] = struct{}{}
+		// Start expiry before database I/O, so a slow lookup cannot extend the
+		// freshness window. Concurrent fills never renew an existing entry.
+		a.cacheKey(hash, key, lookupStarted.Add(a.cacheTTL), time.Now())
+		a.register(key.ID, request)
 		a.mu.Unlock()
 
 		return key, nil
 	}
+}
+
+// register runs under mu, together with cache admission or a generation check.
+func (a *Authenticator) register(id int64, request *activeRequest) {
+	if a.active[id] == nil {
+		a.active[id] = make(map[*activeRequest]struct{})
+	}
+
+	a.active[id][request] = struct{}{}
 }
 
 // remove releases tracking when a protected handler exits, including cancellation or panic.

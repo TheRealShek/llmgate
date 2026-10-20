@@ -80,10 +80,11 @@ func TestKeyCreationAndAuthentication(t *testing.T) {
 	t.Cleanup(transport.CloseIdleConnections)
 
 	keys := store.NewKeyStore(pool)
+	authentication := auth.NewAuthenticator(keys, auth.Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
 		NonStreaming:   proxy.NewNonStreamingHandler(target, transport, time.Second),
 		Streaming:      proxy.NewStreamingHandler(target, transport, time.Second),
-		Authentication: auth.NewAuthenticator(keys, time.Second),
+		Authentication: authentication,
 		Limits:         gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
 
@@ -121,7 +122,7 @@ func TestKeyCreationAndAuthentication(t *testing.T) {
 		})
 	}
 
-	if err := keys.RevokeKey(t.Context(), created.ID); err != nil {
+	if err := authentication.RevokeKey(t.Context(), created.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -143,6 +144,59 @@ func TestKeyCreationAndAuthentication(t *testing.T) {
 	if w.Code != 503 {
 		t.Fatalf("unavailable database status = %d", w.Code)
 	}
+}
+
+// TestAuthenticationCacheDatabaseOutage checks cached identities survive a closed pool while misses fail closed.
+func TestAuthenticationCacheDatabaseOutage(t *testing.T) {
+	pool, _ := authenticationTestPool(t)
+	keys := store.NewKeyStore(pool)
+
+	key, cachedSecret, err := keys.CreateKey(t.Context(), store.CreateKeyParams{
+		Name: "cached", RequestsPerMin: 60, TokensPerDay: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, uncachedSecret, err := keys.CreateKey(t.Context(), store.CreateKeyParams{
+		Name: "uncached", RequestsPerMin: 60, TokensPerDay: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	authentication := auth.NewAuthenticator(keys, auth.Options{
+		LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 2,
+	})
+	backend := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	routes := gateway.NewHandler(gateway.HandlerOptions{
+		NonStreaming: backend, Authentication: authentication,
+	})
+	checkStatus := func(secret string, want int) {
+		t.Helper()
+
+		r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		r.Header.Set("Authorization", "Bearer "+secret)
+
+		w := httptest.NewRecorder()
+		routes.ServeHTTP(w, r)
+
+		if w.Code != want {
+			t.Fatalf("authentication status = %d, want %d", w.Code, want)
+		}
+	}
+	checkStatus(cachedSecret, http.StatusNoContent)
+	pool.Close()
+	checkStatus(cachedSecret, http.StatusNoContent)
+	checkStatus(uncachedSecret, http.StatusServiceUnavailable)
+
+	if err := authentication.RevokeKey(t.Context(), key.ID); err == nil {
+		t.Fatal("revocation unexpectedly succeeded with a closed database pool")
+	}
+
+	checkStatus(cachedSecret, http.StatusNoContent)
 }
 
 func authenticationTestPool(t *testing.T) (*pgxpool.Pool, string) {

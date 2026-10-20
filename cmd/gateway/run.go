@@ -44,7 +44,11 @@ func run(ctx context.Context) error {
 	defer pool.Close()
 
 	keys := store.NewKeyStore(pool)
-	authentication := auth.NewAuthenticator(keys, cfg.authLookupTimeout)
+	authentication := auth.NewAuthenticator(keys, auth.Options{
+		LookupTimeout: cfg.authLookupTimeout,
+		CacheTTL:      cfg.authCacheTTL,
+		CacheCapacity: cfg.authCacheCapacity,
+	})
 
 	// DefaultTransport is declared as the http.RoundTripper interface.
 	// Assert its underlying type is *http.Transport and clone it so custom

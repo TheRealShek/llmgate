@@ -256,11 +256,12 @@ proxying. Unknown routes and unsupported methods retain their routing errors.
 All active keys have the same route permissions. Request and token limits are
 carried with identity but are not enforced by authentication.
 
-Use direct `KeyStore.LookupKey` calls for this slice. Missing, malformed,
-ambiguous, unknown, and revoked credentials return a generic JSON `401` with
-`WWW-Authenticate: Bearer`. Database failures and lookup deadlines return a
-fixed JSON `503`. Fail closed and never forward rejected requests. Client
-cancellation stops the lookup and does not attempt an error response.
+Resolve keys through the cache policy below, with `KeyStore.LookupKey` on misses.
+Missing, malformed, ambiguous, unknown, and revoked credentials return a generic
+JSON `401` with `WWW-Authenticate: Bearer`. On cache misses, database failures
+and lookup deadlines return a fixed JSON `503`. Fail closed and never forward
+rejected requests. Client cancellation stops the lookup and does not attempt an
+error response.
 
 Attach the returned key identity and limits to the request context, never the
 secret or hash. Preserve the incoming cancellation and logging metadata. Give
@@ -281,8 +282,8 @@ before inference; a long stream does not hold a database connection. These are
 initial development limits, not measured capacity claims. The local creation
 command uses the same operation timeout for its single insertion.
 
-Admin key management has its own listener policy below. Authentication caching
-remains a separate task.
+Admin key management has its own listener policy below. The cache policy below
+bounds database-outage availability and freshness.
 
 ## Revocation and active requests
 
@@ -311,7 +312,8 @@ cost when an operator revokes a key. Lookups registered before publication are
 included in cancellation; stale lookups returning afterward cannot bypass it.
 The mutex never covers database calls or inference work. This avoids blocking
 all authentication behind one slow database operation and avoids retaining
-tombstones indefinitely. No authentication cache is introduced in this slice.
+tombstones indefinitely. The cache policy below extends this coordination to
+cached identities.
 
 Return `204` with no body after persistence and local cancellation signaling.
 Repeated revocation preserves the first timestamp and returns `204`. Unknown
@@ -335,6 +337,46 @@ Estimate registry size from admitted request rate times request duration, then
 measure memory and cancellation latency. The earlier conversation's sizing
 numbers were illustrative, not measured gateway claims. Admission bounds belong
 to the planned overload-protection work.
+
+## Authentication caching
+
+Cache successful identities in the shared authenticator. Index entries with
+SHA-256 of the presented secret and retain only the identity, limits, hash, and
+expiry. Never retain the raw secret or cache lookup failures. Keep the existing
+constructor as the sole construction path, with explicit lookup and cache limits.
+
+Default to a 30-second fixed TTL and 1,024 entries. Both limits must be positive
+and can be configured through `GATEWAY_AUTH_CACHE_TTL` and
+`GATEWAY_AUTH_CACHE_CAPACITY`. Start expiry before database lookup, so a slow
+lookup cannot extend freshness. Hits and concurrent fills do not renew an
+unexpired entry. A lookup that finishes after its cache lifetime can authenticate
+that request but does not populate the cache.
+
+Evict the oldest inserted entry when full. FIFO keeps cache hits and eviction
+simple without tracking access order. A map and linked list bound both indexing
+and eviction state. Expired entries are removed on access; idle expired entries
+remain within the capacity bound. There are no cache workers or per-key timers.
+This capacity is an initial development limit, not a measured memory claim.
+
+Unexpired hits work during a Postgres outage. Misses and expired entries must
+query Postgres and return `503` on failure or deadline. Never extend expiry or
+serve stale entries because storage is unavailable. Successful recovery refreshes
+identity and limits. Startup still requires Postgres, and admin operations still
+require a successful database write. This policy trades a bounded freshness
+window for cached-key availability; it does not guarantee uninterrupted access
+through a database outage.
+
+Cache hits register active requests under the same mutex used by revocation.
+Successful revocation removes every cached identity for that key and advances
+the generation before taking its cancellation snapshot. Database fills must
+pass the generation check before caching and registering. A failed revocation
+changes neither cached identities nor active requests. No database operation or
+cancellation callback runs under the mutex.
+
+The guarantee remains local to one gateway process and its admin API. Direct SQL
+changes become visible on the next successful refresh after expiry or eviction;
+they do not cancel active work. Cache expiry also does not cancel admitted
+requests. Multiple gateways need a separate invalidation and notification policy.
 
 ## Operator-local admin key creation
 

@@ -21,6 +21,8 @@ type config struct {
 	databaseMaxConns       int32
 	databaseConnectTimeout time.Duration
 	authLookupTimeout      time.Duration
+	authCacheTTL           time.Duration
+	authCacheCapacity      int
 	addr                   string
 	upstreamURL            *url.URL
 	upstreamTimeout        time.Duration
@@ -46,6 +48,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 		databaseMaxConns:       10,
 		databaseConnectTimeout: 5 * time.Second,
 		authLookupTimeout:      2 * time.Second,
+		authCacheTTL:           30 * time.Second,
+		authCacheCapacity:      1024,
 		addr:                   ":8080",
 		upstreamTimeout:        30 * time.Second,
 		readHeaderTimeout:      5 * time.Second,
@@ -165,6 +169,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 	cfg.authLookupTimeout, err = envDuration(getenv, "GATEWAY_AUTH_LOOKUP_TIMEOUT", cfg.authLookupTimeout)
 	if err != nil {
 		return config{}, err
+	}
+
+	cfg.authCacheTTL, err = envDuration(getenv, "GATEWAY_AUTH_CACHE_TTL", cfg.authCacheTTL)
+	if err != nil {
+		return config{}, err
+	}
+
+	if val := getenv("GATEWAY_AUTH_CACHE_CAPACITY"); val != "" {
+		cfg.authCacheCapacity, err = strconv.Atoi(val)
+		if err != nil || cfg.authCacheCapacity <= 0 {
+			return config{}, fmt.Errorf("validate GATEWAY_AUTH_CACHE_CAPACITY: requires a positive integer")
+		}
 	}
 
 	cfg.readinessTimeout, err = envDuration(getenv, "GATEWAY_READINESS_TIMEOUT", cfg.readinessTimeout)

@@ -100,6 +100,8 @@ func TestLoadConfig(t *testing.T) {
 				databaseMaxConns:       10,
 				databaseConnectTimeout: 5 * time.Second,
 				authLookupTimeout:      2 * time.Second,
+				authCacheTTL:           30 * time.Second,
+				authCacheCapacity:      1024,
 				addr:                   ":8080",
 				readTimeout:            10 * time.Second,
 				maxBodyBytes:           1 << 20, // 1 MiB
@@ -139,6 +141,8 @@ func TestLoadConfig(t *testing.T) {
 				databaseMaxConns:       10,
 				databaseConnectTimeout: 5 * time.Second,
 				authLookupTimeout:      2 * time.Second,
+				authCacheTTL:           30 * time.Second,
+				authCacheCapacity:      1024,
 				addr:                   "127.0.0.1:9090",
 				readTimeout:            3 * time.Second,
 				maxBodyBytes:           2048,

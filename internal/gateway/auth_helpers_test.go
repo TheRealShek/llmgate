@@ -22,7 +22,7 @@ func (testKeyLookup) LookupKey(_ context.Context, secret string) (store.Key, err
 }
 
 func testAuthenticator() *auth.Authenticator {
-	return auth.NewAuthenticator(testKeyLookup{}, time.Second)
+	return auth.NewAuthenticator(testKeyLookup{}, auth.Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024})
 }
 
 func authenticatedRequest(method, target string, body io.Reader) *http.Request {

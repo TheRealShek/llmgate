@@ -2,7 +2,9 @@
 package auth
 
 import (
+	"container/list"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"net/http"
 	"strings"
@@ -20,22 +22,37 @@ type KeyStore interface {
 	RevokeKey(context.Context, int64) error
 }
 
+// Options bounds database lookups and the successful-identity cache. All values must be positive.
+type Options struct {
+	LookupTimeout time.Duration
+	CacheTTL      time.Duration
+	CacheCapacity int
+}
+
 // Authenticator owns key lookup, revocation, and active requests for one gateway process.
 type Authenticator struct {
 	keys          KeyStore
 	lookupTimeout time.Duration
+	cacheTTL      time.Duration
+	cacheCapacity int
 	// mu coordinates lookup admission with revocation publication. It never covers
 	// database operations, inference handlers, or cancellation callbacks.
 	mu         sync.Mutex
 	generation uint64
 	active     map[int64]map[*activeRequest]struct{}
+	cache      map[[sha256.Size]byte]*list.Element
+	cacheOrder list.List
 }
 
-// NewAuthenticator uses keys and a positive lookupTimeout supplied by startup.
-func NewAuthenticator(keys KeyStore, lookupTimeout time.Duration) *Authenticator {
+// NewAuthenticator uses keys and the positive limits supplied by startup.
+func NewAuthenticator(keys KeyStore, options Options) *Authenticator {
 	return &Authenticator{
-		keys: keys, lookupTimeout: lookupTimeout,
-		active: make(map[int64]map[*activeRequest]struct{}),
+		keys:          keys,
+		lookupTimeout: options.LookupTimeout,
+		cacheTTL:      options.CacheTTL,
+		cacheCapacity: options.CacheCapacity,
+		active:        make(map[int64]map[*activeRequest]struct{}),
+		cache:         make(map[[sha256.Size]byte]*list.Element),
 	}
 }
 
@@ -72,7 +89,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.auth == nil || h.auth.keys == nil || h.auth.lookupTimeout <= 0 {
+	if h.auth == nil || h.auth.keys == nil || h.auth.lookupTimeout <= 0 ||
+		h.auth.cacheTTL <= 0 || h.auth.cacheCapacity <= 0 {
 		writeUnavailable(w)
 		return
 	}

@@ -396,9 +396,9 @@ curl -i http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $API_KEY"
 The first returns JSON `401` and `WWW-Authenticate: Bearer`. The second forwards
 to the backend. Missing, malformed, unknown, and revoked credentials receive the
 same error. Logs omit the secret and database diagnostics. Health and readiness
-need no key. An authentication lookup failure or deadline returns `503` before
-backend work; missing database configuration or failed initial connectivity
-prevents startup.
+need no key. On a cache miss, an authentication lookup failure or deadline returns
+`503` before backend work. Unexpired cached identities bypass the database.
+Missing database configuration or failed initial connectivity prevents startup.
 
 To check database-only revocation, update only the key created above using its ID:
 
@@ -408,10 +408,14 @@ UPDATE api_keys SET revoked_at = COALESCE(revoked_at, now())
 WHERE id = :'key_id'::bigint;
 SQL
 curl -i http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $API_KEY"
+sleep 31 # Default cache TTL is 30 seconds.
+curl -i http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $API_KEY"
 unset API_KEY KEY_ID
 ```
 
-The request now returns `401`. Direct SQL does not notify the active-request
+The request can still succeed until its cached identity expires. Wait for
+`GATEWAY_AUTH_CACHE_TTL`, which defaults to 30 seconds, then repeat the curl to
+verify `401`. Direct SQL does not invalidate the cache or notify the active-request
 registry, so already-authenticated requests may finish. For active cancellation,
 use the [admin revocation endpoint](#admin-revocation-and-active-requests).
 Create a fresh key before continuing chat checks or the benchmark.
@@ -522,9 +526,56 @@ LLMGATE_TEST_DATABASE_URL="$GATEWAY_DATABASE_URL" \
 The integration test uses a unique temporary schema and the existing migration.
 Without its database URL it skips. With a supplied but unreachable URL it fails.
 
+## Authentication cache and database outages
+
+Defaults are `GATEWAY_AUTH_CACHE_TTL=30s` and
+`GATEWAY_AUTH_CACHE_CAPACITY=1024`. Both must be positive. Hits retain the
+original expiry, and a full cache evicts the oldest inserted identity.
+
+Run deterministic expiry, eviction, outage, and revocation-race tests:
+
+```sh
+go test -race -count=1 ./internal/auth ./cmd/gateway
+```
+
+The auth tests use a controlled key store and virtual time. To verify the real
+Postgres path, use the configured development database:
+
+```sh
+LLMGATE_TEST_DATABASE_URL='postgres://llmgate@127.0.0.1:5432/llmgate?sslmode=disable' \
+  go test -race -count=1 -v ./cmd/gateway \
+  -run 'TestKeyCreationAndAuthentication|TestAuthenticationCacheDatabaseOutage|TestAdminRevocationAndStreams'
+```
+
+For a manual outage check, first create two active keys and start the gateway
+with the real backend and a longer `GATEWAY_AUTH_CACHE_TTL=60s`. Use the first
+key for `/v1/models` to warm its cache entry; leave the second unused. Stop only
+the development Postgres service:
+
+```sh
+sudo --preserve-env=POSTGRES_PASSWORD docker compose \
+  -f deploy/docker-compose.yml stop postgres
+```
+
+Before the first entry expires, its key should still reach the backend. The
+unused key should return `503`. After 60 seconds from the warm request, the first
+key should also return `503`, even if you kept using it. Restart Postgres:
+
+```sh
+sudo --preserve-env=POSTGRES_PASSWORD docker compose \
+  -f deploy/docker-compose.yml up -d --wait postgres
+```
+
+Both keys should work again. Admin creation and revocation require database
+writes throughout the outage. Cache expiry affects new authentication only and
+does not end an already-admitted stream. The admin revocation check below must
+still cancel active streams immediately after revocation is published locally,
+even when the key was cached.
+
 ## Admin revocation and active requests
 
-This check consumes the test key issued in the preceding section. Keep the
+This check consumes the test key issued in
+[operator-local admin key creation](#operator-local-admin-key-creation). Keep the
 admin listener enabled and the CUDA backend running. In terminal three, show
 its ID and start a long stream with that key:
 

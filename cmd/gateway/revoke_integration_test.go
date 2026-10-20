@@ -75,7 +75,7 @@ func TestAdminRevocationAndStreams(t *testing.T) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	t.Cleanup(transport.CloseIdleConnections)
 
-	authentication := auth.NewAuthenticator(keys, time.Second)
+	authentication := auth.NewAuthenticator(keys, auth.Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024})
 	public := httptest.NewServer(gateway.NewHandler(gateway.HandlerOptions{
 		NonStreaming:   proxy.NewNonStreamingHandler(target, transport, time.Second),
 		Streaming:      proxy.NewStreamingHandler(target, transport, time.Second),

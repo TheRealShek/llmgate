@@ -12,8 +12,9 @@ import (
 type contextKey struct{}
 
 type requestInfo struct {
-	id     string
-	logger *slog.Logger
+	id      string
+	logger  *slog.Logger
+	started time.Time
 }
 
 // NewHandler gives each incoming request a generated ID and a logger derived from logger.
@@ -21,7 +22,7 @@ type requestInfo struct {
 func NewHandler(next http.Handler, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
-		info := requestInfo{id: rand.Text()}
+		info := requestInfo{id: rand.Text(), started: started}
 		// derived logger keeps that ID attached without modifying the shared logger.
 		info.logger = logger.With("request_id", info.id)
 		w.Header().Set("X-Request-ID", info.id)
@@ -58,4 +59,10 @@ func Logger(ctx context.Context) *slog.Logger {
 func ID(ctx context.Context) string {
 	info, _ := ctx.Value(contextKey{}).(requestInfo)
 	return info.id
+}
+
+// Started returns arrival time from the outer logger, or zero outside its wrapper.
+func Started(ctx context.Context) time.Time {
+	info, _ := ctx.Value(contextKey{}).(requestInfo)
+	return info.started
 }

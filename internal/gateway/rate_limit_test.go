@@ -54,6 +54,7 @@ func TestRateLimitRouteOrder(t *testing.T) {
 			})
 			handler := NewHandler(HandlerOptions{
 				Authentication: testAuthenticator(), RequestLimits: ratelimit.NewLimiter(buckets, time.Second),
+				Usage:        testUsageRecorder(),
 				NonStreaming: backend, Streaming: backend, Readiness: readiness,
 				Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 			})

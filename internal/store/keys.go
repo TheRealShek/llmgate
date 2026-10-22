@@ -1,4 +1,4 @@
-// Package store persists gateway keys in PostgreSQL.
+// Package store persists gateway keys and inference usage in PostgreSQL.
 package store
 
 import (

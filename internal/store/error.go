@@ -11,6 +11,8 @@ var (
 	ErrKeyNotFound = errors.New("API key not found")
 	// ErrInvalidKeyOptions means the key name or limits are invalid.
 	ErrInvalidKeyOptions = errors.New("invalid API key options")
+	// ErrInvalidUsage means a usage record violates its identity, timing, or count bounds.
+	ErrInvalidUsage = errors.New("invalid usage record")
 )
 
 // databaseError preserves a private driver cause while exposing only a safe category.

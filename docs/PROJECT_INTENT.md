@@ -114,8 +114,11 @@ invalidates local entries; unexpired entries work during database outages, while
 misses and expired entries fail closed. Redis now enforces per-key request rates
 using an atomic token bucket. Models and chat share each key's bucket; exhaustion
 returns `429` with retry guidance, and Redis errors fail closed with `503`.
-The development Compose setup includes Redis with persistent storage. Next, add
-usage recording, daily quotas, metrics, and the complete Compose setup. Measure the authenticated gateway and
+The development Compose setup includes Redis with persistent storage. Validated
+inference attempts now produce bounded, best-effort Postgres usage records with
+timings, outcomes, backend token counts when present, and separate observed SSE
+chunk counts. Missing token counts remain unknown. Next, add daily quotas,
+metrics, and the complete Compose setup. Measure the authenticated gateway and
 complete the remaining real-backend failure checks before closing Phase 1.
 See [decisions](decisions.md) for authentication and revocation boundaries.
 

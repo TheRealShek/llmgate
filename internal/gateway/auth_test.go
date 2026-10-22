@@ -21,6 +21,7 @@ func TestProtectedRoutes(t *testing.T) {
 		Readiness:      upstream,
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
+		Usage:          testUsageRecorder(),
 		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
 

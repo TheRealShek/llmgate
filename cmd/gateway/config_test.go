@@ -106,6 +106,8 @@ func TestLoadConfig(t *testing.T) {
 				redisMaxConns:          10,
 				redisConnectTimeout:    2 * time.Second,
 				rateLimitTimeout:       500 * time.Millisecond,
+				usageWriteTimeout:      2 * time.Second,
+				usageMaxBytes:          64 << 10,
 				addr:                   ":8080",
 				readTimeout:            10 * time.Second,
 				maxBodyBytes:           1 << 20, // 1 MiB
@@ -151,6 +153,8 @@ func TestLoadConfig(t *testing.T) {
 				redisMaxConns:          10,
 				redisConnectTimeout:    2 * time.Second,
 				rateLimitTimeout:       500 * time.Millisecond,
+				usageWriteTimeout:      2 * time.Second,
+				usageMaxBytes:          64 << 10,
 				addr:                   "127.0.0.1:9090",
 				readTimeout:            3 * time.Second,
 				maxBodyBytes:           2048,

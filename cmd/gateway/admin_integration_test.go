@@ -55,6 +55,7 @@ func TestAdminCreationAndAuthentication(t *testing.T) {
 	public := gateway.NewHandler(gateway.HandlerOptions{
 		NonStreaming: backend, Authentication: auth.NewAuthenticator(keys, auth.Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024}),
 		RequestLimits: testRequestLimits(),
+		Usage:         testUsageRecorder(),
 	})
 	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	request.Header.Set("Authorization", "Bearer "+created.APIKey)

@@ -197,9 +197,9 @@ backend returned success or the client received every byte. Proxy failure logs
 use the same ID and omit raw error messages. Do not log bodies, authorization,
 raw URLs, query strings, or caller-supplied IDs.
 
-Pass the response writer through unchanged. This preserves flushing and HTTP
-abort behavior without implementing a response-writer wrapper. Status and byte
-count collection are separate work.
+Logging still passes the response writer through unchanged. The later
+[usage-recording decision](#inference-usage-recording) adds a narrow observer
+around validated inference only, preserving flushing and HTTP abort behavior.
 
 ## Gateway construction
 
@@ -490,3 +490,37 @@ uses a persistent volume and AOF with one-second fsync, and caps data memory at
 live buckets and granting fresh bursts. AOF recovery can lose recent credits
 on an unclean failure; request limits are not a durable billing ledger. Full
 gateway/backend Compose assembly and daily token accounting remain separate.
+
+## Inference usage recording
+
+Persist one final record for each validated chat attempt that reaches the proxy,
+including upstream failures, cancellation, and incomplete responses. Model lists
+and requests rejected before inference remain outside this ledger. Correlate
+records with gateway-generated request IDs, unique in Postgres; retain key
+identity after revocation and do not store prompts or response bodies.
+
+Abhishek chose a bounded final write with visible failures over requiring a
+durable record before serving. The insert runs synchronously after proxy copying
+ends, independent of client cancellation, with no retries or background queue.
+This keeps cached-key availability during Postgres outages and preserves the
+inference response on write failure. It can delay handler or response completion
+until its timeout, and an outage, process exit, or forced shutdown can lose a
+record. A guaranteed ledger would require a separate durable handoff and
+recovery design before admitting requests.
+
+Abhishek chose unknown token counts plus observed SSE chunk counts over charging
+chunk-based estimates. Store both token counts as NULL unless the backend
+provides a valid usage pair; preserve explicit zero counts. A transport read or
+SSE event is not a model token. Keep observed complete SSE data-event counts
+separately for diagnosis, and leave quota charging to the next slice. Recording
+unknown counts does not yet choose how an interrupted request spends its quota.
+
+Observe accepted response bytes without rewriting them or buffering a complete
+stream. Bound JSON capture and each SSE line/event. If metadata exceeds those
+bounds, keep forwarding and leave it unknown. Parse SSE framing across writes,
+including multiline data, CR/LF boundaries, comments, and terminal markers, as
+specified by the [SSE standard](https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream).
+Keep proxy abort panics intact after finalization, and forward response-control
+operations through the underlying writer. See
+[architecture](architecture.md#usage-records-and-missing-information) for the
+record fields, timing, and outcome definitions.

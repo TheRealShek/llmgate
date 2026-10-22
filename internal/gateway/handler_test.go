@@ -12,6 +12,7 @@ func TestHandler(t *testing.T) {
 	handler := NewHandler(HandlerOptions{
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
+		Usage:          testUsageRecorder(),
 	})
 
 	tests := []struct {
@@ -129,6 +130,7 @@ func TestHandlerModels(t *testing.T) {
 		NonStreaming:   upstream,
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
+		Usage:          testUsageRecorder(),
 		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
 	recorder := httptest.NewRecorder()

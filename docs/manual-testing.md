@@ -760,6 +760,75 @@ repeated revocation, and the persisted timestamp. Cleanup removes its schema.
 Without a test database URL it skips. This covers one process; another gateway
 or a direct database update cannot signal this process's requests.
 
+## Persistent inference usage
+
+Apply the existing migration command again before running the updated gateway.
+Migration `000002_usage` adds the usage table and its key/time index:
+
+```sh
+sudo --preserve-env=POSTGRES_PASSWORD docker compose \
+  -f deploy/docker-compose.yml run --rm migrate
+```
+
+This needs the Postgres setup and credentials from the earlier sections. Start
+the gateway with its normal Postgres, Redis, and backend configuration. Request
+streaming usage explicitly from the backend and capture only response headers:
+
+```sh
+USAGE_HEADERS="$(mktemp)"
+curl -sS -N -D "$USAGE_HEADERS" -o /dev/null \
+  http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer $API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"glm-edge-4b-chat","messages":[{"role":"user","content":"Hello"}],"stream":true,"stream_options":{"include_usage":true}}'
+USAGE_REQUEST_ID="$(python3 -c 'import pathlib,sys; print(next(line.split(":",1)[1].strip() for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.lower().startswith("x-request-id:")))' "$USAGE_HEADERS")"
+
+psql "$GATEWAY_DATABASE_URL" -v ON_ERROR_STOP=1 -v request_id="$USAGE_REQUEST_ID" <<'SQL'
+\pset null 'unknown'
+SELECT request_id, key_id, backend, model, streaming, prompt_tokens,
+       completion_tokens, observed_sse_chunks, ttft_ms, total_ms, http_status, status
+FROM usage WHERE request_id = :'request_id';
+SQL
+rm -f "$USAGE_HEADERS"
+unset USAGE_HEADERS USAGE_REQUEST_ID
+```
+
+Expect one row, the same request ID, the key's ID, backend `primary`, and model
+`glm-edge-4b-chat`. A normally completed stream has HTTP 200 and status
+`completed`. Backend token counts appear only if the backend emits its usage
+object; otherwise both are `unknown`. A JSON response can also supply counts,
+while its TTFT is unknown. Observed SSE chunk counts are separate from tokens.
+For timing and outcome definitions, see
+[architecture](architecture.md#usage-records-and-missing-information).
+
+Repeat the [client-disconnect check](#6-test-client-disconnect-cancellation),
+then inspect recent rows for the same key. Expect `canceled`, potentially with
+HTTP 200, and unknown counts if the final usage did not arrive. To check a
+mid-stream backend failure or a nonresponding backend, use controlled tests
+below rather than stopping a backend serving unrelated work.
+
+```sh
+LLMGATE_TEST_DATABASE_URL="$GATEWAY_DATABASE_URL" \
+  go test -race -count=1 -v ./cmd/gateway -run '^TestInferenceUsageRecords$'
+LLMGATE_TEST_DATABASE_URL="$GATEWAY_DATABASE_URL" \
+  go test -race -count=1 -v ./internal/store -run '^TestUsage'
+go test -race -count=1 ./internal/usage ./internal/gateway
+```
+
+The integration tests use real Postgres in temporary schemas and a controlled
+HTTP backend. They cover JSON/SSE completion, upstream HTTP errors, header
+timeouts, mid-stream connection loss, client cancellation, and admin revocation.
+They do not exercise a real GPU backend. The focused unit tests cover fragmented
+SSE framing, observation bounds, partial writes, concurrent requests, and bounded
+usage-write failures. Database tests skip without the test URL.
+
+A final usage write happens after proxy copying and can extend handler or response
+completion by up to `GATEWAY_USAGE_WRITE_TIMEOUT`. If Postgres is unavailable,
+expect a request-correlated `usage record write failed` error log and potentially
+no row. The inference response is not replaced. No retry or durable recovery is
+implemented; crash or forced shutdown can also lose a final record. Quotas are
+not enforced by this slice.
+
 ## Configuration
 
 | Environment variable | Default | Controls |
@@ -774,6 +843,8 @@ or a direct database update cannot signal this process's requests.
 | `GATEWAY_REDIS_MAX_CONNS` | `10` | Maximum shared Redis connections |
 | `GATEWAY_REDIS_CONNECT_TIMEOUT` | `2s` | Redis startup and connection deadline |
 | `GATEWAY_RATE_LIMIT_TIMEOUT` | `500ms` | Redis decision, pool wait, and command deadline |
+| `GATEWAY_USAGE_WRITE_TIMEOUT` | `2s` | Final usage insert deadline, independent of client cancellation |
+| `GATEWAY_USAGE_MAX_BYTES` | `65536` | JSON response capture and each SSE line/event observation bound |
 | `GATEWAY_ADMIN_ENABLED` | `false` | Enable operator-local admin HTTP |
 | `GATEWAY_ADMIN_ADDR` | `127.0.0.1:8082` | Literal loopback IP and numeric port |
 | `GATEWAY_ADMIN_TOKEN` | Unset | Required when enabled; 32 to 256 URL-safe ASCII characters |
@@ -816,8 +887,8 @@ go vet ./...
 For the authentication, request-limit, and proxy packages and whitespace checks:
 
 ```sh
-go test ./internal/admin ./internal/auth ./internal/ratelimit ./internal/gateway ./internal/proxy ./cmd/gateway
-GOTOOLCHAIN=go1.27.0 wsl ./internal/admin ./internal/auth ./internal/ratelimit ./internal/store ./internal/gateway ./internal/proxy ./cmd/gateway
+go test ./internal/admin ./internal/auth ./internal/ratelimit ./internal/usage ./internal/gateway ./internal/proxy ./cmd/gateway
+GOTOOLCHAIN=go1.27.0 wsl ./internal/admin ./internal/auth ./internal/ratelimit ./internal/usage ./internal/store ./internal/gateway ./internal/proxy ./cmd/gateway
 ```
 
 These commands use test backends. Postgres and Redis integration tests require

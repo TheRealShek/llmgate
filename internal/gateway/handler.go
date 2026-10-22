@@ -6,6 +6,7 @@ import (
 	"github.com/therealshek/llmgate/internal/api"
 	"github.com/therealshek/llmgate/internal/auth"
 	"github.com/therealshek/llmgate/internal/ratelimit"
+	"github.com/therealshek/llmgate/internal/usage"
 )
 
 // ChatLimits controls the request resources checked before forwarding chat requests.
@@ -29,6 +30,8 @@ type HandlerOptions struct {
 	Authentication *auth.Authenticator
 	// RequestLimits admits authenticated models and chat; nil fails closed.
 	RequestLimits *ratelimit.Limiter
+	// Usage records validated inference attempts; missing configuration fails closed.
+	Usage *usage.Recorder
 	// Limits bounds chat bodies and output-token options.
 	Limits ChatLimits
 }
@@ -44,6 +47,7 @@ func NewHandler(options HandlerOptions) http.Handler {
 			streaming:    options.Streaming,
 			maxBodyBytes: options.Limits.MaxBodyBytes,
 			maxTokens:    options.Limits.MaxTokens,
+			usage:        options.Usage,
 		}
 	}
 

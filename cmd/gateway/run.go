@@ -16,6 +16,7 @@ import (
 	"github.com/therealshek/llmgate/internal/ratelimit"
 	"github.com/therealshek/llmgate/internal/requestlog"
 	"github.com/therealshek/llmgate/internal/store"
+	"github.com/therealshek/llmgate/internal/usage"
 )
 
 func run(ctx context.Context) error {
@@ -66,6 +67,14 @@ func run(ctx context.Context) error {
 	buckets := ratelimit.NewRedisStore(redisClient)
 	requestLimits := ratelimit.NewLimiter(buckets, cfg.rateLimitTimeout)
 
+	usageStore := store.NewUsageStore(pool)
+	usageRecorder := usage.NewRecorder(usage.Options{
+		Store:        usageStore,
+		Backend:      "primary",
+		WriteTimeout: cfg.usageWriteTimeout,
+		MaxBytes:     cfg.usageMaxBytes,
+	})
+
 	// DefaultTransport is declared as the http.RoundTripper interface.
 	// Assert its underlying type is *http.Transport and clone it so custom
 	// timeouts and idle connection cleanup do not mutate the process-wide transport.
@@ -94,6 +103,7 @@ func run(ctx context.Context) error {
 		Readiness:      readiness,
 		Authentication: authentication,
 		RequestLimits:  requestLimits,
+		Usage:          usageRecorder,
 		Limits: gateway.ChatLimits{
 			MaxBodyBytes: cfg.maxBodyBytes,
 			MaxTokens:    cfg.maxTokens,

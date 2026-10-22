@@ -41,6 +41,7 @@ func TestChatForwarding(t *testing.T) {
 			NonStreaming:   upstream,
 			Authentication: testAuthenticator(),
 			RequestLimits:  testRequestLimits(),
+			Usage:          testUsageRecorder(),
 			Limits:         ChatLimits{MaxBodyBytes: 1024},
 		}).ServeHTTP(recorder, request)
 
@@ -60,6 +61,7 @@ func TestChatReadTimeout(t *testing.T) {
 		NonStreaming:   upstream,
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
+		Usage:          testUsageRecorder(),
 		Limits:         ChatLimits{MaxBodyBytes: 1024},
 	}))
 	server.Config.ReadTimeout = 50 * time.Millisecond
@@ -148,6 +150,7 @@ func TestChatRejections(t *testing.T) {
 				NonStreaming:   upstream,
 				Authentication: testAuthenticator(),
 				RequestLimits:  testRequestLimits(),
+				Usage:          testUsageRecorder(),
 				Limits:         ChatLimits{MaxBodyBytes: 64},
 			}).ServeHTTP(recorder, request)
 
@@ -181,6 +184,7 @@ func TestChatBodyBoundary(t *testing.T) {
 		NonStreaming:   upstream,
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
+		Usage:          testUsageRecorder(),
 		Limits:         ChatLimits{MaxBodyBytes: 64},
 	}).ServeHTTP(recorder, request)
 
@@ -221,6 +225,7 @@ func TestChatProxyIntegration(t *testing.T) {
 		NonStreaming:   nonStreaming,
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
+		Usage:          testUsageRecorder(),
 		Limits:         ChatLimits{MaxBodyBytes: 1024},
 	})
 	recorder := httptest.NewRecorder()
@@ -258,6 +263,7 @@ func TestChatCancellation(t *testing.T) {
 		NonStreaming:   nonStreaming,
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
+		Usage:          testUsageRecorder(),
 		Limits:         ChatLimits{MaxBodyBytes: 1024},
 	})
 	gateway := httptest.NewServer(handler)

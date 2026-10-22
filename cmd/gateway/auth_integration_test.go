@@ -86,6 +86,7 @@ func TestKeyCreationAndAuthentication(t *testing.T) {
 		Streaming:      proxy.NewStreamingHandler(target, transport, time.Second),
 		Authentication: authentication,
 		RequestLimits:  testRequestLimits(),
+		Usage:          testUsageRecorder(),
 		Limits:         gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
 
@@ -175,6 +176,7 @@ func TestAuthenticationCacheDatabaseOutage(t *testing.T) {
 	routes := gateway.NewHandler(gateway.HandlerOptions{
 		NonStreaming: backend, Authentication: authentication,
 		RequestLimits: testRequestLimits(),
+		Usage:         testUsageRecorder(),
 	})
 	checkStatus := func(secret string, want int) {
 		t.Helper()

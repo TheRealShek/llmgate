@@ -6,8 +6,8 @@ request-rate limits, validation, streaming, cancellation, and deadlines. The
 inference server loads the model and generates tokens.
 
 Phase 1 is in progress with one backend. Model listing, JSON and streaming chat,
-health checks, request logs, and optional operator-local key management work
-today.
+health checks, request logs, persistent inference usage, and optional
+operator-local key management work today.
 
 > **Not production-ready.** This is a project under active development.
 > Do not use it in production.
@@ -47,7 +47,7 @@ flowchart LR
         Public[Public HTTP listener]
         Admin[Optional loopback admin listener]
     end
-    Public -->|key lookup on cache miss| PG[(Postgres)]
+    Public -->|key lookup on cache miss and final usage write| PG[(Postgres)]
     Admin -->|create or revoke key| PG
     Public -->|consume request credit| Redis[(Redis)]
     Public -->|inference and health probes| Backend[Inference server]

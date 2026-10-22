@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	"github.com/therealshek/llmgate/internal/api"
+	"github.com/therealshek/llmgate/internal/usage"
 )
 
 // chatHandler validates chat completion requests and forwards valid payloads
@@ -19,6 +20,7 @@ type chatHandler struct {
 	streaming    http.Handler
 	maxBodyBytes int64
 	maxTokens    int64
+	usage        *usage.Recorder
 }
 
 func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -107,7 +109,11 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	request.TransferEncoding = nil // Use Content-Length instead of chunked transfer.
 	// Send the cloned request to the selected response mode. Its inherited context
 	// lets a client disconnect stop either the JSON response or the SSE stream.
-	upstream.ServeHTTP(w, request)
+	var model string
+
+	_ = json.Unmarshal(options.fields["model"], &model)
+
+	h.usage.Record(w, request, upstream, usage.Request{Model: model, Streaming: options.stream})
 }
 
 type chatRequest struct {

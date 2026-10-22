@@ -27,6 +27,8 @@ type config struct {
 	redisMaxConns          int
 	redisConnectTimeout    time.Duration
 	rateLimitTimeout       time.Duration
+	usageWriteTimeout      time.Duration
+	usageMaxBytes          int
 	addr                   string
 	upstreamURL            *url.URL
 	upstreamTimeout        time.Duration
@@ -58,6 +60,8 @@ func loadConfig(getenv func(string) string) (config, error) {
 		redisMaxConns:          10,
 		redisConnectTimeout:    2 * time.Second,
 		rateLimitTimeout:       500 * time.Millisecond,
+		usageWriteTimeout:      2 * time.Second,
+		usageMaxBytes:          64 << 10,
 		addr:                   ":8080",
 		upstreamTimeout:        30 * time.Second,
 		readHeaderTimeout:      5 * time.Second,
@@ -212,6 +216,18 @@ func loadConfig(getenv func(string) string) (config, error) {
 	cfg.rateLimitTimeout, err = envDuration(getenv, "GATEWAY_RATE_LIMIT_TIMEOUT", cfg.rateLimitTimeout)
 	if err != nil {
 		return config{}, err
+	}
+
+	cfg.usageWriteTimeout, err = envDuration(getenv, "GATEWAY_USAGE_WRITE_TIMEOUT", cfg.usageWriteTimeout)
+	if err != nil {
+		return config{}, err
+	}
+
+	if value := getenv("GATEWAY_USAGE_MAX_BYTES"); value != "" {
+		cfg.usageMaxBytes, err = strconv.Atoi(value)
+		if err != nil || cfg.usageMaxBytes <= 0 {
+			return config{}, fmt.Errorf("validate GATEWAY_USAGE_MAX_BYTES: requires a positive integer")
+		}
 	}
 
 	cfg.readinessTimeout, err = envDuration(getenv, "GATEWAY_READINESS_TIMEOUT", cfg.readinessTimeout)

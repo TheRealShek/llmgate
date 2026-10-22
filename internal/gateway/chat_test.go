@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/therealshek/llmgate/internal/proxy"
+	"github.com/therealshek/llmgate/internal/store"
+	"github.com/therealshek/llmgate/internal/usage"
 )
 
 // TestChatForwarding checks that validation preserves the original body, optional fields, and
@@ -317,4 +319,199 @@ func TestChatCancellation(t *testing.T) {
 			t.Fatal("chat request did not stop after cancellation")
 		}
 	}
+}
+
+// TestChatTokenLimit checks explicit token counts are bounded before backend work starts.
+func TestChatTokenLimit(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		value  string
+		status int
+	}{
+		{name: "minimum", value: "1", status: http.StatusNoContent},
+		{name: "at limit", value: "8", status: http.StatusNoContent},
+		{name: "above limit", value: "9", status: http.StatusBadRequest},
+		{name: "zero", value: "0", status: http.StatusBadRequest},
+		{name: "negative", value: "-1", status: http.StatusBadRequest},
+		{name: "fractional", value: "1.5", status: http.StatusBadRequest},
+		{name: "null", value: "null", status: http.StatusBadRequest},
+		{name: "string", value: `"8"`, status: http.StatusBadRequest},
+		{name: "overflow", value: "9223372036854775808", status: http.StatusBadRequest},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := ` {"model":"test","messages":[],"max_tokens":` + tt.value + `,"custom":{"keep":true}} `
+			called := false
+			upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+
+				got, err := io.ReadAll(r.Body)
+				if err != nil || string(got) != body || r.ContentLength != int64(len(body)) {
+					t.Errorf("explicit max_tokens changed the forwarded body: %q %v", got, err)
+				}
+
+				w.WriteHeader(http.StatusNoContent)
+			})
+			handler := NewHandler(HandlerOptions{
+				NonStreaming:   upstream,
+				Authentication: testAuthenticator(),
+				RequestLimits:  testRequestLimits(),
+				Usage:          testUsageRecorder(),
+				Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+			})
+			request := authenticatedRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+			request.Header.Set("Content-Type", "application/json")
+
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+
+			if recorder.Code != tt.status || called != (tt.status == http.StatusNoContent) {
+				t.Fatalf("status = %d, upstream called = %v; want %d", recorder.Code, called, tt.status)
+			}
+		})
+	}
+}
+
+// TestChatTokenLimitOmitted checks default insertion preserves existing JSON bytes and updates
+// body length.
+func TestChatTokenLimitOmitted(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "empty object", body: `{}`, want: `{"max_tokens":8}`},
+		{name: "whitespace", body: " { \n }\t\n", want: " { \n \"max_tokens\":8}\t\n"},
+		{name: "unknown fields", body: ` {"model":"test","messages":[],"custom":{"keep":true}} `,
+			want: ` {"model":"test","messages":[],"custom":{"keep":true},"max_tokens":8} `},
+		{name: "preserved raw values", body: `{"extra":{"number":9007199254740993,"text":"\u0061}"}}`,
+			want: `{"extra":{"number":9007199254740993,"text":"\u0061}"},"max_tokens":8}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got, err := io.ReadAll(r.Body)
+				if err != nil || string(got) != tt.want || r.ContentLength != int64(len(tt.want)) {
+					t.Errorf(
+						"default token request = %q, length %d, error %v; want %q",
+						got,
+						r.ContentLength,
+						err,
+						tt.want,
+					)
+				}
+
+				w.WriteHeader(http.StatusNoContent)
+			})
+			handler := NewHandler(HandlerOptions{
+				NonStreaming:   upstream,
+				Authentication: testAuthenticator(),
+				RequestLimits:  testRequestLimits(),
+				Usage:          testUsageRecorder(),
+				Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+			})
+			request := authenticatedRequest(
+				http.MethodPost,
+				"/v1/chat/completions",
+				strings.NewReader(tt.body),
+			)
+			request.Header.Set("Content-Type", "application/json")
+
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusNoContent {
+				t.Fatalf("omitted max_tokens was rejected: %d", recorder.Code)
+			}
+		})
+	}
+}
+
+type captureUsage func(context.Context, store.Usage) error
+
+func (f captureUsage) RecordUsage(ctx context.Context, record store.Usage) error {
+	return f(ctx, record)
+}
+
+// TestUsageScope checks only validated inference attempts receive records, preserving request bodies.
+func TestUsageScope(t *testing.T) {
+	for _, tt := range []struct {
+		name, path, body string
+		status, records  int
+	}{
+		{name: "models", path: "/v1/models", status: 200},
+		{name: "malformed JSON", path: "/v1/chat/completions", body: `{`, status: 400},
+		{name: "invalid token limit", path: "/v1/chat/completions", body: `{"max_tokens":0}`, status: 400},
+		{name: "unsupported stream", path: "/v1/chat/completions", body: `{"stream":true}`, status: 501},
+		{name: "inference", path: "/v1/chat/completions", body: `{"model":"test-model","messages":[],"max_tokens":8}`, status: 200, records: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			count := 0
+			recorder := usage.NewRecorder(usage.Options{
+				Store: captureUsage(func(_ context.Context, record store.Usage) error {
+					count++
+
+					if record.Model == nil || *record.Model != "test-model" || record.KeyID != 1 {
+						t.Error("validated metadata did not reach usage recording")
+					}
+
+					return nil
+				}), Backend: "test", WriteTimeout: time.Second, MaxBytes: 1024,
+			})
+			backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				if r.URL.Path == "/v1/chat/completions" && string(body) != tt.body {
+					t.Error("recording changed the request body")
+				}
+
+				_, _ = io.WriteString(w, `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`)
+			})
+			handler := NewHandler(HandlerOptions{
+				Authentication: testAuthenticator(), RequestLimits: testRequestLimits(),
+				NonStreaming: backend, Usage: recorder, Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+			})
+
+			method := http.MethodPost
+			if tt.path == "/v1/models" {
+				method = http.MethodGet
+			}
+
+			r := authenticatedRequest(method, tt.path, strings.NewReader(tt.body))
+			r.Header.Set("Content-Type", "application/json")
+
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+
+			if count != tt.records || w.Code != tt.status {
+				t.Fatal("usage scope or HTTP validation changed", count, w.Code)
+			}
+		})
+	}
+}
+
+// TestMissingUsageRecorder checks incomplete construction cannot silently omit inference recording.
+func TestMissingUsageRecorder(t *testing.T) {
+	backend := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("missing recorder admitted inference") })
+	handler := NewHandler(HandlerOptions{
+		Authentication: testAuthenticator(), RequestLimits: testRequestLimits(),
+		NonStreaming: backend, Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+	})
+	r := authenticatedRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+	r.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "usage_unavailable") {
+		t.Fatal("missing recorder did not fail closed", w.Code)
+	}
+}
+
+// discardUsage keeps route, authentication, and logging tests independent of persistence.
+type discardUsage struct{}
+
+func (discardUsage) RecordUsage(context.Context, store.Usage) error { return nil }
+
+func testUsageRecorder() *usage.Recorder {
+	return usage.NewRecorder(usage.Options{
+		Store: discardUsage{}, Backend: "test", WriteTimeout: time.Second, MaxBytes: 64 << 10,
+	})
 }

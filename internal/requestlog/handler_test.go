@@ -18,8 +18,10 @@ import (
 	"github.com/therealshek/llmgate/internal/auth"
 	"github.com/therealshek/llmgate/internal/gateway"
 	"github.com/therealshek/llmgate/internal/proxy"
+	"github.com/therealshek/llmgate/internal/ratelimit"
 	"github.com/therealshek/llmgate/internal/requestlog"
 	"github.com/therealshek/llmgate/internal/store"
+	"github.com/therealshek/llmgate/internal/usage"
 )
 
 // TestRequestIdentity checks concurrent routes and proxy failures keep separate IDs without
@@ -289,4 +291,26 @@ func (logTestKeyLookup) LookupKey(_ context.Context, secret string) (store.Key, 
 
 func (logTestKeyLookup) RevokeKey(context.Context, int64) error {
 	return store.ErrDatabaseUnavailable
+}
+
+// allowRequestBuckets isolates existing route and logging tests from Redis.
+type allowRequestBuckets struct{}
+
+func (allowRequestBuckets) Take(context.Context, int64, int64) (ratelimit.Decision, error) {
+	return ratelimit.Decision{Allowed: true}, nil
+}
+
+func testRequestLimits() *ratelimit.Limiter {
+	return ratelimit.NewLimiter(allowRequestBuckets{}, time.Second)
+}
+
+// discardUsage keeps route, authentication, and logging tests independent of persistence.
+type discardUsage struct{}
+
+func (discardUsage) RecordUsage(context.Context, store.Usage) error { return nil }
+
+func testUsageRecorder() *usage.Recorder {
+	return usage.NewRecorder(usage.Options{
+		Store: discardUsage{}, Backend: "test", WriteTimeout: time.Second, MaxBytes: 64 << 10,
+	})
 }

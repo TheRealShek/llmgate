@@ -19,6 +19,7 @@ import (
 	"github.com/therealshek/llmgate/internal/auth"
 	"github.com/therealshek/llmgate/internal/gateway"
 	"github.com/therealshek/llmgate/internal/proxy"
+	"github.com/therealshek/llmgate/internal/ratelimit"
 	"github.com/therealshek/llmgate/internal/store"
 )
 
@@ -271,4 +272,15 @@ func authenticationTestPool(t *testing.T) (*pgxpool.Pool, string) {
 	}
 
 	return pool, u.String()
+}
+
+// allowRequestBuckets isolates existing route and logging tests from Redis.
+type allowRequestBuckets struct{}
+
+func (allowRequestBuckets) Take(context.Context, int64, int64) (ratelimit.Decision, error) {
+	return ratelimit.Decision{Allowed: true}, nil
+}
+
+func testRequestLimits() *ratelimit.Limiter {
+	return ratelimit.NewLimiter(allowRequestBuckets{}, time.Second)
 }

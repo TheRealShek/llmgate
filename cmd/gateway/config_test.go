@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/therealshek/llmgate/internal/store"
 )
 
 // TestLoadConfigUpstreamURL checks optional backend URLs and rejects unsafe or invalid settings.
@@ -323,4 +328,496 @@ func TestLoadConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAdminConfiguration checks opt-in, loopback-only binding, safe credentials, and positive limits.
+func TestAdminConfiguration(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		env       map[string]string
+		wantError bool
+	}{
+		{name: "disabled by default"},
+		{
+			name: "token alone does not enable",
+			env: map[string]string{
+				"GATEWAY_ADMIN_TOKEN": strings.Repeat("a", 64),
+			},
+		},
+		{
+			name: "default loopback",
+			env: map[string]string{
+				"GATEWAY_ADMIN_ENABLED": "true",
+				"GATEWAY_ADMIN_TOKEN":   strings.Repeat("a", 64),
+			},
+		},
+		{
+			name: "IPv6 loopback",
+			env: map[string]string{
+				"GATEWAY_ADMIN_ENABLED": "true",
+				"GATEWAY_ADMIN_TOKEN":   strings.Repeat("a", 64),
+				"GATEWAY_ADMIN_ADDR":    "[::1]:8082",
+			},
+		},
+		{
+			name: "positive resource overrides",
+			env: map[string]string{
+				"GATEWAY_ADMIN_MAX_BODY_BYTES": "2048",
+				"GATEWAY_ADMIN_CREATE_TIMEOUT": "750ms",
+				"GATEWAY_ADMIN_REVOKE_TIMEOUT": "900ms",
+			},
+		},
+		{
+			name: "write timeout overflow",
+			env: map[string]string{
+				"GATEWAY_ADMIN_ENABLED": "true",
+				"GATEWAY_ADMIN_TOKEN":   strings.Repeat("a", 64),
+				"GATEWAY_READ_TIMEOUT":  "2562047h47m16.854775807s",
+			},
+			wantError: true,
+		},
+		{
+			name: "overlong token",
+			env: map[string]string{
+				"GATEWAY_ADMIN_ENABLED": "true",
+				"GATEWAY_ADMIN_TOKEN":   strings.Repeat("a", 257),
+			},
+			wantError: true,
+		},
+		{
+			name: "missing token",
+			env: map[string]string{
+				"GATEWAY_ADMIN_ENABLED": "true",
+			},
+			wantError: true,
+		},
+		{
+			name: "short token",
+			env: map[string]string{
+				"GATEWAY_ADMIN_ENABLED": "true",
+				"GATEWAY_ADMIN_TOKEN":   "private-secret",
+			},
+			wantError: true,
+		},
+		{
+			name: "invalid characters",
+			env: map[string]string{
+				"GATEWAY_ADMIN_ENABLED": "true",
+				"GATEWAY_ADMIN_TOKEN":   strings.Repeat("a", 64) + "\nprivate-secret",
+			},
+			wantError: true,
+		},
+		{
+			name: "invalid enable flag",
+			env: map[string]string{
+				"GATEWAY_ADMIN_ENABLED": "private-secret",
+			},
+			wantError: true,
+		},
+		{
+			name: "wildcard",
+			env: map[string]string{
+				"GATEWAY_ADMIN_ENABLED": "true",
+				"GATEWAY_ADMIN_TOKEN":   strings.Repeat("a", 64),
+				"GATEWAY_ADMIN_ADDR":    "0.0.0.0:8082",
+			},
+			wantError: true,
+		},
+		{
+			name: "empty host",
+			env: map[string]string{
+				"GATEWAY_ADMIN_ENABLED": "true",
+				"GATEWAY_ADMIN_TOKEN":   strings.Repeat("a", 64),
+				"GATEWAY_ADMIN_ADDR":    ":8082",
+			},
+			wantError: true,
+		},
+		{
+			name: "hostname",
+			env: map[string]string{
+				"GATEWAY_ADMIN_ENABLED": "true",
+				"GATEWAY_ADMIN_TOKEN":   strings.Repeat("a", 64),
+				"GATEWAY_ADMIN_ADDR":    "localhost:8082",
+			},
+			wantError: true,
+		},
+		{
+			name: "non-loopback",
+			env: map[string]string{
+				"GATEWAY_ADMIN_ENABLED": "true",
+				"GATEWAY_ADMIN_TOKEN":   strings.Repeat("a", 64),
+				"GATEWAY_ADMIN_ADDR":    "192.0.2.1:8082",
+			},
+			wantError: true,
+		},
+		{
+			name: "zero port",
+			env: map[string]string{
+				"GATEWAY_ADMIN_ENABLED": "true",
+				"GATEWAY_ADMIN_TOKEN":   strings.Repeat("a", 64),
+				"GATEWAY_ADMIN_ADDR":    "127.0.0.1:0",
+			},
+			wantError: true,
+		},
+		{
+			name: "service port",
+			env: map[string]string{
+				"GATEWAY_ADMIN_ENABLED": "true",
+				"GATEWAY_ADMIN_TOKEN":   strings.Repeat("a", 64),
+				"GATEWAY_ADMIN_ADDR":    "127.0.0.1:http",
+			},
+			wantError: true,
+		},
+		{
+			name: "zero body limit",
+			env: map[string]string{
+				"GATEWAY_ADMIN_MAX_BODY_BYTES": "0",
+			},
+			wantError: true,
+		},
+		{
+			name:      "zero revoke timeout",
+			env:       map[string]string{"GATEWAY_ADMIN_REVOKE_TIMEOUT": "0s"},
+			wantError: true,
+		},
+		{
+			name:      "negative revoke timeout",
+			env:       map[string]string{"GATEWAY_ADMIN_REVOKE_TIMEOUT": "-1s"},
+			wantError: true,
+		},
+		{
+			name:      "invalid revoke timeout",
+			env:       map[string]string{"GATEWAY_ADMIN_REVOKE_TIMEOUT": "private-secret"},
+			wantError: true,
+		},
+		{
+			name: "revoke write timeout overflow",
+			env: map[string]string{
+				"GATEWAY_ADMIN_ENABLED":        "true",
+				"GATEWAY_ADMIN_TOKEN":          strings.Repeat("a", 64),
+				"GATEWAY_ADMIN_REVOKE_TIMEOUT": "2562047h47m16s",
+			},
+			wantError: true,
+		},
+		{
+			name: "zero create timeout",
+			env: map[string]string{
+				"GATEWAY_ADMIN_CREATE_TIMEOUT": "0s",
+			},
+			wantError: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := loadConfig(func(k string) string {
+				if k == "GATEWAY_DATABASE_URL" {
+					return "postgres://localhost/db"
+				}
+
+				return tt.env[k]
+			})
+			if (err != nil) != tt.wantError {
+				t.Fatalf("error = %v, want error %v", err, tt.wantError)
+			}
+
+			if err != nil {
+				if strings.Contains(err.Error(), "private-secret") {
+					t.Fatal("configuration error exposed input")
+				}
+
+				return
+			}
+
+			if cfg.adminEnabled != (tt.env["GATEWAY_ADMIN_ENABLED"] == "true") {
+				t.Fatal("admin enablement changed")
+			}
+
+			if tt.name == "positive resource overrides" && (cfg.adminMaxBodyBytes != 2048 || cfg.adminCreateTimeout.String() != "750ms" || cfg.adminRevokeTimeout.String() != "900ms") {
+				t.Fatal("admin resource overrides were lost")
+			}
+
+			if !cfg.adminEnabled && cfg.adminToken != "" {
+				t.Fatal("disabled administration retained token")
+			}
+		})
+	}
+}
+
+// TestAdminParsingCauses checks parsing errors preserve causes without exposing configuration input.
+func TestAdminParsingCauses(t *testing.T) {
+	for _, tt := range []struct{ name, key, value string }{
+		{name: "creation timeout", key: "GATEWAY_ADMIN_CREATE_TIMEOUT", value: "private-secret"},
+		{name: "revocation timeout", key: "GATEWAY_ADMIN_REVOKE_TIMEOUT", value: "private-secret"},
+		{name: "boolean", key: "GATEWAY_ADMIN_ENABLED", value: "private-secret"},
+		{name: "address format", key: "GATEWAY_ADMIN_ADDR", value: "private-secret"},
+		{name: "IP address", key: "GATEWAY_ADMIN_ADDR", value: "private-secret:8082"},
+		{name: "port", key: "GATEWAY_ADMIN_ADDR", value: "127.0.0.1:private-secret"},
+		{name: "body size", key: "GATEWAY_ADMIN_MAX_BODY_BYTES", value: "private-secret"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadConfig(func(k string) string {
+				if k == tt.key {
+					return tt.value
+				}
+
+				return map[string]string{
+					"GATEWAY_ADMIN_ENABLED": "true",
+					"GATEWAY_ADMIN_TOKEN":   strings.Repeat("a", 64),
+					"GATEWAY_DATABASE_URL":  "postgres://localhost/db",
+				}[k]
+			})
+
+			var safeError *configError
+			if !errors.As(err, &safeError) || errors.Unwrap(safeError) == nil {
+				t.Fatal("configuration parsing lost its private cause")
+			}
+
+			if strings.Contains(err.Error(), "private-secret") {
+				t.Fatal("configuration parsing exposed supplied input")
+			}
+		})
+	}
+}
+
+// TestAuthCacheConfiguration checks cache overrides and rejects invalid bounds without leaking values.
+func TestAuthCacheConfiguration(t *testing.T) {
+	for _, tt := range []struct {
+		name, setting, value string
+		invalid              bool
+	}{
+		{name: "custom TTL", setting: "GATEWAY_AUTH_CACHE_TTL", value: "45s"},
+		{name: "custom capacity", setting: "GATEWAY_AUTH_CACHE_CAPACITY", value: "16"},
+		{name: "zero TTL", setting: "GATEWAY_AUTH_CACHE_TTL", value: "0s", invalid: true},
+		{name: "negative TTL", setting: "GATEWAY_AUTH_CACHE_TTL", value: "-1s", invalid: true},
+		{name: "invalid TTL", setting: "GATEWAY_AUTH_CACHE_TTL", value: "secret", invalid: true},
+		{name: "overflow TTL", setting: "GATEWAY_AUTH_CACHE_TTL", value: "999999999999h", invalid: true},
+		{name: "zero capacity", setting: "GATEWAY_AUTH_CACHE_CAPACITY", value: "0", invalid: true},
+		{name: "negative capacity", setting: "GATEWAY_AUTH_CACHE_CAPACITY", value: "-1", invalid: true},
+		{name: "invalid capacity", setting: "GATEWAY_AUTH_CACHE_CAPACITY", value: "secret", invalid: true},
+		{name: "overflow capacity", setting: "GATEWAY_AUTH_CACHE_CAPACITY", value: "99999999999999999999", invalid: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := loadConfig(func(key string) string {
+				if key == "GATEWAY_DATABASE_URL" {
+					return "postgres://localhost/llmgate"
+				}
+
+				if key == tt.setting {
+					return tt.value
+				}
+
+				return ""
+			})
+			if tt.invalid {
+				if err == nil || !strings.Contains(err.Error(), tt.setting) ||
+					strings.Contains(err.Error(), "secret") {
+					t.Fatalf("expected safe configuration error for %s, got %v", tt.setting, err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if tt.setting == "GATEWAY_AUTH_CACHE_TTL" && cfg.authCacheTTL != 45*time.Second {
+				t.Fatal("cache TTL override was ignored")
+			}
+
+			if tt.setting == "GATEWAY_AUTH_CACHE_CAPACITY" && cfg.authCacheCapacity != 16 {
+				t.Fatal("cache capacity override was ignored")
+			}
+		})
+	}
+}
+
+// TestRedisLimitsConfiguration checks explicit Redis connection and decision bounds.
+func TestRedisLimitsConfiguration(t *testing.T) {
+	for _, tt := range []struct {
+		name, setting, value string
+		invalid              bool
+	}{
+		{name: "connection URL", setting: "GATEWAY_REDIS_URL", value: "redis://127.0.0.1:6380/1"},
+		{name: "pool size", setting: "GATEWAY_REDIS_MAX_CONNS", value: "3"},
+		{name: "connect timeout", setting: "GATEWAY_REDIS_CONNECT_TIMEOUT", value: "3s"},
+		{name: "decision timeout", setting: "GATEWAY_RATE_LIMIT_TIMEOUT", value: "250ms"},
+		{name: "zero pool", setting: "GATEWAY_REDIS_MAX_CONNS", value: "0", invalid: true},
+		{name: "negative pool", setting: "GATEWAY_REDIS_MAX_CONNS", value: "-1", invalid: true},
+		{name: "invalid pool", setting: "GATEWAY_REDIS_MAX_CONNS", value: "private-secret", invalid: true},
+		{name: "overflow pool", setting: "GATEWAY_REDIS_MAX_CONNS", value: "99999999999999999999", invalid: true},
+		{name: "zero connect timeout", setting: "GATEWAY_REDIS_CONNECT_TIMEOUT", value: "0s", invalid: true},
+		{name: "negative decision timeout", setting: "GATEWAY_RATE_LIMIT_TIMEOUT", value: "-1s", invalid: true},
+		{name: "invalid decision timeout", setting: "GATEWAY_RATE_LIMIT_TIMEOUT", value: "private-secret", invalid: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := loadConfig(func(key string) string {
+				if key == "GATEWAY_DATABASE_URL" {
+					return "postgres://localhost/llmgate"
+				}
+
+				if key == tt.setting {
+					return tt.value
+				}
+
+				return ""
+			})
+			if tt.invalid {
+				if err == nil || !strings.Contains(err.Error(), tt.setting) || strings.Contains(err.Error(), "private-secret") {
+					t.Fatal("unsafe or missing configuration error", err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			switch tt.setting {
+			case "GATEWAY_REDIS_URL":
+				if cfg.redisURL != tt.value {
+					t.Fatal("URL override ignored")
+				}
+			case "GATEWAY_REDIS_MAX_CONNS":
+				if cfg.redisMaxConns != 3 {
+					t.Fatal("pool override ignored")
+				}
+			case "GATEWAY_REDIS_CONNECT_TIMEOUT":
+				if cfg.redisConnectTimeout != 3*time.Second {
+					t.Fatal("connection deadline override ignored")
+				}
+			case "GATEWAY_RATE_LIMIT_TIMEOUT":
+				if cfg.rateLimitTimeout != 250*time.Millisecond {
+					t.Fatal("decision deadline override ignored")
+				}
+			}
+		})
+	}
+}
+
+// TestUsageConfiguration checks positive writer deadlines and observation bounds.
+func TestUsageConfiguration(t *testing.T) {
+	for _, tt := range []struct {
+		setting, value string
+		invalid        bool
+	}{
+		{setting: "GATEWAY_USAGE_WRITE_TIMEOUT", value: "750ms"},
+		{setting: "GATEWAY_USAGE_MAX_BYTES", value: "4096"},
+		{setting: "GATEWAY_USAGE_WRITE_TIMEOUT", value: "0s", invalid: true},
+		{setting: "GATEWAY_USAGE_WRITE_TIMEOUT", value: "-1s", invalid: true},
+		{setting: "GATEWAY_USAGE_WRITE_TIMEOUT", value: "private-value", invalid: true},
+		{setting: "GATEWAY_USAGE_MAX_BYTES", value: "0", invalid: true},
+		{setting: "GATEWAY_USAGE_MAX_BYTES", value: "-1", invalid: true},
+		{setting: "GATEWAY_USAGE_MAX_BYTES", value: "private-value", invalid: true},
+		{setting: "GATEWAY_USAGE_MAX_BYTES", value: "999999999999999999999", invalid: true},
+	} {
+		t.Run(tt.setting+"/"+tt.value, func(t *testing.T) {
+			cfg, err := loadConfig(func(key string) string {
+				if key == "GATEWAY_DATABASE_URL" {
+					return "postgres://localhost/llmgate"
+				}
+
+				if key == tt.setting {
+					return tt.value
+				}
+
+				return ""
+			})
+			if tt.invalid {
+				if err == nil || !strings.Contains(err.Error(), tt.setting) || strings.Contains(err.Error(), "private-value") {
+					t.Fatal("invalid usage bounds were accepted or exposed", err)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if tt.setting == "GATEWAY_USAGE_WRITE_TIMEOUT" && cfg.usageWriteTimeout != 750*time.Millisecond {
+				t.Fatal("usage deadline override ignored")
+			}
+
+			if tt.setting == "GATEWAY_USAGE_MAX_BYTES" && cfg.usageMaxBytes != 4096 {
+				t.Fatal("usage observation bound override ignored")
+			}
+		})
+	}
+}
+
+// TestDatabaseConfiguration checks database settings are required, bounded, and do not leak secrets.
+func TestDatabaseConfiguration(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		env  map[string]string
+	}{
+		{name: "missing database URL"},
+		{
+			name: "zero connections",
+			env: map[string]string{
+				"GATEWAY_DATABASE_URL":       "postgres://localhost/db",
+				"GATEWAY_DATABASE_MAX_CONNS": "0",
+			},
+		},
+		{
+			name: "connection count overflow",
+			env: map[string]string{
+				"GATEWAY_DATABASE_URL":       "postgres://localhost/db",
+				"GATEWAY_DATABASE_MAX_CONNS": "2147483648",
+			},
+		},
+		{
+			name: "zero connect timeout",
+			env: map[string]string{
+				"GATEWAY_DATABASE_URL":             "postgres://localhost/db",
+				"GATEWAY_DATABASE_CONNECT_TIMEOUT": "0s",
+			},
+		},
+		{
+			name: "negative lookup timeout",
+			env: map[string]string{
+				"GATEWAY_DATABASE_URL":        "postgres://localhost/db",
+				"GATEWAY_AUTH_LOOKUP_TIMEOUT": "-1s",
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := loadConfig(func(k string) string { return tt.env[k] }); err == nil {
+				t.Fatal("invalid database settings accepted")
+			}
+		})
+	}
+
+	t.Run("positive overrides", func(t *testing.T) {
+		cfg, err := loadConfig(func(k string) string {
+			return map[string]string{
+				"GATEWAY_DATABASE_URL":             "postgres://localhost/db",
+				"GATEWAY_DATABASE_MAX_CONNS":       "3",
+				"GATEWAY_DATABASE_CONNECT_TIMEOUT": "250ms",
+				"GATEWAY_AUTH_LOOKUP_TIMEOUT":      "500ms",
+			}[k]
+		})
+		if err != nil || cfg.databaseMaxConns != 3 || cfg.authLookupTimeout.String() != "500ms" || cfg.databaseConnectTimeout.String() != "250ms" {
+			t.Fatalf("database overrides were lost: error %v", err)
+		}
+	})
+
+	t.Run("canceled creation hides database credentials", func(t *testing.T) {
+		var output bytes.Buffer
+
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+
+		err := createKey(ctx, []string{"-name", "test"}, &output, func(k string) string {
+			if k == "GATEWAY_DATABASE_URL" {
+				return "postgres://user:private-secret@127.0.0.1:1/db"
+			}
+
+			return ""
+		})
+		if !errors.Is(err, store.ErrDatabaseUnavailable) || output.Len() != 0 || strings.Contains(err.Error(), "private-secret") {
+			t.Fatalf("database failure did not remain safe: %v", err)
+		}
+	})
 }

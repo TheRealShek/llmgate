@@ -4,21 +4,21 @@ This page explains the implemented, single-backend gateway in Phase 1. Start
 with the [system map](../README.md#architecture), then use this page to
 trace a request and find the package responsible for each step. The
 [project intent](PROJECT_INTENT.md) describes planned work. Queues, multi-backend
-routing and Prometheus metrics are not
-implemented yet.
+routing remain later-phase work.
 
 ## One chat request
 
 What happens to `POST /v1/chat/completions`? The arrows below show handler
 order, including deferred finalization. External services appear in the README
 system map, not this handler diagram. The logging wrapper assigns a
-request ID before routing and logs completion when the inner handlers return.
+request ID before metrics and routing, then logs completion when the inner handlers return.
 
 ```mermaid
 flowchart TD
     subgraph Logged[Request logging surrounds the public handler]
         direction TD
-        Routes[Match method and path] --> Auth[Authenticate key]
+        Metrics[Observe public request] --> Routes[Match method and path]
+        Routes --> Auth[Authenticate key]
         Auth -->|identity accepted| Rate[Check request credit]
         Rate -->|admitted and backend configured| Chat[Validate bounded chat body]
         Chat -->|supported text chat| Quota[Count input and reserve token allowance]
@@ -87,6 +87,7 @@ below connects the handlers for one streaming request.
 | [`internal/usage`](../internal/usage/recorder.go) | Bounded JSON/SSE observation and one final usage-write attempt. | Counts describe observed backend usage; the recorder settles the quota permit before writing Postgres. |
 | [`internal/store`](../internal/store/usage.go) | Postgres pool setup, key lifecycle, and usage insertion. | Callers own pool lifetime and operation deadlines. |
 | [`internal/admin`](../internal/admin/handler.go) | Operator-token authentication and private key-management routes. | Creation calls `store`; revocation calls the shared authenticator. |
+| [`internal/metrics`](../internal/metrics/metrics.go) | Private Prometheus registry, bounded key labels, request observations, TTFT, active streams, and scraping. | Authentication tags identity; the usage observer supplies streaming events. Scraping reads no external dependencies. |
 | [`internal/requestlog`](../internal/requestlog/handler.go) | Request IDs and start/finish logs around handlers. | Normal handler return does not establish successful inference or delivery. |
 | [`internal/api`](../internal/api/error.go) | Shared JSON error envelope and writing it to HTTP responses. | Callers choose the status and error details. |
 
@@ -96,6 +97,7 @@ For `POST /v1/chat/completions` with `stream: true`, follow these entry points:
 
 1. [`run`](../cmd/gateway/run.go) constructs dependencies and assembles handlers.
 2. [`requestlog.NewHandler`](../internal/requestlog/handler.go) surrounds
+   [`metrics.Metrics.Observe`](../internal/metrics/metrics.go) and
    [`gateway.NewHandler`](../internal/gateway/handler.go), which matches the route.
 3. [`auth.handler.ServeHTTP`](../internal/auth/handler.go) authenticates and
    registers the request through [`lookupAndRegister`](../internal/auth/active.go).
@@ -111,7 +113,8 @@ For `POST /v1/chat/completions` with `stream: true`, follow these entry points:
    Go's reverse proxy copies the response through the
    [observer](../internal/usage/observe.go). JSON delivery instead uses
    [`NewNonStreamingHandler`](../internal/proxy/nonstream.go) and a total deadline.
-7. On normal return or panic unwinding, the recorder classifies the outcome and
+7. On normal return or panic unwinding, the recorder releases the active-stream
+   gauge, classifies the outcome, and
    settles the permit through [`Permit.Finish`](../internal/quota/limiter.go), then
    calls [`UsageStore.RecordUsage`](../internal/store/usage.go). The original panic
    continues after the write attempt.
@@ -226,6 +229,38 @@ from the existing pool. Failure logs a fixed error and does not rewrite the
 response. There is no retry, background queue, or crash-recovery ledger. Process
 exit or forced shutdown can lose a final write. The
 [decision](decisions.md#inference-usage-recording) records this availability tradeoff.
+
+## Prometheus measurement boundaries
+
+Each gateway process owns a private registry with four metric families. Public
+request counters and duration histograms finish after the handler returns or
+unwinds, including quota settlement and usage writing. They include probes,
+validation/authentication failures, models, and chat. Scrapes and the separate
+admin listener are excluded. Status is the observed HTTP status, or `none` when
+cancellation or a panic ends the request before headers. A 200 status does not
+establish successful stream completion.
+
+Authentication records the verified key ID on the request's shared observation
+state. Model proxying and validated inference mark the fixed `primary` backend;
+rejections and probes use `none`. Unknown paths, request IDs, model names, raw
+keys, and payloads never become labels. The registry admits a bounded number of
+key-ID labels for its lifetime and groups further identities under `other`.
+The default capacity is zero, so all authenticated keys share `other`; per-key
+labels require an explicit positive capacity.
+Metrics reset when the process restarts. See the
+[metrics decision](decisions.md#initial-prometheus-metrics) for the label policy.
+
+Streaming inference increments its gauge before proxying, including prefill,
+and decrements before accounting begins, even on cancellation or abort. The
+existing SSE observer supplies one TTFT observation at its first complete data
+event. Its timing and framing definition matches usage TTFT above. No event
+means no TTFT sample, and JSON responses produce none. The metrics writer
+preserves flushes and response control through `Unwrap`; its status is atomic
+because reverse-proxy flushing may use another goroutine.
+
+`GET /v1/metrics` and its HEAD form bypass authentication, Redis, quota checks,
+and the backend. Scraping has a concurrency cap and a deadline. It exposes only
+these application collectors, with no default process or Go-runtime collectors.
 
 ## Startup and shutdown ownership
 

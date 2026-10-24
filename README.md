@@ -6,8 +6,8 @@ request-rate limits, daily token quotas, validation, streaming, cancellation, an
 inference server loads the model and generates tokens.
 
 Phase 1 is in progress with one backend. Model listing, JSON and streaming chat,
-health checks, request logs, persistent inference usage, and optional
-operator-local key management work today.
+health checks, request logs, persistent inference usage, initial Prometheus
+metrics, and optional operator-local key management work today.
 
 > **Not production-ready.** This is a project under active development.
 > Do not use it in production.
@@ -43,6 +43,7 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 flowchart LR
     Client[Inference client] -->|models and chat| Public
     Operator[Operator] -->|separate operator token| Admin
+    Scraper[Metrics client] -->|GET /v1/metrics| Public
     subgraph Gateway[Gateway process]
         Public[Public HTTP listener]
         Admin[Optional loopback admin listener]

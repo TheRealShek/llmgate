@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/therealshek/llmgate/internal/metrics"
 	"github.com/therealshek/llmgate/internal/requestlog"
 	"github.com/therealshek/llmgate/internal/store"
 )
@@ -259,4 +260,25 @@ func TestMissingAuthenticator(t *testing.T) {
 
 func (lookupFunc) RevokeKey(context.Context, int64) error {
 	return store.ErrDatabaseUnavailable
+}
+
+// TestAuthenticatedMetrics checks only a verified identity enters the per-key metric label.
+func TestAuthenticatedMetrics(t *testing.T) {
+	m := metrics.New(metrics.Options{KeyCapacity: 2, MaxScrapes: 2, ScrapeTimeout: time.Second})
+	keys := lookupFunc(func(context.Context, string) (store.Key, error) { return store.Key{ID: 42}, nil })
+	a := NewAuthenticator(keys, Options{LookupTimeout: time.Second, CacheTTL: time.Second, CacheCapacity: 2})
+
+	handler := m.Observe(a.Protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })))
+	for _, secret := range []string{"Bearer private-key", "invalid"} {
+		r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		r.Header.Set("Authorization", secret)
+		handler.ServeHTTP(httptest.NewRecorder(), r)
+	}
+
+	w := httptest.NewRecorder()
+	m.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/metrics", nil))
+
+	if !strings.Contains(w.Body.String(), `gateway_requests_total{backend="none",key="42",status="204"} 1`) || !strings.Contains(w.Body.String(), `gateway_requests_total{backend="none",key="none",status="401"} 1`) || strings.Contains(w.Body.String(), "private-key") {
+		t.Fatal("identity metrics were inaccurate or leaked credentials", w.Body.String())
+	}
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/therealshek/llmgate/internal/auth"
+	"github.com/therealshek/llmgate/internal/metrics"
 	"github.com/therealshek/llmgate/internal/ratelimit"
 	"github.com/therealshek/llmgate/internal/store"
 )
@@ -362,3 +363,25 @@ func (allowTokenQuota) Admit(_ context.Context, _ store.Key, body []byte) (quota
 }
 
 func testTokenQuota() allowTokenQuota { return allowTokenQuota{} }
+
+// TestMetricsRoute checks scrapes bypass authentication and unavailable inference dependencies.
+func TestMetricsRoute(t *testing.T) {
+	m := metrics.New(metrics.Options{KeyCapacity: 2, MaxScrapes: 2, ScrapeTimeout: time.Second})
+	handler := m.Observe(NewHandler(HandlerOptions{Metrics: m}))
+
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(method, "/v1/metrics", nil))
+
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "gateway_active_streams") {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	}
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/metrics", nil))
+
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Fatal(w.Code)
+	}
+}

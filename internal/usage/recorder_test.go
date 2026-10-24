@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/therealshek/llmgate/internal/auth"
+	"github.com/therealshek/llmgate/internal/metrics"
 	"github.com/therealshek/llmgate/internal/requestlog"
 	"github.com/therealshek/llmgate/internal/store"
 )
@@ -314,5 +315,48 @@ func TestConcurrentUsageRequests(t *testing.T) {
 
 	if len(ids) != 32 {
 		t.Fatal("concurrent requests lost usage records", len(ids))
+	}
+}
+
+// TestUsagePrometheus checks fragmented SSE emits one TTFT and releases active streams before persistence.
+func TestUsagePrometheus(t *testing.T) {
+	for _, body := range []string{"data: {\"choices\":[]}", ": comment\n\ndata: [DONE]\n\n"} {
+		t.Run(body, func(t *testing.T) {
+			m := metrics.New(metrics.Options{KeyCapacity: 2, MaxScrapes: 2, ScrapeTimeout: time.Second})
+			scrape := func() string {
+				w := httptest.NewRecorder()
+				m.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/metrics", nil))
+
+				return w.Body.String()
+			}
+			recorder := NewRecorder(Options{Store: usageFunc(func(context.Context, store.Usage) error {
+				if !strings.Contains(scrape(), `gateway_active_streams{backend="primary"} 0`) {
+					t.Error("stream remained active during final write")
+				}
+
+				return errors.New("private-db-error")
+			}), Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024})
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !strings.Contains(scrape(), `gateway_active_streams{backend="primary"} 1`) {
+					t.Error("prefill not active")
+				}
+
+				_, _ = io.WriteString(w, body)
+				if strings.HasPrefix(body, "data:") {
+					_, _ = io.WriteString(w, "\n\ndata: {}\n\ndata: [DONE]\n\n")
+				}
+			})
+			handler := requestlog.NewHandler(m.Observe(authenticated(recorder, next, true)), slog.New(slog.NewJSONHandler(io.Discard, nil)))
+			handler.ServeHTTP(httptest.NewRecorder(), inferenceRequest())
+
+			expected := `gateway_ttft_seconds_count{backend="primary"} 0`
+			if strings.HasPrefix(body, "data:") {
+				expected = `gateway_ttft_seconds_count{backend="primary"} 1`
+			}
+
+			if !strings.Contains(scrape(), expected) {
+				t.Fatal("TTFT event count changed", scrape())
+			}
+		})
 	}
 }

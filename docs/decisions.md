@@ -579,3 +579,34 @@ counting failures return `503` before inference. Unsupported accounting inputs
 return `400`. Already admitted responses keep their allocated cap during a Redis
 outage. Models and probes spend no token quota; the separate request-rate bucket
 still applies to models and chat. No new Postgres migration is required.
+
+## Initial Prometheus metrics
+
+Use the official Prometheus Go client and one private registry per gateway
+process. It supplies concurrency-safe collectors, histogram semantics, label
+escaping, and exposition negotiation. A handwritten exporter would duplicate
+those responsibilities. Do not register global or runtime collectors in this
+slice. See [Prometheus instrumentation guidance](https://prometheus.io/docs/practices/instrumentation/)
+and the [official Go client](https://github.com/prometheus/client_golang).
+
+Export the Phase 1 families from the intent document. Request counters retain
+`key`, `backend`, and `status`. Histograms retain the backend label, and the
+active-stream gauge describes proxy work including prefill. Request duration
+includes final accounting, while active streams end before accounting. Reuse
+the bounded SSE observer's TTFT definition instead of parsing the stream twice.
+Record completed, rejected, canceled, and aborted public handler attempts.
+A wire status of 200 can accompany an interrupted response; usage rows own the
+richer outcome classification.
+
+Raw keys, request paths, request IDs, and model names never become labels. Bound
+per-key labels to a configured capacity, default zero (all keys share `other`),
+with no eviction or counter reuse. Additional identities share `key="other"`; unauthenticated attempts use
+`key="none"`. This preserves aggregate counts with bounded memory even when
+operators create many keys. Backend labels are fixed to `primary` or `none` for
+this single-backend phase. Metrics reset on process restart, not at midnight.
+
+Scrapes are public on `/v1/metrics`, excluded from request metrics, and independent
+of authentication, Postgres, Redis, and backend health. Bound simultaneous
+scrapes and scrape duration. The separate operator listener is not instrumented.
+Deployments must consider who can read key-ID labels when exposing this endpoint. Prometheus/Grafana
+services and dashboards remain separate from this initial exporter.

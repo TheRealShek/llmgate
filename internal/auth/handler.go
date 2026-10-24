@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/therealshek/llmgate/internal/api"
+	"github.com/therealshek/llmgate/internal/metrics"
 	"github.com/therealshek/llmgate/internal/requestlog"
 	"github.com/therealshek/llmgate/internal/store"
 )
@@ -134,6 +135,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+
+	metrics.Authenticate(requestCtx, key.ID)
 
 	// WithContext adds identity while retaining request logging and client cancellation.
 	// Pass the original writer to the protected handler so streaming can still flush.

@@ -120,8 +120,10 @@ timings, outcomes, backend token counts when present, and separate observed SSE
 chunk counts. Daily input/output quotas now use exact prompt counting on the
 pinned text backend, atomic Redis reservations, and a capped backend response.
 Grace defaults to zero. Missing or interrupted usage retains the allowance
-without inventing token counts. Next, add metrics and the complete Compose setup. Measure the authenticated gateway and
-complete the remaining real-backend failure checks before closing Phase 1.
+without inventing token counts. Initial request-count, duration, TTFT, and active-stream
+metrics are exposed at `/v1/metrics`. Next, add the complete Compose setup,
+measure the authenticated gateway, and finish the remaining real-backend failure
+checks before closing Phase 1.
 See [decisions](decisions.md) for authentication and revocation boundaries.
 
 **Learn**

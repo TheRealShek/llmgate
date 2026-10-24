@@ -10,6 +10,7 @@ import (
 
 	"github.com/therealshek/llmgate/internal/api"
 	"github.com/therealshek/llmgate/internal/auth"
+	"github.com/therealshek/llmgate/internal/metrics"
 	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/requestlog"
 	"github.com/therealshek/llmgate/internal/store"
@@ -78,11 +79,16 @@ func (r *Recorder) Record(w http.ResponseWriter, request *http.Request, next htt
 		record.Model = &metadata.Model
 	}
 
-	observed := &observer{streaming: metadata.Streaming, maxBytes: r.options.MaxBytes, firstLine: true}
+	finishInference := metrics.BeginInference(request.Context(), metadata.Streaming)
+	observed := &observer{streaming: metadata.Streaming, maxBytes: r.options.MaxBytes, firstLine: true,
+		first: func(at time.Time) { metrics.FirstData(request.Context(), at) },
+	}
 	writer := &responseWriter{ResponseWriter: w, observer: observed}
 	returned := false
 
 	defer func() {
+		finishInference()
+
 		record.Duration = time.Since(started)
 
 		if !metadata.Streaming && !observed.overflow {

@@ -882,6 +882,56 @@ idempotent refunds, missing/interrupted usage, cancellation, failed usage writes
 rollover, and counting/Redis failures. Final token settlement can extend handler
 completion by its Redis timeout in addition to the existing usage-write timeout.
 
+## Prometheus metrics
+
+Scrape the public, versioned endpoint without a key:
+
+```sh
+curl -fsS http://127.0.0.1:8080/v1/metrics
+```
+
+Expect `gateway_requests_total`, `gateway_request_duration_seconds`,
+`gateway_ttft_seconds`, and `gateway_active_streams`. Histograms expose their
+`_bucket`, `_sum`, and `_count` series. Counters include public probes, models,
+chat, and rejections. Backend `primary` identifies selected inference/model
+proxy work; `none` identifies work that did not select it. Scrapes and admin
+requests are excluded. These metrics are in process memory and reset on restart.
+
+By default, authenticated requests share `key="other"`. A positive
+`GATEWAY_METRICS_KEY_CAPACITY` enables individual numeric key-ID labels up to
+that capacity; further identities still share `other`.
+Unauthenticated attempts use `key="none"`. No path, raw key, model, or request
+ID is exported. Status describes observed HTTP headers, so an interrupted
+stream may still have `status="200"`; no observed status uses `none`.
+
+During a long streaming request, scrape from another terminal and expect the
+active-stream gauge to rise, then return to zero after proxying ends. TTFT
+histogram count increases once per stream that emits a nonterminal SSE data
+event. Streams with no event and JSON responses add no TTFT sample. Request
+duration includes quota settlement and usage recording; active streams do not.
+See [measurement boundaries](architecture.md#prometheus-measurement-boundaries)
+for the full timing definition.
+
+Scraping still works while Redis or Postgres is unavailable, provided the
+gateway process is running. It does not probe those services. Its default
+limits are two simultaneous scrapes and a two-second scrape deadline. These
+checks run without external services:
+
+```sh
+go test -race ./internal/metrics ./internal/auth ./internal/usage ./internal/gateway
+```
+
+With the existing test Postgres/Redis URLs and a dedicated b11681 GLM backend,
+include the authenticated GPU scrape check:
+
+```sh
+LLMGATE_TEST_LLAMA_URL=http://127.0.0.1:8081 \
+go test -race -count=1 ./cmd/gateway -run TestLlamaMetrics
+```
+
+The GPU check skips without its backend URL. Prometheus and Grafana containers
+are not part of this initial exporter deployment.
+
 ## Configuration
 
 | Environment variable | Default | Controls |
@@ -900,6 +950,9 @@ completion by its Redis timeout in addition to the existing usage-write timeout.
 | `GATEWAY_QUOTA_COUNT_TIMEOUT` | `2s` | Combined template rendering and tokenization deadline |
 | `GATEWAY_QUOTA_REDIS_TIMEOUT` | `500ms` | Each token reservation or settlement deadline |
 | `GATEWAY_QUOTA_COUNT_MAX_BYTES` | `8388608` | Maximum body bytes for each counting response |
+| `GATEWAY_METRICS_KEY_CAPACITY` | `0` | Maximum distinct numeric key labels for the process lifetime; zero groups all keys under `other`, as does overflow |
+| `GATEWAY_METRICS_MAX_SCRAPES` | `2` | Maximum simultaneous scrapes |
+| `GATEWAY_METRICS_SCRAPE_TIMEOUT` | `2s` | Scrape response deadline |
 | `GATEWAY_USAGE_WRITE_TIMEOUT` | `2s` | Final usage insert deadline, independent of client cancellation |
 | `GATEWAY_USAGE_MAX_BYTES` | `65536` | JSON response capture and each SSE line/event observation bound |
 | `GATEWAY_ADMIN_ENABLED` | `false` | Enable operator-local admin HTTP |

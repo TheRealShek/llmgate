@@ -68,6 +68,7 @@ type observer struct {
 	failed     bool
 	chunks     int64
 	firstData  *time.Time
+	first      func(time.Time)
 	prompt     *int64
 	completion *int64
 }
@@ -177,6 +178,9 @@ func (o *observer) finishEvent(at time.Time) {
 	o.chunks++
 	if o.firstData == nil {
 		o.firstData = &at
+		if o.first != nil {
+			o.first(at)
+		}
 	}
 
 	if o.eventErr {

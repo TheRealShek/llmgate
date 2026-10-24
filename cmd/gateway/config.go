@@ -11,45 +11,70 @@ import (
 )
 
 type config struct {
-	adminEnabled           bool
-	adminAddr              string
-	adminToken             string
-	adminMaxBodyBytes      int64
-	adminCreateTimeout     time.Duration
-	adminRevokeTimeout     time.Duration
+	// Public HTTP server.
+	addr              string
+	readHeaderTimeout time.Duration
+	readTimeout       time.Duration // Includes reading the request body, not generating the response.
+	idleTimeout       time.Duration // Between client keep-alive requests.
+	shutdownTimeout   time.Duration
+
+	// Chat request limits.
+	maxBodyBytes int64
+	maxTokens    int64 // Output-token ceiling and default when omitted.
+
+	// Inference backend.
+	upstreamURL            *url.URL
+	upstreamConnectTimeout time.Duration
+	upstreamHeaderTimeout  time.Duration
+	upstreamTimeout        time.Duration // Total JSON request deadline.
+	streamIdleTimeout      time.Duration // Maximum gap between backend reads.
+	readinessTimeout       time.Duration
+
+	// Postgres: API keys and usage records.
 	databaseURL            string
 	databaseMaxConns       int32
 	databaseConnectTimeout time.Duration
-	authLookupTimeout      time.Duration
-	authCacheTTL           time.Duration
-	authCacheCapacity      int
-	redisURL               string
-	redisMaxConns          int
-	redisConnectTimeout    time.Duration
-	rateLimitTimeout       time.Duration
-	quotaGracePercent      int64
-	quotaCountTimeout      time.Duration
-	quotaRedisTimeout      time.Duration
-	quotaCountMaxBytes     int64
-	usageWriteTimeout      time.Duration
-	usageMaxBytes          int
-	addr                   string
-	upstreamURL            *url.URL
-	upstreamTimeout        time.Duration
-	readHeaderTimeout      time.Duration
-	idleTimeout            time.Duration
-	shutdownTimeout        time.Duration
-	readTimeout            time.Duration
-	maxBodyBytes           int64
-	maxTokens              int64
-	upstreamConnectTimeout time.Duration
-	upstreamHeaderTimeout  time.Duration
-	streamIdleTimeout      time.Duration
-	readinessTimeout       time.Duration
+
+	// In-process authentication cache.
+	authLookupTimeout time.Duration
+	authCacheTTL      time.Duration
+	authCacheCapacity int
+
+	// Redis: request rate limits and token reservations.
+	redisURL            string
+	redisMaxConns       int
+	redisConnectTimeout time.Duration
+	rateLimitTimeout    time.Duration
+
+	// Daily input and output token quotas.
+	quotaGracePercent  int64 // Allowed overage percentage; zero disables grace.
+	quotaCountTimeout  time.Duration
+	quotaRedisTimeout  time.Duration
+	quotaCountMaxBytes int64 // Bounds backend token-counting responses.
+
+	// Final usage recording.
+	usageWriteTimeout time.Duration // Independent of client cancellation.
+	usageMaxBytes     int           // Observation buffer limit, not an output limit.
+
+	// Prometheus metrics.
+	metricsKeyCapacity   int // Zero groups all key IDs under "other".
+	metricsMaxScrapes    int
+	metricsScrapeTimeout time.Duration
+
+	// Optional loopback admin API.
+	adminEnabled       bool
+	adminAddr          string
+	adminToken         string
+	adminMaxBodyBytes  int64
+	adminCreateTimeout time.Duration
+	adminRevokeTimeout time.Duration
 }
 
 func loadConfig(getenv func(string) string) (config, error) {
 	cfg := config{
+		metricsKeyCapacity:     0,
+		metricsMaxScrapes:      2,
+		metricsScrapeTimeout:   2 * time.Second,
 		adminAddr:              "127.0.0.1:8082",
 		adminMaxBodyBytes:      4096,
 		adminCreateTimeout:     2 * time.Second,
@@ -248,6 +273,25 @@ func loadConfig(getenv func(string) string) (config, error) {
 		if err != nil || cfg.quotaCountMaxBytes <= 0 || cfg.quotaCountMaxBytes >= 1<<63-1 {
 			return config{}, fmt.Errorf("validate GATEWAY_QUOTA_COUNT_MAX_BYTES: requires a positive response bound below MaxInt64")
 		}
+	}
+
+	if value := getenv("GATEWAY_METRICS_KEY_CAPACITY"); value != "" {
+		cfg.metricsKeyCapacity, err = strconv.Atoi(value)
+		if err != nil || cfg.metricsKeyCapacity < 0 {
+			return config{}, fmt.Errorf("validate GATEWAY_METRICS_KEY_CAPACITY: requires a non-negative integer")
+		}
+	}
+
+	if value := getenv("GATEWAY_METRICS_MAX_SCRAPES"); value != "" {
+		cfg.metricsMaxScrapes, err = strconv.Atoi(value)
+		if err != nil || cfg.metricsMaxScrapes <= 0 {
+			return config{}, fmt.Errorf("validate GATEWAY_METRICS_MAX_SCRAPES: requires a positive integer")
+		}
+	}
+
+	cfg.metricsScrapeTimeout, err = envDuration(getenv, "GATEWAY_METRICS_SCRAPE_TIMEOUT", cfg.metricsScrapeTimeout)
+	if err != nil {
+		return config{}, err
 	}
 
 	cfg.usageWriteTimeout, err = envDuration(getenv, "GATEWAY_USAGE_WRITE_TIMEOUT", cfg.usageWriteTimeout)

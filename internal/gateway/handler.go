@@ -6,6 +6,7 @@ import (
 
 	"github.com/therealshek/llmgate/internal/api"
 	"github.com/therealshek/llmgate/internal/auth"
+	"github.com/therealshek/llmgate/internal/metrics"
 	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/ratelimit"
 	"github.com/therealshek/llmgate/internal/store"
@@ -42,6 +43,8 @@ type HandlerOptions struct {
 	Quota TokenQuota
 	// Usage records validated inference attempts; missing configuration fails closed.
 	Usage *usage.Recorder
+	// Metrics exposes the private registry; nil leaves the route unavailable.
+	Metrics *metrics.Metrics
 	// Limits bounds chat bodies and output-token options.
 	Limits ChatLimits
 }
@@ -64,11 +67,23 @@ func NewHandler(options HandlerOptions) http.Handler {
 
 	// Matched requests authenticate, consume a request credit, then enter the
 	// model proxy or chat validator. Both layers preserve the original writer.
-	models := options.RequestLimits.Protect(backendHandler(options.NonStreaming))
+	modelsBackend := backendHandler(options.NonStreaming)
+	if options.NonStreaming != nil {
+		modelsBackend = metrics.Proxy(modelsBackend)
+	}
+
+	models := options.RequestLimits.Protect(modelsBackend)
 	chat = options.RequestLimits.Protect(backendHandler(chat))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/healthz", healthHandler)
+
+	var metricHandler http.Handler
+	if options.Metrics != nil {
+		metricHandler = options.Metrics
+	}
+
+	mux.Handle("GET /v1/metrics", backendHandler(metricHandler))
 	mux.Handle("GET /v1/readyz", backendHandler(options.Readiness))
 	mux.Handle("GET /v1/models", options.Authentication.Protect(models))
 	mux.Handle("POST /v1/chat/completions", options.Authentication.Protect(chat))

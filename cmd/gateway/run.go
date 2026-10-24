@@ -12,6 +12,7 @@ import (
 	"github.com/therealshek/llmgate/internal/auth"
 	"github.com/therealshek/llmgate/internal/backend"
 	"github.com/therealshek/llmgate/internal/gateway"
+	"github.com/therealshek/llmgate/internal/metrics"
 	"github.com/therealshek/llmgate/internal/proxy"
 	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/ratelimit"
@@ -103,6 +104,9 @@ func run(ctx context.Context) error {
 		readiness = backend.NewReadinessHandler(cfg.upstreamURL, transport, cfg.readinessTimeout)
 	}
 
+	gatewayMetrics := metrics.New(metrics.Options{
+		KeyCapacity: cfg.metricsKeyCapacity, MaxScrapes: cfg.metricsMaxScrapes, ScrapeTimeout: cfg.metricsScrapeTimeout,
+	})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
 		NonStreaming:   nonStreaming,
 		Streaming:      streaming,
@@ -111,12 +115,14 @@ func run(ctx context.Context) error {
 		RequestLimits:  requestLimits,
 		Usage:          usageRecorder,
 		Quota:          tokenQuotas,
+		Metrics:        gatewayMetrics,
 		Limits: gateway.ChatLimits{
 			MaxBodyBytes: cfg.maxBodyBytes,
 			MaxTokens:    cfg.maxTokens,
 		},
 	})
-	loggedRoutes := requestlog.NewHandler(routes, slog.Default())
+	observedRoutes := gatewayMetrics.Observe(routes)
+	loggedRoutes := requestlog.NewHandler(observedRoutes, slog.Default())
 
 	// Bound request reads and idle connections without limiting response streams.
 	server := &http.Server{

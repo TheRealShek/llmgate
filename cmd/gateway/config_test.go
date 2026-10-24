@@ -97,6 +97,7 @@ func TestLoadConfig(t *testing.T) {
 			name: "defaults",
 			env:  map[string]string{},
 			want: config{
+				metricsKeyCapacity: 0, metricsMaxScrapes: 2, metricsScrapeTimeout: 2 * time.Second,
 				adminAddr:              "127.0.0.1:8082",
 				adminMaxBodyBytes:      4096,
 				adminCreateTimeout:     2 * time.Second,
@@ -147,6 +148,7 @@ func TestLoadConfig(t *testing.T) {
 				"GATEWAY_SHUTDOWN_TIMEOUT":         "15s",
 			},
 			want: config{
+				metricsKeyCapacity: 0, metricsMaxScrapes: 2, metricsScrapeTimeout: 2 * time.Second,
 				adminAddr:              "127.0.0.1:8082",
 				adminMaxBodyBytes:      4096,
 				adminCreateTimeout:     2 * time.Second,
@@ -876,5 +878,51 @@ func TestQuotaConfiguration(t *testing.T) {
 				t.Fatal("invalid quota bound accepted", name, value)
 			}
 		}
+	}
+}
+
+// TestMetricsConfiguration checks finite scrape and key-label resource bounds.
+func TestMetricsConfiguration(t *testing.T) {
+	for _, name := range []string{"GATEWAY_METRICS_KEY_CAPACITY", "GATEWAY_METRICS_MAX_SCRAPES", "GATEWAY_METRICS_SCRAPE_TIMEOUT"} {
+		for _, value := range []string{"0", "-1", "invalid"} {
+			if name == "GATEWAY_METRICS_KEY_CAPACITY" && value == "0" {
+				continue
+			}
+
+			if _, err := loadConfig(func(key string) string {
+				if key == "GATEWAY_DATABASE_URL" {
+					return "postgres://localhost/db"
+				}
+
+				if key == name {
+					return value
+				}
+
+				return ""
+			}); err == nil {
+				t.Fatal("invalid metrics limit accepted", name, value)
+			}
+		}
+	}
+
+	for _, value := range []string{"", "0"} {
+		cfg, err := loadConfig(func(key string) string {
+			return map[string]string{
+				"GATEWAY_DATABASE_URL":         "postgres://localhost/db",
+				"GATEWAY_METRICS_KEY_CAPACITY": value,
+			}[key]
+		})
+		if err != nil || cfg.metricsKeyCapacity != 0 {
+			t.Fatalf("zero capacity rejected: value=%q capacity=%d err=%v", value, cfg.metricsKeyCapacity, err)
+		}
+	}
+
+	cfg, err := loadConfig(func(key string) string {
+		return map[string]string{
+			"GATEWAY_DATABASE_URL": "postgres://localhost/db", "GATEWAY_METRICS_KEY_CAPACITY": "10", "GATEWAY_METRICS_MAX_SCRAPES": "3", "GATEWAY_METRICS_SCRAPE_TIMEOUT": "1s",
+		}[key]
+	})
+	if err != nil || cfg.metricsKeyCapacity != 10 || cfg.metricsMaxScrapes != 3 || cfg.metricsScrapeTimeout != time.Second {
+		t.Fatal("metrics overrides lost", err)
 	}
 }

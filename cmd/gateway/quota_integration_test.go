@@ -21,6 +21,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/therealshek/llmgate/internal/auth"
 	"github.com/therealshek/llmgate/internal/gateway"
+	"github.com/therealshek/llmgate/internal/metrics"
 	"github.com/therealshek/llmgate/internal/proxy"
 	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/ratelimit"
@@ -282,7 +283,9 @@ func quotaTestGateway(t *testing.T, address string, grace int64) (*httptest.Serv
 	transport.ResponseHeaderTimeout = time.Second
 	t.Cleanup(transport.CloseIdleConnections)
 	tokenQuota := quota.NewLimiter(quota.NewCounter(target, transport, 8<<20), quota.NewRedisStore(client), quota.Options{CountTimeout: time.Second, RedisTimeout: time.Second, GracePercent: grace})
+	m := metrics.New(metrics.Options{KeyCapacity: 10, MaxScrapes: 2, ScrapeTimeout: time.Second})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
+		Metrics:        m,
 		NonStreaming:   proxy.NewNonStreamingHandler(target, transport, time.Second),
 		Streaming:      proxy.NewStreamingHandler(target, transport, time.Second),
 		Authentication: auth.NewAuthenticator(keys, auth.Options{LookupTimeout: time.Second, CacheTTL: time.Minute, CacheCapacity: 16}),
@@ -290,7 +293,7 @@ func quotaTestGateway(t *testing.T, address string, grace int64) (*httptest.Serv
 		Usage:  usage.NewRecorder(usage.Options{Store: store.NewUsageStore(pool), Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024}),
 		Limits: gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 128},
 	})
-	public := httptest.NewServer(requestlog.NewHandler(routes, slog.New(slog.NewJSONHandler(io.Discard, nil))))
+	public := httptest.NewServer(requestlog.NewHandler(m.Observe(routes), slog.New(slog.NewJSONHandler(io.Discard, nil))))
 	t.Cleanup(public.Close)
 	public.Client().Timeout = 5 * time.Second
 

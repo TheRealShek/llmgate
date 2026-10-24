@@ -1,12 +1,103 @@
 # Manual testing with GLM and llama.cpp
 
-GLM-Edge-4B-Chat Q6_K is the primary model. These commands run the Phase 1
-checks through llama.cpp and the gateway. Use three terminals so backend logs,
-gateway logs, and client output stay visible. Historical evidence below is
-explicitly labeled with the model used at the time.
+GLM-Edge-4B-Chat Q6_K is the primary model. Use the complete Compose definition
+below, or the host-development workflow that follows it. Historical evidence is
+labeled with the model used at the time.
 
-The backend listens on host port 8081. The gateway listens on port 8080.
-Both host ports are bound to localhost.
+## Compose deployment
+
+Run from the repository root on an NVIDIA GPU host with Docker daemon access,
+Compose 2.30 or later, and NVIDIA Container Toolkit configured for Docker.
+Check `nvidia-smi` and `docker info` before startup. The
+[Docker GPU guide](https://docs.docker.com/compose/how-tos/gpu-support/) covers
+runtime prerequisites. The gateway is built inside Docker, so host Go is only
+needed for development and automated tests.
+
+Download and verify the GGUF using the model commands in
+[host setup](#1-prepare-the-model-and-start-the-backend-in-terminal-one).
+Only the GGUF download and hash check are needed for Compose; skip the host
+binary setup and launch. The weight file
+stays on the host and is mounted read-only; a missing path is not created.
+
+Prepare local configuration:
+
+```sh
+cp deploy/.env.example deploy/.env
+chmod 600 deploy/.env
+```
+
+Set `POSTGRES_PASSWORD` to a unique password in that file. If reusing an existing
+Postgres volume, use its current password. Set `LLMGATE_MODEL_PATH` to the
+absolute GGUF path, normally
+`/home/<user>/.cache/llmgate/models/glm-edge-4b-chat/ggml-model-Q6_K.gguf`.
+An empty path uses the current user's home cache, which may differ under sudo.
+Use daemon-authorized `docker` commands, or prefix them with `sudo` if required.
+Do not commit this private file. Avoid printing resolved Compose configuration,
+which contains credentials; use `config --quiet` for validation.
+
+```sh
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml config --quiet
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml up --build -d --wait
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml ps -a
+```
+
+Expect `migrate` to exit successfully and gateway, backend, Postgres, and Redis
+to become healthy. Migration failure prevents gateway startup. Backend loading
+has a startup allowance before health failures count. Inspect logs if startup
+fails:
+
+```sh
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml logs --tail=100 gateway backend migrate
+```
+
+The gateway publishes `127.0.0.1:8080`; `GATEWAY_PORT` changes that host port.
+Postgres and Redis keep their loopback development ports and named volumes.
+The backend has no host port. Use its container health check or execute its
+installed `curl` inside the backend container. Admin HTTP is disabled by
+default. If enabled, it remains on `127.0.0.1:8082` inside the gateway container,
+with no published admin port. Run operator HTTP commands inside that container.
+The local key-creation command is available without enabling admin HTTP:
+
+```sh
+KEY_JSON="$(docker compose --env-file deploy/.env -f deploy/docker-compose.yml exec -T gateway \
+  llmgate key-create -name compose-test -requests-per-min 60 -tokens-per-day 100000)"
+export API_KEY
+API_KEY="$(printf '%s' "$KEY_JSON" | python3 -c 'import json,sys; print(json.load(sys.stdin)["api_key"])')"
+unset KEY_JSON
+curl -fsS http://127.0.0.1:8080/v1/healthz
+curl -fsS http://127.0.0.1:8080/v1/readyz
+curl -fsS http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $API_KEY"
+```
+
+Use the README chat example and the [metrics check](#prometheus-metrics) below.
+`deploy/.env.example` lists optional overrides as commented, empty assignments.
+Uncomment a setting and supply a value to override it. Compose forwards optional
+gateway settings as empty when unset, so `cmd/gateway/config.go` owns their defaults.
+Only variables referenced by Compose reach the container. Internal database,
+Redis, upstream, and listener addresses stay fixed in Compose, which also owns
+Docker and backend defaults such as published ports and container stop grace.
+
+Stop without removing persistent data:
+
+```sh
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml down
+```
+
+Gateway stop grace defaults to 20 seconds, covering its 10-second shutdown
+window and bounded accounting. If those application deadlines increase, also
+increase `GATEWAY_STOP_GRACE_PERIOD`. Health failures do not automatically
+restart a running container. Container logs rotate at 10 MiB with three files
+per service. Preserve Postgres and Redis volumes, and the host
+model, across restarts. No volume deletion is needed for routine startup.
+
+Configuration, image references, and static gateway compilation were checked.
+Docker daemon access was unavailable during this change, so actual image
+builds, GPU injection, complete startup, and container shutdown remain unverified.
+Host-process GPU tests below do not substitute for those checks.
+
+For host development, use three terminals for backend logs, gateway logs, and
+client output. The host backend listens on localhost port 8081 and the gateway
+on localhost port 8080. Do not start them alongside Compose on the same ports.
 
 ## 1. Prepare the model and start the backend in terminal one
 
@@ -334,8 +425,8 @@ establish local feasibility; use larger samples for latency claims.
 ## Postgres key storage
 
 The gateway authenticates model and chat requests through Postgres. The store
-creates, looks up, and revokes hashed API keys. The development Compose file currently starts Postgres and its
-migration tool.
+creates, looks up, and revokes hashed API keys. The same Compose file can start
+only Postgres and migrations for host development.
 
 From the repository root, initialize a new local database and apply migrations:
 
@@ -615,7 +706,8 @@ ssh -N -L 18082:127.0.0.1:8082 operator@gateway-host
 
 Supply the admin token securely on the operator machine and use
 `http://127.0.0.1:18082/v1/admin/keys`. This assumes a host-run gateway. Container
-loopback is not host loopback; Compose admin reachability is not implemented.
+loopback is not host loopback. For Compose, execute operator HTTP commands
+inside the gateway container, as described in the deployment section above.
 Do not publicly publish or proxy this listener. Local processes can reach it
 and still require the token; this boundary does not protect a compromised host.
 

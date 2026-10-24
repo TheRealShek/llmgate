@@ -114,14 +114,16 @@ invalidates local entries; unexpired entries work during database outages, while
 misses and expired entries fail closed. Redis now enforces per-key request rates
 using an atomic token bucket. Models and chat share each key's bucket; exhaustion
 returns `429` with retry guidance, and Redis errors fail closed with `503`.
-The development Compose setup includes Redis with persistent storage. Validated
+Compose now defines the gateway, pinned CUDA backend, Postgres, Redis, and
+startup migrations with health checks and persistent storage. Container runtime
+verification remains outstanding. Validated
 inference attempts now produce bounded, best-effort Postgres usage records with
 timings, outcomes, backend token counts when present, and separate observed SSE
 chunk counts. Daily input/output quotas now use exact prompt counting on the
 pinned text backend, atomic Redis reservations, and a capped backend response.
 Grace defaults to zero. Missing or interrupted usage retains the allowance
 without inventing token counts. Initial request-count, duration, TTFT, and active-stream
-metrics are exposed at `/v1/metrics`. Next, add the complete Compose setup,
+metrics are exposed at `/v1/metrics`. Next, verify the complete container deployment,
 measure the authenticated gateway, and finish the remaining real-backend failure
 checks before closing Phase 1.
 See [decisions](decisions.md) for authentication and revocation boundaries.

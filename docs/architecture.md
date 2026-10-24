@@ -278,3 +278,19 @@ HTTP request contexts. Shutdown joins serving and shutdown goroutines before
 returning to `run`, which closes idle upstream connections and releases Redis
 and Postgres. The process signal starts draining; it does not immediately
 cancel every active stream.
+
+
+## Container boundaries
+
+Compose starts Postgres and Redis with named volumes, runs migrations to
+completion, and waits for the pinned CUDA backend before starting the gateway.
+The model is a read-only host file. The gateway runs as a non-root user with a
+read-only root filesystem. Its executable is also used for local key creation.
+Only the gateway, Postgres, and Redis publish host ports, all on loopback.
+The inference backend is reachable through the container network and has no
+published port. Admin HTTP stays on gateway-container loopback and is disabled
+by default. Docker's gateway stop grace exceeds the application's default
+shutdown deadline and bounded accounting tail. Health checks report status;
+they do not replace request-time dependency checks or trigger container restarts
+by themselves. Setup and verification limits live in the
+[Compose guide](manual-testing.md#compose-deployment).

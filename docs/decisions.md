@@ -424,13 +424,13 @@ concurrently under one shutdown deadline, force-close overdue connections, and
 join serving and shutdown goroutines before releasing the shared database pool.
 The number of lifecycle goroutines is bounded by the number of enabled servers.
 
-For now the gateway runs on the host. Remote operators use SSH forwarding to
-host loopback; local processes still need the token. Loopback does not protect
-against a compromised host or unintended request forwarding. Container loopback
-is distinct from host loopback. Resolve admin reachability explicitly when
-adding the gateway to Compose; do not silently change to a wildcard bind or
-publish the admin listener publicly. Creation and revocation use the same
-operator-token boundary.
+In host development, remote operators use SSH forwarding to host loopback;
+local processes still need the token. Loopback does not protect against a
+compromised host or unintended request forwarding. In Compose, admin HTTP stays
+on gateway-container loopback and is disabled by default. Operators run HTTP
+commands inside that container, or use its key-creation command. No admin port
+is published and the loopback-only configuration rule remains unchanged.
+Creation and revocation use the same operator-token boundary.
 
 ## Per-key request limits in Redis
 
@@ -489,7 +489,7 @@ uses a persistent volume and AOF with one-second fsync, and caps data memory at
 128 MiB with `noeviction`. Memory pressure fails admission instead of evicting
 live buckets and granting fresh bursts. AOF recovery can lose recent credits
 on an unclean failure; request limits are not a durable billing ledger. Full
-gateway/backend Compose assembly remains separate. Daily token accounting uses
+Gateway/backend Compose assembly is now defined below. Daily token accounting uses
 the same Redis connection pool, as described below.
 
 ## Inference usage recording
@@ -580,6 +580,7 @@ return `400`. Already admitted responses keep their allocated cap during a Redis
 outage. Models and probes spend no token quota; the separate request-rate bucket
 still applies to models and chat. No new Postgres migration is required.
 
+
 ## Initial Prometheus metrics
 
 Use the official Prometheus Go client and one private registry per gateway
@@ -608,5 +609,36 @@ this single-backend phase. Metrics reset on process restart, not at midnight.
 Scrapes are public on `/v1/metrics`, excluded from request metrics, and independent
 of authentication, Postgres, Redis, and backend health. Bound simultaneous
 scrapes and scrape duration. The separate operator listener is not instrumented.
-Deployments must consider who can read key-ID labels when exposing this endpoint. Prometheus/Grafana
+The Compose gateway publishes only on host loopback; deployments exposing it
+more broadly must also consider who can read key-ID labels. Prometheus/Grafana
 services and dashboards remain separate from this initial exporter.
+
+## Complete single-backend Compose definition
+
+Keep existing Postgres and Redis services, named volumes, and the Compose
+project namespace. Add the gateway, the CUDA backend, and migration startup
+ordering in the same file. Migrations must finish successfully before the
+gateway binds; inference startup also waits for healthy backend/storage
+services. Later dependency outages keep the existing request-time policies.
+Containers restart on process exit, while health checks expose failures. Bound
+Docker log storage with rotation so backend logs cannot grow without limit.
+
+Build a static gateway binary in a Go stage and run it as a non-root user on a
+read-only Alpine filesystem. Keep credentials out of build inputs with an
+allowlist Docker context, and exclude local `.env` files from version control.
+The current development credential model uses a private environment file, not
+a secret-management service. Daemon access can inspect container environments.
+
+Pin the CUDA backend to the verified b11681 image digest so quota tokenization
+does not silently change. Mount the separately verified GGUF read-only and
+refuse to create a missing host model path. Use NVIDIA GPU device reservation;
+do not silently fall back to CPU. The backend gets no host port. Existing
+Postgres/Redis development ports and the gateway publication remain loopback.
+Admin HTTP remains loopback inside the gateway container. No wildcard admin
+binding or privileged gateway is needed. See [Compose GPU support](https://docs.docker.com/compose/how-tos/gpu-support/)
+and [dependency conditions](https://docs.docker.com/reference/compose-file/services/).
+
+Configuration resolution and image availability were checked without daemon
+access. Container image builds, GPU device injection, and full Compose startup
+remain unverified until Docker daemon access is available. Host-process GPU
+checks do not establish those container properties.

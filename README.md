@@ -7,24 +7,20 @@ inference server loads the model and generates tokens.
 
 Phase 1 is in progress with one backend. Model listing, JSON and streaming chat,
 health checks, request logs, persistent inference usage, initial Prometheus
-metrics, and optional operator-local key management work today.
+metrics, and optional operator-local key management work today. Compose defines
+the gateway, pinned CUDA backend, Postgres, Redis, and startup migrations.
 
 > **Not production-ready.** This is a project under active development.
 > Do not use it in production.
 
 ## Quick start
 
-Use Go 1.27 or later. Follow the [setup guide](docs/manual-testing.md) to start
-llama.cpp, Postgres, and Redis, apply migrations, and create an API key. The
-gateway and inference backend currently run on the host; development Compose
-runs Postgres and Redis.
-
-With `GATEWAY_DATABASE_URL` and `PGPASSWORD` set as described in the guide:
+Follow the [Compose setup](docs/manual-testing.md#compose-deployment) for the
+model, NVIDIA runtime, local credentials, and API-key creation. After preparing
+`deploy/.env`, start the stack:
 
 ```sh
-GATEWAY_ADDR=127.0.0.1:8080 \
-GATEWAY_UPSTREAM_URL=http://127.0.0.1:8081 \
-go run ./cmd/gateway
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml up --build -d --wait
 ```
 
 In a client terminal with `API_KEY` set, stream a response from the documented

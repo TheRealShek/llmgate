@@ -47,7 +47,7 @@ type Admission struct {
 	Permit *Permit
 }
 
-// Permit owns one reservation until the usage recorder finishes or the UTC day expires.
+// Permit owns one reservation until the gateway finishes accounting or the UTC day expires.
 // It retains no request body, credential, or request context.
 type Permit struct {
 	reservation  Reservation

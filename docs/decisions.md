@@ -595,6 +595,9 @@ Export the Phase 1 families from the intent document. Request counters retain
 active-stream gauge describes proxy work including prefill. Request duration
 includes final accounting, while active streams end before accounting. Reuse
 the bounded SSE observer's TTFT definition instead of parsing the stream twice.
+The chat handler owns metric lifecycle and quota settlement; usage observation
+supplies the outcome and a first-data notification without depending on either
+package. Usage persistence remains a separate bounded operation.
 Record completed, rejected, canceled, and aborted public handler attempts.
 A wire status of 200 can accompany an interrupted response; usage rows own the
 richer outcome classification.

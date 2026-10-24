@@ -8,10 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/therealshek/llmgate/internal/api"
 	"github.com/therealshek/llmgate/internal/auth"
-	"github.com/therealshek/llmgate/internal/metrics"
-	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/requestlog"
 	"github.com/therealshek/llmgate/internal/store"
 )
@@ -29,7 +26,7 @@ type Options struct {
 	MaxBytes     int
 }
 
-// Recorder owns immutable dependencies; each Record call owns its observation state.
+// Recorder owns immutable dependencies; each Observation owns its response state.
 type Recorder struct {
 	options Options
 }
@@ -43,22 +40,21 @@ func NewRecorder(options Options) *Recorder {
 type Request struct {
 	Model     string
 	Streaming bool
-	Quota     *quota.Permit
+	FirstData func(time.Time) // Optional notification for the first complete SSE data event.
 }
 
-// Record forwards one validated inference request and attempts one final usage write.
-// It preserves panics so ReverseProxy can abort incomplete responses as before.
-func (r *Recorder) Record(w http.ResponseWriter, request *http.Request, next http.Handler, metadata Request) {
+// Observation owns the response writer and accounting state for one inference attempt.
+type Observation struct {
+	writer *responseWriter
+	record store.Usage
+}
+
+// Observe prepares bounded response observation without starting inference or writing usage.
+func (r *Recorder) Observe(w http.ResponseWriter, request *http.Request, metadata Request) (*Observation, error) {
 	key, ok := auth.Identity(request.Context())
 	if !ok || r == nil || r.options.Store == nil || r.options.Backend == "" ||
 		r.options.WriteTimeout <= 0 || r.options.MaxBytes <= 0 {
-		metadata.Quota.Finish(request.Context(), store.Usage{})
-
-		_ = api.WriteError(w, http.StatusServiceUnavailable, api.Error{
-			Message: "usage recording unavailable", Type: "server_error", Code: "usage_unavailable",
-		})
-
-		return
+		return nil, ErrUnavailable
 	}
 
 	started := requestlog.Started(request.Context())
@@ -79,58 +75,65 @@ func (r *Recorder) Record(w http.ResponseWriter, request *http.Request, next htt
 		record.Model = &metadata.Model
 	}
 
-	finishInference := metrics.BeginInference(request.Context(), metadata.Streaming)
-	observed := &observer{streaming: metadata.Streaming, maxBytes: r.options.MaxBytes, firstLine: true,
-		first: func(at time.Time) { metrics.FirstData(request.Context(), at) },
+	observed := &observer{
+		streaming: metadata.Streaming, maxBytes: r.options.MaxBytes,
+		firstLine: true, first: metadata.FirstData,
 	}
-	writer := &responseWriter{ResponseWriter: w, observer: observed}
-	returned := false
 
-	defer func() {
-		finishInference()
+	return &Observation{
+		writer: &responseWriter{ResponseWriter: w, observer: observed},
+		record: record,
+	}, nil
+}
 
-		record.Duration = time.Since(started)
+// Writer forwards response bytes while observing only the bytes accepted by the client writer.
+func (o *Observation) Writer() http.ResponseWriter {
+	return o.writer
+}
 
-		if !metadata.Streaming && !observed.overflow {
-			observed.inspectJSON(observed.body)
-		}
+// Finish classifies the response after proxying returns or panics; it performs no external writes.
+func (o *Observation) Finish(ctx context.Context, returned bool) store.Usage {
+	record := o.record
+	writer := o.writer
+	observed := writer.observer
 
-		record.HTTPStatus = writer.status
-		record.ObservedSSEChunks = observed.chunks
+	record.Duration = time.Since(record.StartedAt)
 
-		record.PromptTokens, record.CompletionTokens = observed.prompt, observed.completion
-		if observed.firstData != nil {
-			ttft := observed.firstData.Sub(started)
-			record.TTFT = &ttft
-		}
+	if !record.Streaming && !observed.overflow {
+		observed.inspectJSON(observed.body)
+	}
 
-		switch {
-		case request.Context().Err() != nil:
-			record.Status = store.UsageCanceled
-		case !returned || writer.writeErr != nil:
-			record.Status = store.UsageInterrupted
-		case writer.status < 200 || writer.status >= 300 || observed.failed:
-			record.Status = store.UsageFailed
-		case metadata.Streaming && !observed.done:
-			record.Status = store.UsageInterrupted
-		default:
-			record.Status = store.UsageCompleted
-		}
+	record.HTTPStatus = writer.status
+	record.ObservedSSEChunks = observed.chunks
 
-		// Reconcile Redis independently of the best-effort Postgres insert below.
-		metadata.Quota.Finish(request.Context(), record)
+	record.PromptTokens, record.CompletionTokens = observed.prompt, observed.completion
+	if observed.firstData != nil {
+		ttft := observed.firstData.Sub(record.StartedAt)
+		record.TTFT = &ttft
+	}
 
-		// Proxy copying is finished, possibly by panic or client cancellation. Retain
-		// request metadata but detach its cancellation for this bounded, synchronous write.
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), r.options.WriteTimeout)
-		defer cancel()
+	switch {
+	case ctx.Err() != nil:
+		record.Status = store.UsageCanceled
+	case !returned || writer.writeErr != nil:
+		record.Status = store.UsageInterrupted
+	case writer.status < 200 || writer.status >= 300 || observed.failed:
+		record.Status = store.UsageFailed
+	case record.Streaming && !observed.done:
+		record.Status = store.UsageInterrupted
+	default:
+		record.Status = store.UsageCompleted
+	}
 
-		if err := r.options.Store.RecordUsage(ctx, record); err != nil {
-			requestlog.Logger(ctx).ErrorContext(ctx, "usage record write failed", "key_id", key.ID)
-		}
-	}()
+	return record
+}
 
-	next.ServeHTTP(writer, request)
+// Write attempts one bounded Postgres insert independently of client cancellation.
+func (r *Recorder) Write(ctx context.Context, record store.Usage) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.options.WriteTimeout)
+	defer cancel()
 
-	returned = true
+	if err := r.options.Store.RecordUsage(ctx, record); err != nil {
+		requestlog.Logger(ctx).ErrorContext(ctx, "usage record write failed", "key_id", record.KeyID)
+	}
 }

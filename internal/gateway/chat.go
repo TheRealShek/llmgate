@@ -12,6 +12,7 @@ import (
 
 	"github.com/therealshek/llmgate/internal/api"
 	"github.com/therealshek/llmgate/internal/auth"
+	"github.com/therealshek/llmgate/internal/metrics"
 	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/requestlog"
 	"github.com/therealshek/llmgate/internal/store"
@@ -147,7 +148,36 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	_ = json.Unmarshal(options.fields["model"], &model)
 
-	h.usage.Record(w, request, upstream, usage.Request{Model: model, Streaming: options.stream, Quota: admission.Permit})
+	observation, err := h.usage.Observe(w, request, usage.Request{
+		Model: model, Streaming: options.stream,
+		FirstData: func(at time.Time) { metrics.FirstData(request.Context(), at) },
+	})
+	if err != nil {
+		admission.Permit.Finish(request.Context(), store.Usage{})
+
+		_ = api.WriteError(w, http.StatusServiceUnavailable, api.Error{
+			Message: "usage recording unavailable", Type: "server_error", Code: "usage_unavailable",
+		})
+
+		return
+	}
+
+	finishInference := metrics.BeginInference(request.Context(), options.stream)
+	returned := false
+
+	// Finalize in this order on normal return, disconnect, or proxy abort.
+	// Proxy work ends before Redis settlement and the independent Postgres write.
+	defer func() {
+		finishInference()
+
+		record := observation.Finish(request.Context(), returned)
+		admission.Permit.Finish(request.Context(), record)
+		h.usage.Write(request.Context(), record)
+	}()
+
+	upstream.ServeHTTP(observation.Writer(), request)
+
+	returned = true
 }
 
 type chatRequest struct {

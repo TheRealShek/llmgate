@@ -3,6 +3,7 @@ package gateway
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/therealshek/llmgate/internal/metrics"
 	"github.com/therealshek/llmgate/internal/proxy"
 	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/store"
@@ -593,5 +595,168 @@ func TestMissingTokenQuota(t *testing.T) {
 		if w.Code != want {
 			t.Fatal(path, w.Code)
 		}
+	}
+}
+
+type accountingCounter struct{}
+
+func (accountingCounter) Count(context.Context, []byte) (int64, error) { return 7, nil }
+
+type accountingReservations struct {
+	settle func(context.Context, quota.Reservation, int64) error
+}
+
+func (s accountingReservations) Reserve(_ context.Context, b quota.Budget) (quota.Reservation, error) {
+	return quota.Reservation{
+		ID: "request", KeyID: b.KeyID, PromptTokens: b.PromptTokens, OutputTokens: b.MaxOutputTokens,
+	}, nil
+}
+
+func (s accountingReservations) Settle(ctx context.Context, r quota.Reservation, charge int64) error {
+	return s.settle(ctx, r, charge)
+}
+
+// TestChatAccountingLifecycle checks proxy metrics end before settlement and writing across request outcomes.
+func TestChatAccountingLifecycle(t *testing.T) {
+	for _, tt := range []struct {
+		name                                                  string
+		stream, cancel, abort, missingRecorder, settleFailure bool
+		body, suffix                                          string
+		status                                                store.UsageStatus
+		charge                                                int64
+		ttft                                                  int
+	}{
+		{name: "JSON", body: `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`, status: store.UsageCompleted, charge: 9},
+		{name: "fragmented SSE", stream: true, body: "data: {}", suffix: "\n\ndata: {\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n", status: store.UsageCompleted, charge: 9, ttft: 1},
+		{name: "comments and done", stream: true, body: ": comment\n\ndata: [DONE]\n\n", status: store.UsageCompleted, charge: -1},
+		{name: "interrupted SSE", stream: true, body: "data: {}\n\n", status: store.UsageInterrupted, charge: -1, ttft: 1},
+		{name: "client cancellation", stream: true, cancel: true, body: "data: {}\n\n", status: store.UsageCanceled, charge: -1, ttft: 1},
+		{name: "proxy abort", stream: true, abort: true, body: "data: {}\n\n", status: store.UsageInterrupted, charge: -1, ttft: 1},
+		{name: "settlement failure", settleFailure: true, body: `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`, status: store.UsageCompleted, charge: 9},
+		{name: "missing recorder", missingRecorder: true, charge: -1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := metrics.New(metrics.Options{MaxScrapes: 2, ScrapeTimeout: time.Second})
+			scrape := func() string {
+				w := httptest.NewRecorder()
+				m.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/metrics", nil))
+
+				return w.Body.String()
+			}
+			settlements, writes := 0, 0
+			reservations := accountingReservations{settle: func(ctx context.Context, _ quota.Reservation, charge int64) error {
+				settlements++
+
+				if _, bounded := ctx.Deadline(); !bounded || ctx.Err() != nil || charge != tt.charge {
+					t.Error("settlement lost its deadline, cancellation independence, or charge", charge)
+				}
+
+				if writes != 0 || !strings.Contains(scrape(), `gateway_active_streams{backend="primary"} 0`) {
+					t.Error("settlement ran before proxy cleanup or after persistence")
+				}
+
+				if tt.settleFailure {
+					return errors.New("settlement unavailable")
+				}
+
+				return nil
+			}}
+
+			recorder := usage.NewRecorder(usage.Options{
+				Store: captureUsage(func(ctx context.Context, record store.Usage) error {
+					writes++
+
+					if settlements != 1 || record.Status != tt.status || ctx.Err() != nil {
+						t.Error("usage write preceded settlement or lost the observed outcome", record.Status)
+					}
+
+					if !strings.Contains(scrape(), `gateway_active_streams{backend="primary"} 0`) {
+						t.Error("stream remained active during usage writing")
+					}
+
+					return errors.New("usage unavailable")
+				}), Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
+			})
+			if tt.missingRecorder {
+				recorder = nil
+			}
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			backend := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tt.missingRecorder {
+					t.Fatal("missing usage recorder admitted inference")
+				}
+
+				active := 0
+				if tt.stream {
+					active = 1
+				}
+
+				if !strings.Contains(scrape(), fmt.Sprintf(`gateway_active_streams{backend="primary"} %d`, active)) {
+					t.Error("wrong stream gauge during prefill")
+				}
+
+				_, _ = io.WriteString(w, tt.body)
+
+				_, _ = io.WriteString(w, tt.suffix)
+				if tt.stream {
+					w.(http.Flusher).Flush()
+				}
+
+				if tt.cancel {
+					cancel()
+				}
+
+				if tt.abort {
+					panic(http.ErrAbortHandler)
+				}
+			})
+			routes := NewHandler(HandlerOptions{
+				Authentication: testAuthenticator(), RequestLimits: testRequestLimits(),
+				NonStreaming: backend, Streaming: backend, Usage: recorder, Metrics: m,
+				Quota: quota.NewLimiter(accountingCounter{}, reservations, quota.Options{
+					CountTimeout: time.Second, RedisTimeout: time.Second,
+				}),
+				Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+			})
+			body := fmt.Sprintf(`{"model":"test","messages":[{"role":"user","content":"hello"}],"stream":%t}`, tt.stream)
+			r := authenticatedRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)).WithContext(ctx)
+			r.Header.Set("Content-Type", "application/json")
+
+			w := httptest.NewRecorder()
+
+			var aborted any
+
+			func() {
+				defer func() { aborted = recover() }()
+
+				m.Observe(routes).ServeHTTP(w, r)
+			}()
+
+			if (tt.abort && aborted != http.ErrAbortHandler) || (!tt.abort && aborted != nil) {
+				t.Fatal("proxy abort behavior changed", aborted)
+			}
+
+			wantWrites := 1
+			if tt.missingRecorder {
+				wantWrites = 0
+
+				if w.Code != http.StatusServiceUnavailable {
+					t.Error("missing recorder did not fail closed", w.Code)
+				}
+			} else if w.Body.String() != tt.body+tt.suffix {
+				t.Error("accounting changed the forwarded response")
+			}
+
+			if settlements != 1 || writes != wantWrites {
+				t.Fatal("accounting did not finish exactly once", settlements, writes)
+			}
+
+			if !strings.Contains(scrape(), fmt.Sprintf(`gateway_ttft_seconds_count{backend="primary"} %d`, tt.ttft)) {
+				t.Fatal("first data observations changed", scrape())
+			}
+		})
 	}
 }

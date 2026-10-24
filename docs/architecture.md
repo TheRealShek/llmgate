@@ -56,11 +56,11 @@ and request ID, and forwards the request. The backend generates the response;
 the proxy copies its status, headers, and body to the client. Responses travel
 back through the same HTTP handler call, not through a second admission check.
 
-Validated chat enters a usage recorder before the selected proxy. It observes
-only bytes accepted by the client-facing writer and preserves flushes and proxy
-abort panics. Token settlement runs first, then one bounded final insert after
-proxy copying finishes, even
-on disconnect or abort. It records the request ID, key, backend, requested model,
+Validated chat creates a usage observation before calling the selected proxy.
+Its writer observes only bytes accepted by the client-facing writer and preserves
+flushes. The chat handler owns deferred cleanup: end proxy metrics, classify the
+observed outcome, settle tokens, then attempt one bounded usage insert. This also
+runs on disconnect or proxy abort, without swallowing the original panic. It records the request ID, key, backend, requested model,
 HTTP status, outcome, timings, and observed backend token counts. The row contains
 no prompt or response text. Models and pre-inference rejections do not create rows.
 
@@ -84,7 +84,7 @@ below connects the handlers for one streaming request.
 | [`internal/quota`](../internal/quota/limiter.go) | Exact backend prompt counting, atomic daily reservations, output caps, and settlement. | Backend enforces generation limits; Redis owns shared budget state. |
 | [`internal/proxy`](../internal/proxy/forward.go) | Upstream HTTP forwarding, credential removal, JSON deadlines, and streaming flushes and idle cancellation. | `gateway` selects response mode; backend generates tokens. |
 | [`internal/backend`](../internal/backend/readiness.go) | On-demand backend readiness probes. | No periodic health registry or backend selection yet. |
-| [`internal/usage`](../internal/usage/recorder.go) | Bounded JSON/SSE observation and one final usage-write attempt. | Counts describe observed backend usage; the recorder settles the quota permit before writing Postgres. |
+| [`internal/usage`](../internal/usage/recorder.go) | Bounded JSON/SSE observation and one final usage-write attempt. | Returns the observed outcome and writes usage when called; `gateway` owns metrics and quota finalization. |
 | [`internal/store`](../internal/store/usage.go) | Postgres pool setup, key lifecycle, and usage insertion. | Callers own pool lifetime and operation deadlines. |
 | [`internal/admin`](../internal/admin/handler.go) | Operator-token authentication and private key-management routes. | Creation calls `store`; revocation calls the shared authenticator. |
 | [`internal/metrics`](../internal/metrics/metrics.go) | Private Prometheus registry, bounded key labels, request observations, TTFT, active streams, and scraping. | Authentication tags identity; the usage observer supplies streaming events. Scraping reads no external dependencies. |
@@ -106,18 +106,19 @@ For `POST /v1/chat/completions` with `stream: true`, follow these entry points:
    [`bucket.lua`](../internal/ratelimit/bucket.lua).
 5. [`chatHandler.ServeHTTP`](../internal/gateway/chat.go) validates the body and
    selects the response mode. [`Limiter.Admit`](../internal/quota/limiter.go) counts
-   input and reserves output, then the handler calls
-   [`Recorder.Record`](../internal/usage/recorder.go) with the quota permit.
+   input and reserves output. The handler then creates a response observation with
+   [`Recorder.Observe`](../internal/usage/recorder.go), supplies the first-data
+   notification for metrics, and starts proxy metrics.
 6. [`streamHandler.ServeHTTP`](../internal/proxy/stream.go) adds idle cancellation;
    [`newForwarder`](../internal/proxy/forward.go) rewrites the upstream request.
    Go's reverse proxy copies the response through the
    [observer](../internal/usage/observe.go). JSON delivery instead uses
    [`NewNonStreamingHandler`](../internal/proxy/nonstream.go) and a total deadline.
-7. On normal return or panic unwinding, the recorder releases the active-stream
-   gauge, classifies the outcome, and
-   settles the permit through [`Permit.Finish`](../internal/quota/limiter.go), then
-   calls [`UsageStore.RecordUsage`](../internal/store/usage.go). The original panic
-   continues after the write attempt.
+7. On normal return or panic unwinding, the chat handler releases the active-stream
+   gauge and gets the outcome from [`Observation.Finish`](../internal/usage/recorder.go).
+   It settles the permit through [`Permit.Finish`](../internal/quota/limiter.go),
+   then calls [`Recorder.Write`](../internal/usage/recorder.go) for the bounded
+   Postgres insert. The original panic continues after the write attempt.
 
 Use the ownership sections below for revocation and shutdown. Setup and test
 commands live in the [manual testing guide](manual-testing.md).
@@ -184,7 +185,7 @@ an aborted proxy response can have `completed: false`.
 
 `quota.Limiter` owns immutable dependencies. Each admitted chat gets one
 `Permit` containing its Redis reservation, with no retained body or context.
-The usage recorder finishes that permit during normal return or panic unwinding.
+The chat handler finishes that permit during normal return or panic unwinding.
 A completed response with matching usage refunds unused output. Uncertain
 outcomes retain the full allowance while releasing the pending marker.
 

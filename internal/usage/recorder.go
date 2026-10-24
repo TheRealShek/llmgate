@@ -10,6 +10,7 @@ import (
 
 	"github.com/therealshek/llmgate/internal/api"
 	"github.com/therealshek/llmgate/internal/auth"
+	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/requestlog"
 	"github.com/therealshek/llmgate/internal/store"
 )
@@ -41,6 +42,7 @@ func NewRecorder(options Options) *Recorder {
 type Request struct {
 	Model     string
 	Streaming bool
+	Quota     *quota.Permit
 }
 
 // Record forwards one validated inference request and attempts one final usage write.
@@ -49,6 +51,8 @@ func (r *Recorder) Record(w http.ResponseWriter, request *http.Request, next htt
 	key, ok := auth.Identity(request.Context())
 	if !ok || r == nil || r.options.Store == nil || r.options.Backend == "" ||
 		r.options.WriteTimeout <= 0 || r.options.MaxBytes <= 0 {
+		metadata.Quota.Finish(request.Context(), store.Usage{})
+
 		_ = api.WriteError(w, http.StatusServiceUnavailable, api.Error{
 			Message: "usage recording unavailable", Type: "server_error", Code: "usage_unavailable",
 		})
@@ -106,6 +110,9 @@ func (r *Recorder) Record(w http.ResponseWriter, request *http.Request, next htt
 		default:
 			record.Status = store.UsageCompleted
 		}
+
+		// Reconcile Redis independently of the best-effort Postgres insert below.
+		metadata.Quota.Finish(request.Context(), record)
 
 		// Proxy copying is finished, possibly by panic or client cancellation. Retain
 		// request metadata but detach its cancellation for this bounded, synchronous write.

@@ -4,7 +4,7 @@ This page explains the implemented, single-backend gateway in Phase 1. Start
 with the [system map](../README.md#architecture), then use this page to
 trace a request and find the package responsible for each step. The
 [project intent](PROJECT_INTENT.md) describes planned work. Queues, multi-backend
-routing, daily token quotas, and Prometheus metrics are not
+routing and Prometheus metrics are not
 implemented yet.
 
 ## One chat request
@@ -21,10 +21,11 @@ flowchart TD
         Routes[Match method and path] --> Auth[Authenticate key]
         Auth -->|identity accepted| Rate[Check request credit]
         Rate -->|admitted and backend configured| Chat[Validate bounded chat body]
-        Chat -->|validated inference| Usage[Usage recorder observes the response]
+        Chat -->|supported text chat| Quota[Count input and reserve token allowance]
+        Quota -->|capped request| Usage[Usage recorder observes the response]
         Usage -->|stream false or omitted| JSON[JSON proxy]
         Usage -->|stream true| SSE[Streaming proxy]
-        JSON -.->|after proxy returns or aborts| Finalize[Usage recorder attempts one final insert]
+        JSON -.->|after proxy returns or aborts| Finalize[Settle token allowance, then insert usage]
         SSE -.->|after proxy returns or aborts| Finalize
     end
 ```
@@ -42,9 +43,13 @@ a request keeps its charge even if validation, forwarding, or delivery fails.
 
 Chat validation bounds the body, checks the JSON object and response mode, and
 validates or supplies `max_tokens`. It preserves backend-specific fields. The
-backend checks the model, messages, and generation options. Validation buffers
+backend checks the model, messages, and generation options. Quota preparation
+also checks text content, one-completion bounds, and generation-limit aliases. Validation buffers
 the body, so the handler clones the request and supplies a new body reader to
-the chosen proxy while preserving its context.
+the chosen proxy while preserving its context. Before that clone enters the
+proxy, `quota` renders and tokenizes the text prompt, reserves its allowance in
+Redis, and caps `max_tokens` to the output budget. It requests final usage for
+streams. Counting and Redis have independent deadlines that do not bound generation.
 
 The proxy removes the gateway Authorization header, sets the upstream target
 and request ID, and forwards the request. The backend generates the response;
@@ -53,7 +58,8 @@ back through the same HTTP handler call, not through a second admission check.
 
 Validated chat enters a usage recorder before the selected proxy. It observes
 only bytes accepted by the client-facing writer and preserves flushes and proxy
-abort panics. One bounded final insert runs after proxy copying finishes, even
+abort panics. Token settlement runs first, then one bounded final insert after
+proxy copying finishes, even
 on disconnect or abort. It records the request ID, key, backend, requested model,
 HTTP status, outcome, timings, and observed backend token counts. The row contains
 no prompt or response text. Models and pre-inference rejections do not create rows.
@@ -75,9 +81,10 @@ below connects the handlers for one streaming request.
 | [`internal/gateway`](../internal/gateway/handler.go) | Public routes, handler order, chat validation, and response-mode selection. | Backend validates generation-specific fields. |
 | [`internal/auth`](../internal/auth/handler.go) | Caller identity, bounded identity cache, active-request tracking, and revocation coordination. | `store` persists keys; cancellation tracking belongs to this process. |
 | [`internal/ratelimit`](../internal/ratelimit/handler.go) | Redis-backed atomic request admission and its deadline. | Request credits count HTTP requests, not generated tokens. |
+| [`internal/quota`](../internal/quota/limiter.go) | Exact backend prompt counting, atomic daily reservations, output caps, and settlement. | Backend enforces generation limits; Redis owns shared budget state. |
 | [`internal/proxy`](../internal/proxy/forward.go) | Upstream HTTP forwarding, credential removal, JSON deadlines, and streaming flushes and idle cancellation. | `gateway` selects response mode; backend generates tokens. |
 | [`internal/backend`](../internal/backend/readiness.go) | On-demand backend readiness probes. | No periodic health registry or backend selection yet. |
-| [`internal/usage`](../internal/usage/recorder.go) | Bounded JSON/SSE observation and one final usage-write attempt. | Counts describe observed backend usage; recording does not enforce daily quotas. |
+| [`internal/usage`](../internal/usage/recorder.go) | Bounded JSON/SSE observation and one final usage-write attempt. | Counts describe observed backend usage; the recorder settles the quota permit before writing Postgres. |
 | [`internal/store`](../internal/store/usage.go) | Postgres pool setup, key lifecycle, and usage insertion. | Callers own pool lifetime and operation deadlines. |
 | [`internal/admin`](../internal/admin/handler.go) | Operator-token authentication and private key-management routes. | Creation calls `store`; revocation calls the shared authenticator. |
 | [`internal/requestlog`](../internal/requestlog/handler.go) | Request IDs and start/finish logs around handlers. | Normal handler return does not establish successful inference or delivery. |
@@ -96,13 +103,16 @@ For `POST /v1/chat/completions` with `stream: true`, follow these entry points:
    through [`RedisStore.Take`](../internal/ratelimit/store.go) and
    [`bucket.lua`](../internal/ratelimit/bucket.lua).
 5. [`chatHandler.ServeHTTP`](../internal/gateway/chat.go) validates the body and
-   selects the response mode, then calls [`Recorder.Record`](../internal/usage/recorder.go).
+   selects the response mode. [`Limiter.Admit`](../internal/quota/limiter.go) counts
+   input and reserves output, then the handler calls
+   [`Recorder.Record`](../internal/usage/recorder.go) with the quota permit.
 6. [`streamHandler.ServeHTTP`](../internal/proxy/stream.go) adds idle cancellation;
    [`newForwarder`](../internal/proxy/forward.go) rewrites the upstream request.
    Go's reverse proxy copies the response through the
    [observer](../internal/usage/observe.go). JSON delivery instead uses
    [`NewNonStreamingHandler`](../internal/proxy/nonstream.go) and a total deadline.
 7. On normal return or panic unwinding, the recorder classifies the outcome and
+   settles the permit through [`Permit.Finish`](../internal/quota/limiter.go), then
    calls [`UsageStore.RecordUsage`](../internal/store/usage.go). The original panic
    continues after the write attempt.
 
@@ -113,8 +123,10 @@ commands live in the [manual testing guide](manual-testing.md).
 
 - **Postgres** stores key hashes, identities, configured limits, and revocation
   timestamps, plus final usage records. Raw keys are returned once on creation.
-  `tokens_per_day` is stored but not enforced yet.
-- **Redis** stores request credits per key. Models and chat share the same bucket.
+  `tokens_per_day` supplies the normal daily token budget.
+- **Redis** stores request credits per key, plus daily spent and reserved tokens
+  in `llmgate:tokens:v1:<key_id>`. Models and chat share the request bucket;
+  only validated chat reserves token budget.
   Gateways serving the same key database must share the Redis database for a
   shared limit. Credits are admission state, not a durable billing ledger.
 - **Process memory** holds the bounded identity cache and active-request registry
@@ -165,10 +177,27 @@ from its registry. The outer logger records elapsed time and whether its inner
 handler returned normally. An HTTP error can still have `completed: true`;
 an aborted proxy response can have `completed: false`.
 
+## Token allowance ownership
+
+`quota.Limiter` owns immutable dependencies. Each admitted chat gets one
+`Permit` containing its Redis reservation, with no retained body or context.
+The usage recorder finishes that permit during normal return or panic unwinding.
+A completed response with matching usage refunds unused output. Uncertain
+outcomes retain the full allowance while releasing the pending marker.
+
+Redis serializes reservations and settlement with Lua. Pending allowances count
+against admission, and duplicate settlements cannot refund twice. The Redis day
+and expiry belong to admission, so a stream ending tomorrow cannot change
+tomorrow's budget. Dependency failures stop new inference before forwarding.
+Settlement failures retain the charge and preserve the response. A crashed
+request's marker expires with its daily counter. See the
+[quota decision](decisions.md#daily-input-and-output-quotas) for grace, supported
+inputs, and durability limits.
+
 ## Usage records and missing information
 
 `total_ms` measures gateway arrival through proxy completion or abort, excluding
-the final database write. Streaming `ttft_ms` measures arrival through the first
+token settlement and the final database write. Streaming `ttft_ms` measures arrival through the first
 complete, nonterminal SSE data event accepted by the response writer. This can
 be a role-only event; it is not a backend GPU timestamp or proof of client
 receipt. Comments and `[DONE]` do not count. JSON requests have no observed TTFT.
@@ -178,7 +207,8 @@ The separate request-finish log also includes time spent finalizing usage.
 role-only, error, and usage-only events. It is not a model-token count. Token
 counts come only from a valid backend `usage` object with both nonnegative
 counts. Missing, partial, malformed, or oversized metadata leaves both counts
-NULL. The recorder does not request extra usage events or rewrite the stream.
+NULL. Quota preparation requests final SSE usage; the recorder observes those
+events without rewriting the stream.
 The requested model is NULL when absent or unsuitable for bounded text storage.
 
 A normally returned 2xx JSON response or a 2xx SSE response ending in `[DONE]`

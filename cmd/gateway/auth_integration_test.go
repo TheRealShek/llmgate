@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"github.com/therealshek/llmgate/internal/quota"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -87,6 +88,7 @@ func TestKeyCreationAndAuthentication(t *testing.T) {
 		Streaming:      proxy.NewStreamingHandler(target, transport, time.Second),
 		Authentication: authentication,
 		RequestLimits:  testRequestLimits(),
+		Quota:          testTokenQuota(),
 		Usage:          testUsageRecorder(),
 		Limits:         gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
@@ -177,6 +179,7 @@ func TestAuthenticationCacheDatabaseOutage(t *testing.T) {
 	routes := gateway.NewHandler(gateway.HandlerOptions{
 		NonStreaming: backend, Authentication: authentication,
 		RequestLimits: testRequestLimits(),
+		Quota:         testTokenQuota(),
 		Usage:         testUsageRecorder(),
 	})
 	checkStatus := func(secret string, want int) {
@@ -284,3 +287,11 @@ func (allowRequestBuckets) Take(context.Context, int64, int64) (ratelimit.Decisi
 func testRequestLimits() *ratelimit.Limiter {
 	return ratelimit.NewLimiter(allowRequestBuckets{}, time.Second)
 }
+
+type allowTokenQuota struct{}
+
+func (allowTokenQuota) Admit(_ context.Context, _ store.Key, body []byte) (quota.Admission, error) {
+	return quota.Admission{Body: body}, nil
+}
+
+func testTokenQuota() allowTokenQuota { return allowTokenQuota{} }

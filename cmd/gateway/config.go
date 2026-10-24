@@ -27,6 +27,10 @@ type config struct {
 	redisMaxConns          int
 	redisConnectTimeout    time.Duration
 	rateLimitTimeout       time.Duration
+	quotaGracePercent      int64
+	quotaCountTimeout      time.Duration
+	quotaRedisTimeout      time.Duration
+	quotaCountMaxBytes     int64
 	usageWriteTimeout      time.Duration
 	usageMaxBytes          int
 	addr                   string
@@ -60,6 +64,10 @@ func loadConfig(getenv func(string) string) (config, error) {
 		redisMaxConns:          10,
 		redisConnectTimeout:    2 * time.Second,
 		rateLimitTimeout:       500 * time.Millisecond,
+		quotaGracePercent:      0,
+		quotaCountTimeout:      2 * time.Second,
+		quotaRedisTimeout:      500 * time.Millisecond,
+		quotaCountMaxBytes:     8 << 20,
 		usageWriteTimeout:      2 * time.Second,
 		usageMaxBytes:          64 << 10,
 		addr:                   ":8080",
@@ -216,6 +224,30 @@ func loadConfig(getenv func(string) string) (config, error) {
 	cfg.rateLimitTimeout, err = envDuration(getenv, "GATEWAY_RATE_LIMIT_TIMEOUT", cfg.rateLimitTimeout)
 	if err != nil {
 		return config{}, err
+	}
+
+	if value := getenv("GATEWAY_QUOTA_GRACE_PERCENT"); value != "" {
+		cfg.quotaGracePercent, err = strconv.ParseInt(value, 10, 64)
+		if err != nil || cfg.quotaGracePercent < 0 || cfg.quotaGracePercent > 100 {
+			return config{}, fmt.Errorf("validate GATEWAY_QUOTA_GRACE_PERCENT: requires an integer from 0 to 100")
+		}
+	}
+
+	cfg.quotaCountTimeout, err = envDuration(getenv, "GATEWAY_QUOTA_COUNT_TIMEOUT", cfg.quotaCountTimeout)
+	if err != nil {
+		return config{}, err
+	}
+
+	cfg.quotaRedisTimeout, err = envDuration(getenv, "GATEWAY_QUOTA_REDIS_TIMEOUT", cfg.quotaRedisTimeout)
+	if err != nil {
+		return config{}, err
+	}
+
+	if value := getenv("GATEWAY_QUOTA_COUNT_MAX_BYTES"); value != "" {
+		cfg.quotaCountMaxBytes, err = strconv.ParseInt(value, 10, 64)
+		if err != nil || cfg.quotaCountMaxBytes <= 0 || cfg.quotaCountMaxBytes >= 1<<63-1 {
+			return config{}, fmt.Errorf("validate GATEWAY_QUOTA_COUNT_MAX_BYTES: requires a positive response bound below MaxInt64")
+		}
 	}
 
 	cfg.usageWriteTimeout, err = envDuration(getenv, "GATEWAY_USAGE_WRITE_TIMEOUT", cfg.usageWriteTimeout)

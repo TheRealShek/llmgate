@@ -13,6 +13,7 @@ import (
 	"github.com/therealshek/llmgate/internal/backend"
 	"github.com/therealshek/llmgate/internal/gateway"
 	"github.com/therealshek/llmgate/internal/proxy"
+	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/ratelimit"
 	"github.com/therealshek/llmgate/internal/requestlog"
 	"github.com/therealshek/llmgate/internal/store"
@@ -57,7 +58,7 @@ func run(ctx context.Context) error {
 	redisClient, err := ratelimit.OpenClient(ctx, cfg.redisURL, ratelimit.ClientLimits{
 		MaxConns:       cfg.redisMaxConns,
 		ConnectTimeout: cfg.redisConnectTimeout,
-		CommandTimeout: cfg.rateLimitTimeout,
+		CommandTimeout: max(cfg.rateLimitTimeout, cfg.quotaRedisTimeout),
 	})
 	if err != nil {
 		return fmt.Errorf("initialize request limiting: %w", err)
@@ -85,6 +86,11 @@ func run(ctx context.Context) error {
 	transport.ResponseHeaderTimeout = cfg.upstreamHeaderTimeout
 	defer transport.CloseIdleConnections()
 
+	promptCounter := quota.NewCounter(cfg.upstreamURL, transport, cfg.quotaCountMaxBytes)
+	tokenQuotas := quota.NewLimiter(promptCounter, quota.NewRedisStore(redisClient), quota.Options{
+		CountTimeout: cfg.quotaCountTimeout, RedisTimeout: cfg.quotaRedisTimeout, GracePercent: cfg.quotaGracePercent,
+	})
+
 	var (
 		nonStreaming http.Handler
 		streaming    http.Handler
@@ -104,6 +110,7 @@ func run(ctx context.Context) error {
 		Authentication: authentication,
 		RequestLimits:  requestLimits,
 		Usage:          usageRecorder,
+		Quota:          tokenQuotas,
 		Limits: gateway.ChatLimits{
 			MaxBodyBytes: cfg.maxBodyBytes,
 			MaxTokens:    cfg.maxTokens,

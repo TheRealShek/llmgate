@@ -400,8 +400,8 @@ One per-key bucket covers models, HEAD models, and both chat modes. A key with
 `requests_per_min=2` starts with two request credits and refills one credit every
 30 seconds, up to two. This is a continuous token bucket, so its initial burst
 and sustained rate differ from a strict count in each rolling minute. Admission
-spends a credit before chat validation; later failures do not refund it. Daily
-model-token quotas remain planned.
+spends a credit before chat validation; later failures do not refund it.
+[Daily token quotas](#daily-token-quotas) apply separately to validated chat.
 
 Run the actual Lua and client tests against Redis:
 
@@ -477,8 +477,8 @@ export PGPASSWORD="$POSTGRES_PASSWORD"
 
 In terminal three, create a key and capture its JSON output without displaying
 the secret in command history. The name and positive limits are stored with the
-key. Request admission enforces `requests_per_min`; daily token quota enforcement
-remains planned.
+key. Request admission enforces `requests_per_min`; validated chat also enforces
+`tokens_per_day`.
 
 ```sh
 KEY_JSON="$(go run ./cmd/gateway key-create \
@@ -584,7 +584,7 @@ curl -i http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $API_KEY"
 
 Creation returns `201` with `Cache-Control: no-store`. The issued key authorizes
 normal model and chat requests. Redis enforces the stored request rate. Daily
-token quotas are not enforced yet. If creation fails, inspect its safe error response before running
+token quotas apply to validated chat. If creation fails, inspect its safe error response before running
 the extraction commands. A lost response after insertion can leave a stored key
 whose secret cannot be recovered. Do not automatically retry issuance; inspect
 the created key ID in request logs or database records, and revoke an unused
@@ -826,8 +826,61 @@ A final usage write happens after proxy copying and can extend handler or respon
 completion by up to `GATEWAY_USAGE_WRITE_TIMEOUT`. If Postgres is unavailable,
 expect a request-correlated `usage record write failed` error log and potentially
 no row. The inference response is not replaced. No retry or durable recovery is
-implemented; crash or forced shutdown can also lose a final record. Quotas are
-not enforced by this slice.
+implemented; crash or forced shutdown can also lose a final record. Token quota
+settlement runs independently before this insert.
+
+## Daily token quotas
+
+Use the pinned b11681 GLM backend above. The gateway requires its internal
+`/apply-template` and `/tokenize` endpoints for text chat. They stay behind the
+gateway and are not public gateway routes. Supported requests contain text
+messages and one completion. Positive generation-limit aliases are normalized
+to the smallest requested limit and the available budget. Unsupported media,
+multiple completions, and nonpositive aliases return `400`.
+
+Grace defaults to zero. To test 10% grace, restart the gateway with
+`GATEWAY_QUOTA_GRACE_PERCENT=10`. A key with a 1000-token budget has a shared
+1100-token ceiling for admitted work. New work stops when spent plus reserved
+tokens reaches 1000. A capped response returns generated text with
+`finish_reason: "length"`; SSE also ends with `[DONE]`. Exhausted requests
+return `429`, code `token_quota_exceeded`, and `Retry-After` until midnight UTC.
+Models remain usable subject to the separate request-rate limit.
+
+Create a dedicated small-budget key through the existing key-creation command,
+then repeat an authenticated chat request with a large `max_tokens`. The final
+request may be capped. Inspect the allowance without displaying key secrets:
+
+```sh
+redis-cli HGETALL "llmgate:tokens:v1:$KEY_ID"
+redis-cli TTL "llmgate:tokens:v1:$KEY_ID"
+```
+
+After finalization, expect `day` and `used` fields and no `r:` pending markers.
+The TTL is at most one UTC day. Usage rows keep backend token counts, never
+invented counts for missing usage. Quota charging and failure semantics live
+in the [decision](decisions.md#daily-input-and-output-quotas).
+
+Run the automated quota checks with the existing test database and Redis URLs.
+They create isolated database schemas and temporary per-key Redis state:
+
+```sh
+go test -race -count=1 ./internal/quota ./cmd/gateway
+```
+
+To include real prompt-count and capped JSON/SSE checks against an already
+running, dedicated b11681 GLM backend:
+
+```sh
+LLMGATE_TEST_LLAMA_URL=http://127.0.0.1:8081 \
+go test -race -count=1 ./internal/quota ./cmd/gateway
+```
+
+The real-backend tests skip without `LLMGATE_TEST_LLAMA_URL`; Redis and database
+checks need `LLMGATE_TEST_REDIS_URL` and `LLMGATE_TEST_DATABASE_URL` as documented
+above. Tested paths cover zero and 10% grace, aliases, shared concurrent budget,
+idempotent refunds, missing/interrupted usage, cancellation, failed usage writes,
+rollover, and counting/Redis failures. Final token settlement can extend handler
+completion by its Redis timeout in addition to the existing usage-write timeout.
 
 ## Configuration
 
@@ -842,7 +895,11 @@ not enforced by this slice.
 | `GATEWAY_REDIS_URL` | `redis://127.0.0.1:6379/0` | Redis or TLS Redis URL; optional credentials and database index, no query or fragment |
 | `GATEWAY_REDIS_MAX_CONNS` | `10` | Maximum shared Redis connections |
 | `GATEWAY_REDIS_CONNECT_TIMEOUT` | `2s` | Redis startup and connection deadline |
-| `GATEWAY_RATE_LIMIT_TIMEOUT` | `500ms` | Redis decision, pool wait, and command deadline |
+| `GATEWAY_RATE_LIMIT_TIMEOUT` | `500ms` | Request-credit decision and pool-wait deadline |
+| `GATEWAY_QUOTA_GRACE_PERCENT` | `0` | Shared daily overrun percentage, integer 0 through 100 |
+| `GATEWAY_QUOTA_COUNT_TIMEOUT` | `2s` | Combined template rendering and tokenization deadline |
+| `GATEWAY_QUOTA_REDIS_TIMEOUT` | `500ms` | Each token reservation or settlement deadline |
+| `GATEWAY_QUOTA_COUNT_MAX_BYTES` | `8388608` | Maximum body bytes for each counting response |
 | `GATEWAY_USAGE_WRITE_TIMEOUT` | `2s` | Final usage insert deadline, independent of client cancellation |
 | `GATEWAY_USAGE_MAX_BYTES` | `65536` | JSON response capture and each SSE line/event observation bound |
 | `GATEWAY_ADMIN_ENABLED` | `false` | Enable operator-local admin HTTP |

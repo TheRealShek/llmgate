@@ -51,6 +51,7 @@ func TestStreamingChatFlush(t *testing.T) {
 		Streaming:      streaming,
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
+		Quota:          testTokenQuota(),
 		Usage:          testUsageRecorder(),
 		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
@@ -296,6 +297,7 @@ func newStreamingTestGateway(
 		Streaming:      streaming,
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
+		Quota:          testTokenQuota(),
 		Usage:          testUsageRecorder(),
 		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	}))

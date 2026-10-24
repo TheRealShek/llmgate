@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/therealshek/llmgate/internal/quota"
 	"io"
 	"log/slog"
 	"net/http"
@@ -42,6 +43,7 @@ func TestRequestIdentity(t *testing.T) {
 		NonStreaming:   forwarder,
 		Authentication: auth.NewAuthenticator(logTestKeyLookup{}, auth.Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024}),
 		RequestLimits:  testRequestLimits(),
+		Quota:          testTokenQuota(),
 		Usage:          testUsageRecorder(),
 		Limits:         gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
@@ -314,3 +316,11 @@ func testUsageRecorder() *usage.Recorder {
 		Store: discardUsage{}, Backend: "test", WriteTimeout: time.Second, MaxBytes: 64 << 10,
 	})
 }
+
+type allowTokenQuota struct{}
+
+func (allowTokenQuota) Admit(_ context.Context, _ store.Key, body []byte) (quota.Admission, error) {
+	return quota.Admission{Body: body}, nil
+}
+
+func testTokenQuota() allowTokenQuota { return allowTokenQuota{} }

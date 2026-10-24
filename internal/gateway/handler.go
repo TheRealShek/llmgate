@@ -1,11 +1,14 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/therealshek/llmgate/internal/api"
 	"github.com/therealshek/llmgate/internal/auth"
+	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/ratelimit"
+	"github.com/therealshek/llmgate/internal/store"
 	"github.com/therealshek/llmgate/internal/usage"
 )
 
@@ -16,6 +19,11 @@ type ChatLimits struct {
 	// MaxTokens bounds explicit output-token requests and supplies omitted values.
 	// Zero disables token validation and insertion.
 	MaxTokens int64
+}
+
+// TokenQuota admits validated chat against its daily input and output budget.
+type TokenQuota interface {
+	Admit(context.Context, store.Key, []byte) (quota.Admission, error)
 }
 
 // HandlerOptions names the dependencies and limits used by the gateway routes.
@@ -30,6 +38,8 @@ type HandlerOptions struct {
 	Authentication *auth.Authenticator
 	// RequestLimits admits authenticated models and chat; nil fails closed.
 	RequestLimits *ratelimit.Limiter
+	// Quota reserves daily tokens before inference; nil fails closed.
+	Quota TokenQuota
 	// Usage records validated inference attempts; missing configuration fails closed.
 	Usage *usage.Recorder
 	// Limits bounds chat bodies and output-token options.
@@ -48,6 +58,7 @@ func NewHandler(options HandlerOptions) http.Handler {
 			maxBodyBytes: options.Limits.MaxBodyBytes,
 			maxTokens:    options.Limits.MaxTokens,
 			usage:        options.Usage,
+			quota:        options.Quota,
 		}
 	}
 

@@ -8,8 +8,13 @@ import (
 	"mime"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/therealshek/llmgate/internal/api"
+	"github.com/therealshek/llmgate/internal/auth"
+	"github.com/therealshek/llmgate/internal/quota"
+	"github.com/therealshek/llmgate/internal/requestlog"
+	"github.com/therealshek/llmgate/internal/store"
 	"github.com/therealshek/llmgate/internal/usage"
 )
 
@@ -21,6 +26,7 @@ type chatHandler struct {
 	maxBodyBytes int64
 	maxTokens    int64
 	usage        *usage.Recorder
+	quota        TokenQuota
 }
 
 func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -101,6 +107,34 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validated chat obtains an input count and a shared output allowance before proxying.
+	key, ok := auth.Identity(r.Context())
+	if !ok || h.quota == nil {
+		writeQuotaError(w, quota.ErrUnavailable)
+		return
+	}
+
+	admission, err := h.quota.Admit(r.Context(), key, body)
+	if r.Context().Err() != nil {
+		admission.Permit.Finish(r.Context(), store.Usage{})
+		return
+	}
+
+	if err != nil {
+		if !errors.Is(err, quota.ErrInvalidRequest) {
+			var exhausted *quota.Exhausted
+			if !errors.As(err, &exhausted) {
+				requestlog.Logger(r.Context()).WarnContext(r.Context(), "token quota admission failed", "key_id", key.ID)
+			}
+		}
+
+		writeQuotaError(w, err)
+
+		return
+	}
+
+	body = admission.Body
+
 	// Reading r.Body drained the stream. Clone the request and attach a new reader
 	// for the buffered bytes so the upstream proxy can read the body.
 	request := r.Clone(r.Context())
@@ -113,7 +147,7 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	_ = json.Unmarshal(options.fields["model"], &model)
 
-	h.usage.Record(w, request, upstream, usage.Request{Model: model, Streaming: options.stream})
+	h.usage.Record(w, request, upstream, usage.Request{Model: model, Streaming: options.stream, Quota: admission.Permit})
 }
 
 type chatRequest struct {
@@ -194,5 +228,33 @@ func writeChatError(w http.ResponseWriter, status int, message, code string) {
 		Message: message,
 		Type:    "invalid_request_error",
 		Code:    code,
+	})
+}
+
+func writeQuotaError(w http.ResponseWriter, err error) {
+	w.Header().Set("Cache-Control", "no-store")
+
+	var exhausted *quota.Exhausted
+	if errors.As(err, &exhausted) {
+		seconds := int64(exhausted.RetryAfter / time.Second)
+		if exhausted.RetryAfter%time.Second != 0 {
+			seconds++
+		}
+
+		w.Header().Set("Retry-After", strconv.FormatInt(max(1, seconds), 10))
+		_ = api.WriteError(w, http.StatusTooManyRequests, api.Error{
+			Message: "daily token quota exhausted", Type: "rate_limit_error", Code: "token_quota_exceeded",
+		})
+
+		return
+	}
+
+	if errors.Is(err, quota.ErrInvalidRequest) {
+		writeChatError(w, http.StatusBadRequest, "quota accounting requires supported text chat and one completion with positive token limits", "invalid_quota_request")
+		return
+	}
+
+	_ = api.WriteError(w, http.StatusServiceUnavailable, api.Error{
+		Message: "token quota unavailable", Type: "server_error", Code: "token_quota_unavailable",
 	})
 }

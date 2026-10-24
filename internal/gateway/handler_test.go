@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"github.com/therealshek/llmgate/internal/quota"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,7 @@ func TestHandler(t *testing.T) {
 	handler := NewHandler(HandlerOptions{
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
+		Quota:          testTokenQuota(),
 		Usage:          testUsageRecorder(),
 	})
 
@@ -138,6 +140,7 @@ func TestHandlerModels(t *testing.T) {
 		NonStreaming:   upstream,
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
+		Quota:          testTokenQuota(),
 		Usage:          testUsageRecorder(),
 		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
@@ -163,6 +166,7 @@ func TestProtectedRoutes(t *testing.T) {
 		Readiness:      upstream,
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
+		Quota:          testTokenQuota(),
 		Usage:          testUsageRecorder(),
 		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
@@ -305,6 +309,7 @@ func TestRateLimitRouteOrder(t *testing.T) {
 			})
 			handler := NewHandler(HandlerOptions{
 				Authentication: testAuthenticator(), RequestLimits: ratelimit.NewLimiter(buckets, time.Second),
+				Quota:        testTokenQuota(),
 				Usage:        testUsageRecorder(),
 				NonStreaming: backend, Streaming: backend, Readiness: readiness,
 				Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
@@ -349,3 +354,11 @@ func (allowRequestBuckets) Take(context.Context, int64, int64) (ratelimit.Decisi
 func testRequestLimits() *ratelimit.Limiter {
 	return ratelimit.NewLimiter(allowRequestBuckets{}, time.Second)
 }
+
+type allowTokenQuota struct{}
+
+func (allowTokenQuota) Admit(_ context.Context, _ store.Key, body []byte) (quota.Admission, error) {
+	return quota.Admission{Body: body}, nil
+}
+
+func testTokenQuota() allowTokenQuota { return allowTokenQuota{} }

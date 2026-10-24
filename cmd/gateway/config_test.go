@@ -111,6 +111,9 @@ func TestLoadConfig(t *testing.T) {
 				redisMaxConns:          10,
 				redisConnectTimeout:    2 * time.Second,
 				rateLimitTimeout:       500 * time.Millisecond,
+				quotaCountTimeout:      2 * time.Second,
+				quotaRedisTimeout:      500 * time.Millisecond,
+				quotaCountMaxBytes:     8 << 20,
 				usageWriteTimeout:      2 * time.Second,
 				usageMaxBytes:          64 << 10,
 				addr:                   ":8080",
@@ -158,6 +161,9 @@ func TestLoadConfig(t *testing.T) {
 				redisMaxConns:          10,
 				redisConnectTimeout:    2 * time.Second,
 				rateLimitTimeout:       500 * time.Millisecond,
+				quotaCountTimeout:      2 * time.Second,
+				quotaRedisTimeout:      500 * time.Millisecond,
+				quotaCountMaxBytes:     8 << 20,
 				usageWriteTimeout:      2 * time.Second,
 				usageMaxBytes:          64 << 10,
 				addr:                   "127.0.0.1:9090",
@@ -820,4 +826,55 @@ func TestDatabaseConfiguration(t *testing.T) {
 			t.Fatalf("database failure did not remain safe: %v", err)
 		}
 	})
+}
+
+// TestQuotaConfiguration checks zero-default grace and positive operation bounds.
+func TestQuotaConfiguration(t *testing.T) {
+	for _, tt := range []struct {
+		name, value string
+		valid       bool
+	}{
+		{name: "default", valid: true}, {name: "zero", value: "0", valid: true},
+		{name: "ten percent", value: "10", valid: true}, {name: "full grace", value: "100", valid: true},
+		{name: "negative", value: "-1"}, {name: "too large", value: "101"}, {name: "fraction", value: "1.5"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := loadConfig(func(key string) string {
+				if key == "GATEWAY_DATABASE_URL" {
+					return "postgres://localhost/llmgate"
+				}
+
+				if key == "GATEWAY_QUOTA_GRACE_PERCENT" {
+					return tt.value
+				}
+
+				return ""
+			})
+			if (err == nil) != tt.valid {
+				t.Fatal(err)
+			}
+
+			if tt.name == "default" && cfg.quotaGracePercent != 0 {
+				t.Fatal("grace must default to zero")
+			}
+		})
+	}
+
+	for _, name := range []string{"GATEWAY_QUOTA_COUNT_TIMEOUT", "GATEWAY_QUOTA_REDIS_TIMEOUT", "GATEWAY_QUOTA_COUNT_MAX_BYTES"} {
+		for _, value := range []string{"0", "-1", "invalid"} {
+			if _, err := loadConfig(func(key string) string {
+				if key == "GATEWAY_DATABASE_URL" {
+					return "postgres://localhost/llmgate"
+				}
+
+				if key == name {
+					return value
+				}
+
+				return ""
+			}); err == nil {
+				t.Fatal("invalid quota bound accepted", name, value)
+			}
+		}
+	}
 }

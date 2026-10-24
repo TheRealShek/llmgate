@@ -81,6 +81,7 @@ func TestAdminRevocationAndStreams(t *testing.T) {
 		Streaming:      proxy.NewStreamingHandler(target, transport, time.Second),
 		Authentication: authentication,
 		RequestLimits:  testRequestLimits(),
+		Quota:          testTokenQuota(),
 		Usage:          testUsageRecorder(),
 		Limits:         gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 128},
 	}))

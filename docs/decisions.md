@@ -260,7 +260,7 @@ inside the matched route, after request logging and before chat validation or
 proxying. Unknown routes and unsupported methods retain their routing errors.
 All active keys have the same route permissions. Request and token limits are
 carried with identity. The separate request limiter below enforces request rates;
-daily token quota enforcement remains planned.
+the [daily quota policy](#daily-input-and-output-quotas) enforces token budgets.
 
 Resolve keys through the cache policy below, with `KeyStore.LookupKey` on misses.
 Missing, malformed, ambiguous, unknown, and revoked credentials return a generic
@@ -489,7 +489,8 @@ uses a persistent volume and AOF with one-second fsync, and caps data memory at
 128 MiB with `noeviction`. Memory pressure fails admission instead of evicting
 live buckets and granting fresh bursts. AOF recovery can lose recent credits
 on an unclean failure; request limits are not a durable billing ledger. Full
-gateway/backend Compose assembly and daily token accounting remain separate.
+gateway/backend Compose assembly remains separate. Daily token accounting uses
+the same Redis connection pool, as described below.
 
 ## Inference usage recording
 
@@ -512,8 +513,9 @@ Abhishek chose unknown token counts plus observed SSE chunk counts over charging
 chunk-based estimates. Store both token counts as NULL unless the backend
 provides a valid usage pair; preserve explicit zero counts. A transport read or
 SSE event is not a model token. Keep observed complete SSE data-event counts
-separately for diagnosis, and leave quota charging to the next slice. Recording
-unknown counts does not yet choose how an interrupted request spends its quota.
+separately for diagnosis. The [daily quota policy](#daily-input-and-output-quotas)
+now defines charging for missing and interrupted usage. Chunk-based charging in
+the original Phase 1 outline is superseded by retained token reservations.
 
 Observe accepted response bytes without rewriting them or buffering a complete
 stream. Bound JSON capture and each SSE line/event. If metadata exceeds those
@@ -524,3 +526,56 @@ Keep proxy abort panics intact after finalization, and forward response-control
 operations through the underlying writer. See
 [architecture](architecture.md#usage-records-and-missing-information) for the
 record fields, timing, and outcome definitions.
+
+
+## Daily input and output quotas
+
+Count both logical input and generated output tokens, including cached input.
+Use a UTC calendar day determined by Redis `TIME`. Charge a request to its
+admission day even if it finishes after midnight. This is a serving limit,
+not a durable billing ledger. Redis AOF can lose recent state after a crash;
+flushing or losing the Redis database resets budgets. Share one Redis database
+across gateway instances serving the same key database.
+
+Abhishek chose a configurable grace percentage, defaulting to zero. New work
+requires spent plus outstanding reservations to remain below `tokens_per_day`.
+An admitted request can use the shared ceiling of that limit plus its grace.
+Round fractional grace tokens down. Support integer percentages from 0 to 100
+and daily ceilings up to `2^53-1` for exact Lua arithmetic. Outstanding
+reservations can temporarily block admission before completed usage reaches
+the limit. Grace is shared by the key, not granted separately to each request.
+
+Before inference, render the complete text-chat request through the same
+backend's `/apply-template`, then call `/tokenize` with `add_special` and
+`parse_special` both true. These paths match llama.cpp b11681's chat parser and
+inference tokenizer. The pinned GLM model was checked with ASCII and Hindi
+input, a system message, and cache hits. This does not establish support for
+other model templates or backend versions. Media and multiple completions are
+rejected until their accounting paths are supported. The counting calls have a
+shared deadline and bounded responses. They never receive the gateway API key.
+See the [pinned backend parser](https://github.com/ggml-org/llama.cpp/blob/b11681/tools/server/server-context.cpp)
+and [generation schema](https://github.com/ggml-org/llama.cpp/blob/b11681/tools/server/server-schema.cpp).
+
+One Lua operation reserves the exact input count plus the smaller of requested
+output and available output budget. A prompt leaving no room for one output
+token is rejected before inference. Normalize generation-limit aliases to one
+capped `max_tokens`, and request final stream usage. Let the backend stop at the
+cap and return generated text with its normal length finish reason. The gateway
+does not cut the connection to enforce a token boundary or treat SSE chunks as
+tokens. A backend that violates its generation cap is outside this guarantee;
+usage mismatches log an error and never grant a refund below the reserved amount.
+
+After a completed response with valid usage, reconcile to input plus output.
+Canceled, failed, interrupted, unknown, or unrepresentable usage keeps the full
+allowance. Reconciliation removes the reservation marker exactly once. It has
+its own deadline independent of client cancellation and the Postgres write.
+Failures are logged and do not change the response or trigger retries. A lost
+admission reply or process crash can leave a conservative charge until midnight.
+Late settlement cannot refund a new day's account. State expires at the next UTC
+midnight, with one counter and only pending markers per active key.
+
+Exhaustion returns `429` with `Retry-After` until the next UTC day. Redis and
+counting failures return `503` before inference. Unsupported accounting inputs
+return `400`. Already admitted responses keep their allocated cap during a Redis
+outage. Models and probes spend no token quota; the separate request-rate bucket
+still applies to models and chat. No new Postgres migration is required.

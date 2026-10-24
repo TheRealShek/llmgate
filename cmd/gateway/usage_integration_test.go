@@ -84,6 +84,7 @@ func TestInferenceUsageRecords(t *testing.T) {
 		NonStreaming:   proxy.NewNonStreamingHandler(target, transport, time.Second),
 		Streaming:      proxy.NewStreamingHandler(target, transport, time.Second),
 		Authentication: authentication, RequestLimits: testRequestLimits(),
+		Quota: testTokenQuota(),
 		Usage: usage.NewRecorder(usage.Options{
 			Store: store.NewUsageStore(pool), Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
 		}),

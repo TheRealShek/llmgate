@@ -91,7 +91,7 @@ Target: weeks 1 to 3.
 - Timeouts on connect, on time to first byte, and on idle gaps between chunks.
 - API keys in Postgres with a migration tool (`goose` or `golang-migrate`). Keys are stored as hashes.
 - Token bucket rate limit per key in Redis. Write it as a Lua script so the check and the decrement are atomic.
-- Daily token quota per key, counted from the backend's `usage` field when it is present, and from chunk counts when it is not.
+- Daily token quota per key covering input and output, with exact backend prompt counting, shared reservations, and configurable grace defaulting to zero. Reconcile completed requests from backend usage; retain reservations when consumption is uncertain.
 - Usage row written when each request finishes, including TTFT and total time.
 - Structured logs with `log/slog` and a request ID on every line.
 - Graceful shutdown. On SIGTERM, stop accepting new requests and let active streams finish, with a hard deadline.
@@ -117,8 +117,10 @@ returns `429` with retry guidance, and Redis errors fail closed with `503`.
 The development Compose setup includes Redis with persistent storage. Validated
 inference attempts now produce bounded, best-effort Postgres usage records with
 timings, outcomes, backend token counts when present, and separate observed SSE
-chunk counts. Missing token counts remain unknown. Next, add daily quotas,
-metrics, and the complete Compose setup. Measure the authenticated gateway and
+chunk counts. Daily input/output quotas now use exact prompt counting on the
+pinned text backend, atomic Redis reservations, and a capped backend response.
+Grace defaults to zero. Missing or interrupted usage retains the allowance
+without inventing token counts. Next, add metrics and the complete Compose setup. Measure the authenticated gateway and
 complete the remaining real-backend failure checks before closing Phase 1.
 See [decisions](decisions.md) for authentication and revocation boundaries.
 

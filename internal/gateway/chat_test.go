@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/therealshek/llmgate/internal/proxy"
+	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/store"
 	"github.com/therealshek/llmgate/internal/usage"
 )
@@ -43,6 +44,7 @@ func TestChatForwarding(t *testing.T) {
 			NonStreaming:   upstream,
 			Authentication: testAuthenticator(),
 			RequestLimits:  testRequestLimits(),
+			Quota:          testTokenQuota(),
 			Usage:          testUsageRecorder(),
 			Limits:         ChatLimits{MaxBodyBytes: 1024},
 		}).ServeHTTP(recorder, request)
@@ -63,6 +65,7 @@ func TestChatReadTimeout(t *testing.T) {
 		NonStreaming:   upstream,
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
+		Quota:          testTokenQuota(),
 		Usage:          testUsageRecorder(),
 		Limits:         ChatLimits{MaxBodyBytes: 1024},
 	}))
@@ -152,6 +155,7 @@ func TestChatRejections(t *testing.T) {
 				NonStreaming:   upstream,
 				Authentication: testAuthenticator(),
 				RequestLimits:  testRequestLimits(),
+				Quota:          testTokenQuota(),
 				Usage:          testUsageRecorder(),
 				Limits:         ChatLimits{MaxBodyBytes: 64},
 			}).ServeHTTP(recorder, request)
@@ -186,6 +190,7 @@ func TestChatBodyBoundary(t *testing.T) {
 		NonStreaming:   upstream,
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
+		Quota:          testTokenQuota(),
 		Usage:          testUsageRecorder(),
 		Limits:         ChatLimits{MaxBodyBytes: 64},
 	}).ServeHTTP(recorder, request)
@@ -227,6 +232,7 @@ func TestChatProxyIntegration(t *testing.T) {
 		NonStreaming:   nonStreaming,
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
+		Quota:          testTokenQuota(),
 		Usage:          testUsageRecorder(),
 		Limits:         ChatLimits{MaxBodyBytes: 1024},
 	})
@@ -265,6 +271,7 @@ func TestChatCancellation(t *testing.T) {
 		NonStreaming:   nonStreaming,
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
+		Quota:          testTokenQuota(),
 		Usage:          testUsageRecorder(),
 		Limits:         ChatLimits{MaxBodyBytes: 1024},
 	})
@@ -355,6 +362,7 @@ func TestChatTokenLimit(t *testing.T) {
 				NonStreaming:   upstream,
 				Authentication: testAuthenticator(),
 				RequestLimits:  testRequestLimits(),
+				Quota:          testTokenQuota(),
 				Usage:          testUsageRecorder(),
 				Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 			})
@@ -405,6 +413,7 @@ func TestChatTokenLimitOmitted(t *testing.T) {
 				NonStreaming:   upstream,
 				Authentication: testAuthenticator(),
 				RequestLimits:  testRequestLimits(),
+				Quota:          testTokenQuota(),
 				Usage:          testUsageRecorder(),
 				Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 			})
@@ -466,7 +475,7 @@ func TestUsageScope(t *testing.T) {
 			})
 			handler := NewHandler(HandlerOptions{
 				Authentication: testAuthenticator(), RequestLimits: testRequestLimits(),
-				NonStreaming: backend, Usage: recorder, Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+				NonStreaming: backend, Quota: testTokenQuota(), Usage: recorder, Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 			})
 
 			method := http.MethodPost
@@ -492,7 +501,7 @@ func TestMissingUsageRecorder(t *testing.T) {
 	backend := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("missing recorder admitted inference") })
 	handler := NewHandler(HandlerOptions{
 		Authentication: testAuthenticator(), RequestLimits: testRequestLimits(),
-		NonStreaming: backend, Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+		NonStreaming: backend, Quota: testTokenQuota(), Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
 	r := authenticatedRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
 	r.Header.Set("Content-Type", "application/json")
@@ -514,4 +523,75 @@ func testUsageRecorder() *usage.Recorder {
 	return usage.NewRecorder(usage.Options{
 		Store: discardUsage{}, Backend: "test", WriteTimeout: time.Second, MaxBytes: 64 << 10,
 	})
+}
+
+type tokenQuotaFunc func(context.Context, store.Key, []byte) (quota.Admission, error)
+
+func (f tokenQuotaFunc) Admit(ctx context.Context, key store.Key, body []byte) (quota.Admission, error) {
+	return f(ctx, key, body)
+}
+
+// TestChatQuotaRejections checks quota errors stop inference with safe status and retry guidance.
+func TestChatQuotaRejections(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		err    error
+		status int
+		retry  string
+	}{
+		{name: "exhausted", err: &quota.Exhausted{RetryAfter: 1500 * time.Millisecond}, status: 429, retry: "2"},
+		{name: "unsupported", err: quota.ErrInvalidRequest, status: 400},
+		{name: "Redis failure", err: quota.ErrUnavailable, status: 503},
+		{name: "invalid key limit", err: quota.ErrInvalidLimit, status: 503},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("rejected quota reached backend") })
+			handler := NewHandler(HandlerOptions{
+				NonStreaming: backend, Authentication: testAuthenticator(), RequestLimits: testRequestLimits(),
+				Usage: testUsageRecorder(), Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+				Quota: tokenQuotaFunc(func(context.Context, store.Key, []byte) (quota.Admission, error) { return quota.Admission{}, tt.err }),
+			})
+			request := authenticatedRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+			request.Header.Set("Content-Type", "application/json")
+
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, request)
+
+			if w.Code != tt.status || w.Header().Get("Retry-After") != tt.retry || w.Header().Get("Cache-Control") != "no-store" {
+				t.Fatal(w.Code, w.Header())
+			}
+		})
+	}
+}
+
+// TestMissingTokenQuota checks omitted construction fails closed for chat while models remain usable.
+func TestMissingTokenQuota(t *testing.T) {
+	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Error("missing quota admitted inference")
+		}
+
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler := NewHandler(HandlerOptions{NonStreaming: backend, Authentication: testAuthenticator(), RequestLimits: testRequestLimits(), Usage: testUsageRecorder(), Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8}})
+
+	for _, path := range []string{"/v1/chat/completions", "/v1/models"} {
+		method := http.MethodPost
+		want := http.StatusServiceUnavailable
+
+		if path == "/v1/models" {
+			method = http.MethodGet
+			want = http.StatusNoContent
+		}
+
+		request := authenticatedRequest(method, path, strings.NewReader(`{}`))
+		request.Header.Set("Content-Type", "application/json")
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, request)
+
+		if w.Code != want {
+			t.Fatal(path, w.Code)
+		}
+	}
 }

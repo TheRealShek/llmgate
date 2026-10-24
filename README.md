@@ -2,7 +2,7 @@
 
 `llmgate` is an OpenAI-compatible LLM gateway written in Go. It sits in front of
 an inference server such as llama.cpp and handles API-key authentication,
-request-rate limits, validation, streaming, cancellation, and deadlines. The
+request-rate limits, daily token quotas, validation, streaming, cancellation, and deadlines. The
 inference server loads the model and generates tokens.
 
 Phase 1 is in progress with one backend. Model listing, JSON and streaming chat,
@@ -49,8 +49,8 @@ flowchart LR
     end
     Public -->|key lookup on cache miss and final usage write| PG[(Postgres)]
     Admin -->|create or revoke key| PG
-    Public -->|consume request credit| Redis[(Redis)]
-    Public -->|inference and health probes| Backend[Inference server]
+    Public -->|request credits and token reservations| Redis[(Redis)]
+    Public -->|prompt counting, inference, and health probes| Backend[Inference server]
 ```
 
 Models and chat require an API key. Health and readiness are public. The optional

@@ -3,6 +3,72 @@
 GLM-Edge-4B-Chat Q6_K is the primary model. Normal local inference now uses
 CUDA. Earlier CPU gateway measurements remain historical evidence.
 
+## Authenticated Compose baseline on October 25, 2026
+
+This is the first recorded baseline with authentication caching, Redis request
+limits, daily token reservations, Postgres usage recording, and Prometheus
+metrics enabled. The gateway used its application defaults. Its dedicated key
+allowed 6,000 requests/minute and 1,000,000 tokens/day, so this workload did not
+hit admission limits. Grace was zero.
+
+| Measurement | Direct CUDA backend | Authenticated gateway |
+| --- | ---: | ---: |
+| Successful measured streams | 50/50 | 50/50 |
+| Median first-content latency | 18.50 ms | 27.73 ms |
+| p95 first-content latency | 21.45 ms | 29.56 ms |
+| Median total response time | 1.745 s | 1.751 s |
+| Median backend decode speed | 56.75 tokens/s | 56.84 tokens/s |
+| Completion tokens per stream | 99 | 99 |
+
+Both paths sent the same repeated prompt, `temperature: 0`, `max_tokens: 128`,
+and `stream_options.include_usage: true`. Each excluded one warm-up and then
+ran 50 sequential streams; paths alternated and reversed order after each pair.
+All streams ended with `[DONE]` and `finish_reason: stop`. p95 uses nearest rank.
+The client measures the first nonempty content delta, whereas gateway TTFT
+metrics measure the first complete nonterminal SSE event, which may be role-only.
+Client duration ends at `[DONE]`, before final persistence necessarily completes.
+
+The backend used the pinned b11681 CUDA image, GLM-Edge-4B-Chat Q6_K, a 2048-token
+context, six CPU threads, one parallel slot, and full GPU offload on the 6 GiB
+RTX 3060 Laptop GPU. The CPU governor was `powersave`. The
+local gateway revision, exact image IDs, model checksum, driver, kernel, GPU
+samples, and limits are recorded in the [run metadata](../bench/results/2026-10-25-authenticated-gpu.metadata.json).
+[Raw results](../bench/results/2026-10-25-authenticated-gpu.json) contain every sample.
+
+The measured gateway median first-content latency was 9.22 ms above direct
+inference. This includes authentication, Redis admission, two backend
+prompt-counting calls, observation, and different network paths. Direct calls
+used the container bridge IP; gateway calls used its published loopback port.
+It does not isolate proxy CPU overhead. The repeated prompt keeps prefix state
+warm, and laptop thermal state and background desktop load were not controlled.
+This establishes neither cold-cache performance nor concurrent capacity.
+
+All 51 gateway requests, including warm-up, produced completed usage rows.
+Their 5,916 total tokens exactly matched Redis quota charging. The TTFT sample
+count increased by 51 and active streams returned to zero. Public request counts
+also included health/readiness probes during the run.
+
+To reproduce on the prepared learning stack, use its private benchmark key file
+(created locally, never committed). For another deployment, create a key with
+the limits above using the [setup guide](manual-testing.md#compose-deployment),
+set `API_KEY`, and substitute its URLs. The bridge-IP command below assumes
+Linux and the learning container name:
+
+```sh
+source deploy/.env.benchmark
+DIRECT_URL="http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' llmgate-learning-backend-1):8080"
+python3 bench/single_stream.py \
+  --model glm-edge-4b-chat \
+  --direct-url "$DIRECT_URL" \
+  --gateway-url http://127.0.0.1:18080 \
+  --requests-per-path 50 > /tmp/llmgate-authenticated-baseline.json
+```
+
+The [separate fault-check evidence](../bench/results/2026-10-25-phase1-verification.json)
+records the operational checks. One prefill cancellation used an 868-token
+uncached prompt and released the backend slot about 0.44 seconds after client
+disconnection. That is one observation, not a cancellation-latency distribution.
+
 ## Local CPU and GPU check on October 16, 2026
 
 The RTX 3060 Laptop GPU can run this model with full layer offload. We used

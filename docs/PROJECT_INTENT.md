@@ -107,7 +107,7 @@ remain public. A local command creates keys. An opt-in loopback admin listener c
 separate operator token. Revocation persists in the same store and signals
 active requests for that key through the shared authenticator. Public routes never expose admin
 operations. Both servers share bounded startup and graceful shutdown ownership.
-Existing baselines predate authentication.
+The authenticated CUDA baseline is recorded in [benchmarks](benchmarks.md).
 
 Authentication caches successful identities for a fixed lifetime. Admin revocation
 invalidates local entries; unexpired entries work during database outages, while
@@ -115,17 +115,19 @@ misses and expired entries fail closed. Redis now enforces per-key request rates
 using an atomic token bucket. Models and chat share each key's bucket; exhaustion
 returns `429` with retry guidance, and Redis errors fail closed with `503`.
 Compose now defines the gateway, pinned CUDA backend, Postgres, Redis, and
-startup migrations with health checks and persistent storage. Container runtime
-verification remains outstanding. Validated
+startup migrations with health checks and persistent storage. Container inference,
+CUDA model loading, persistence, dependency outages, cancellation, backend failures,
+and concurrent shutdown have been exercised. Forced shutdown can lose final usage
+rows; Postgres-outage row loss also follows the best-effort policy. Validated
 inference attempts now produce bounded, best-effort Postgres usage records with
 timings, outcomes, backend token counts when present, and separate observed SSE
 chunk counts. Daily input/output quotas now use exact prompt counting on the
 pinned text backend, atomic Redis reservations, and a capped backend response.
 Grace defaults to zero. Missing or interrupted usage retains the allowance
 without inventing token counts. Initial request-count, duration, TTFT, and active-stream
-metrics are exposed at `/v1/metrics`. Next, verify the complete container deployment,
-measure the authenticated gateway, and finish the remaining real-backend failure
-checks before closing Phase 1.
+metrics are exposed at `/v1/metrics`. The authenticated GPU baseline and operational
+evidence are recorded. Review forced-shutdown accounting loss before closing
+Phase 1; later-phase routing and overload protection have not started.
 See [decisions](decisions.md) for authentication and revocation boundaries.
 
 **Learn**

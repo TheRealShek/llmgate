@@ -17,6 +17,7 @@ PAYLOAD = {
         "content": "Explain why a gateway needs timeouts in three short sentences.",
     }],
     "stream": True,
+    "stream_options": {"include_usage": True},
     "max_tokens": 128,
     "temperature": 0,
 }
@@ -116,11 +117,21 @@ def main():
         "--requests-per-path", type=int, default=50,
         help="Measured requests per path, excluding one warm-up (default: 50)",
     )
+    parser.add_argument(
+        "--direct-url", default=TARGETS[0][1],
+        help="Direct backend base URL (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--gateway-url", default=TARGETS[1][1],
+        help="Gateway base URL (default: %(default)s)",
+    )
     args = parser.parse_args()
     if args.requests_per_path < 1:
         parser.error("--requests-per-path must be positive")
     PAYLOAD["model"] = args.model
-    targets = TARGETS[:1] if args.direct_only else TARGETS
+    targets = [("direct", args.direct_url.rstrip("/"))]
+    if not args.direct_only:
+        targets.append(("gateway", args.gateway_url.rstrip("/")))
     api_key = os.environ.get("API_KEY")
     if not args.direct_only and not api_key:
         parser.error("Set API_KEY to an active gateway key before benchmarking")
@@ -155,7 +166,8 @@ def main():
     report = {
         "payload": PAYLOAD,
         "concurrency": 1,
-        "gateway_authentication": None if args.direct_only else "direct_postgres_lookup",
+        "gateway_authentication": None if args.direct_only else "bearer_api_key",
+        "targets": dict(targets),
         "warmups_per_path": 1,
         "results": results,
         "summaries": [summarize(name, results) for name, _ in targets],

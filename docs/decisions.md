@@ -641,7 +641,7 @@ Admin HTTP remains loopback inside the gateway container. No wildcard admin
 binding or privileged gateway is needed. See [Compose GPU support](https://docs.docker.com/compose/how-tos/gpu-support/)
 and [dependency conditions](https://docs.docker.com/reference/compose-file/services/).
 
-Configuration resolution and image availability were checked without daemon
-access. Container image builds, GPU device injection, and full Compose startup
-remain unverified until Docker daemon access is available. Host-process GPU
-checks do not establish those container properties.
+The [deployment guide](manual-testing.md#compose-deployment) owns host
+prerequisites, setup commands, and the current verification limits. A GPU
+visibility smoke check does not establish inference in the pinned backend image
+or successful full-stack startup.

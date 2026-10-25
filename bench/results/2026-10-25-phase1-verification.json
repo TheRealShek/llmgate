@@ -1,0 +1,265 @@
+{
+  "gateway_source": "a718616940420f6f1c4fc11026a1e4a8ac3ae243",
+  "tests": [
+    {
+      "name": "prefill_cancellation",
+      "result": "passed",
+      "seconds": 0.833,
+      "prompt_tokens": 868,
+      "disconnect_to_release_s": 0.4418140210000274,
+      "usage": {
+        "request_id": "WZMKMEDK4QSBAMIJRTYFG6GLWZ",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "streaming": true,
+        "status": "canceled",
+        "http_status": 200,
+        "ttft_ms": null,
+        "total_ms": 150.479179
+      },
+      "backend_evidence": [
+        "129.43.199.871 I slot launch_slot_: id  0 | task 740 | processing task, is_child = 0",
+        "129.43.625.258 W srv          stop: cancel task, id_task = 740",
+        "129.43.641.531 I slot      release: id  0 | task 740 | stop processing: n_tokens = 871, truncated = 0"
+      ],
+      "within_one_second": true
+    },
+    {
+      "name": "backend_never_sends_headers",
+      "result": "passed",
+      "seconds": 2.282,
+      "http_status": 504,
+      "duration_s": 2.113976784999977,
+      "usage": {
+        "request_id": "DRKAMZ6B4KT4KNP5TXRMKW7H76",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "streaming": true,
+        "status": "failed",
+        "http_status": 504,
+        "ttft_ms": null,
+        "total_ms": 2108.353048
+      }
+    },
+    {
+      "name": "paused_real_backend",
+      "result": "passed",
+      "seconds": 2.386,
+      "http_status": 504,
+      "duration_s": 2.225451652000629,
+      "usage": {
+        "request_id": "VOFJOMI457CVBLPUSRXUQ7VQ3A",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "streaming": true,
+        "status": "failed",
+        "http_status": 504,
+        "ttft_ms": null,
+        "total_ms": 2108.138335
+      }
+    },
+    {
+      "name": "stream_idle_timeout",
+      "result": "passed",
+      "seconds": 2.339,
+      "usage": {
+        "request_id": "HTOYJAABYY4NQNXB23M2PSCATA",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "streaming": true,
+        "status": "interrupted",
+        "http_status": 200,
+        "ttft_ms": 152.163396,
+        "total_ms": 2153.193912
+      },
+      "terminal_done": false
+    },
+    {
+      "name": "real_backend_killed_midstream",
+      "result": "passed",
+      "seconds": 6.776,
+      "usage": {
+        "request_id": "LV6563XCNWCBF44M7SWASYAMEU",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "streaming": true,
+        "status": "interrupted",
+        "http_status": 200,
+        "ttft_ms": 180.174645,
+        "total_ms": 286.451017
+      },
+      "terminal_done": false
+    },
+    {
+      "name": "redis_outage",
+      "result": "passed",
+      "seconds": 3.585,
+      "http_status": 503,
+      "duration_s": 0.4034325480006373,
+      "probes_and_metrics_available": true
+    },
+    {
+      "name": "postgres_cache_outage",
+      "result": "passed",
+      "seconds": 6.804,
+      "cached_http": 200,
+      "miss_http": 503,
+      "expired_http": 503
+    },
+    {
+      "name": "usage_write_outage",
+      "result": "passed",
+      "seconds": 5.694,
+      "client_completed": true,
+      "usage_write_failure_logged": true,
+      "usage_rows": 0,
+      "quota_charge": 242,
+      "documented_limitation": "best-effort usage insert is lost during Postgres outage"
+    },
+    {
+      "name": "different_key_rate_limits",
+      "result": "passed",
+      "seconds": 0.631,
+      "low": [
+        200,
+        200,
+        429,
+        429,
+        429
+      ],
+      "high": [
+        200,
+        200,
+        200,
+        200,
+        200
+      ]
+    },
+    {
+      "name": "multi_request_graceful_shutdown",
+      "result": "passed",
+      "seconds": 3.043,
+      "force": false,
+      "exit_code": "0",
+      "elapsed_s": 2.2035647769989737,
+      "clients": [
+        {
+          "code": 200,
+          "done": true
+        },
+        {
+          "code": 200,
+          "done": true
+        },
+        {
+          "code": 200,
+          "done": true
+        }
+      ],
+      "usage_rows": 3,
+      "usage_statuses": [
+        "completed",
+        "completed",
+        "completed"
+      ]
+    },
+    {
+      "name": "container_restart_persistence",
+      "result": "passed",
+      "seconds": 3.606,
+      "key_id": 47,
+      "usage_persisted": true,
+      "quota_persisted": true,
+      "rate_state_persisted": true
+    },
+    {
+      "name": "cached_inference_during_postgres_outage",
+      "result": "passed",
+      "seconds": 4.315,
+      "http_status": 200,
+      "usage_rows": 0,
+      "quota_charge": 33,
+      "backend_total_tokens": 33,
+      "write_failure_logged": true
+    },
+    {
+      "name": "redis_outage_after_admission",
+      "result": "passed",
+      "seconds": 5.296,
+      "completed_during_outage": true,
+      "usage": {
+        "request_id": "W7NHTASP62THVWZYXQVNE52OX4",
+        "prompt_tokens": 25,
+        "completion_tokens": 96,
+        "streaming": true,
+        "status": "completed",
+        "http_status": 200,
+        "ttft_ms": 211.042073,
+        "total_ms": 1864.844388
+      },
+      "reservation_retained": true,
+      "settlement_failure_logged": true
+    },
+    {
+      "name": "cache_expiry_during_active_inference",
+      "result": "passed",
+      "seconds": 7.739,
+      "new_request_after_cache_expiry_http": 503,
+      "already_admitted_stream_completed": true,
+      "usage": {
+        "request_id": "M2AL3DX3HD43MZMXPMX2AHMT63",
+        "prompt_tokens": 25,
+        "completion_tokens": 384,
+        "streaming": true,
+        "status": "completed",
+        "http_status": 200,
+        "ttft_ms": 192.284772,
+        "total_ms": 6913.472825
+      }
+    },
+    {
+      "name": "multi_request_forced_shutdown",
+      "result": "accounting_loss",
+      "seconds": 3.888,
+      "force": true,
+      "exit_code": "1",
+      "elapsed_s": 3.1110855839997384,
+      "clients": [
+        {
+          "error": "RemoteDisconnected"
+        },
+        {
+          "error": "IncompleteRead"
+        },
+        {
+          "error": "RemoteDisconnected"
+        }
+      ],
+      "usage_rows": 0,
+      "usage_statuses": [],
+      "header_timeout_s": 10,
+      "deadline_check": "passed",
+      "expected_usage_rows": 3,
+      "missing_usage_rows": 3
+    }
+  ],
+  "notes": [
+    "Separate verification gateway reused the built image, real CUDA backend, and isolated Postgres database and Redis DB 15.",
+    "Header and idle deadlines were 2s, auth cache TTL 3s, usage-write deadline 500ms, shutdown deadline 3s.",
+    "The nonresponding backend checks used both a controlled HTTP peer and a paused real CUDA container after prompt counting.",
+    "Initial stream fixture framing and Redis-key lookup mistakes were corrected before accepting these results.",
+    "The forced-shutdown recheck used a 10s header timeout and 3s shutdown deadline so all three admitted requests remained active until the forced close."
+  ],
+  "regression_suite": {
+    "command": "go test -race -count=1 -timeout=180s ./...",
+    "result": "passed",
+    "postgres": "18.6",
+    "redis": "8.10.2",
+    "gpu_backend": "b11681 CUDA on RTX 3060"
+  },
+  "limitations_observed": [
+    "Postgres outage allowed cached inference but its best-effort usage insert was lost.",
+    "Forced shutdown canceled three active requests at its 3s deadline but persisted none of their usage rows.",
+    "An already admitted stream survived a Redis outage; failed settlement conservatively retained the reservation."
+  ]
+}

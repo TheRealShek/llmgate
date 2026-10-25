@@ -6,12 +6,49 @@ labeled with the model used at the time.
 
 ## Compose deployment
 
-Run from the repository root on an NVIDIA GPU host with Docker daemon access,
-Compose 2.30 or later, and NVIDIA Container Toolkit configured for Docker.
-Check `nvidia-smi` and `docker info` before startup. The
-[Docker GPU guide](https://docs.docker.com/compose/how-tos/gpu-support/) covers
-runtime prerequisites. The gateway is built inside Docker, so host Go is only
-needed for development and automated tests.
+Run from the repository root. The host needs:
+
+- An NVIDIA GPU and working host driver (`nvidia-smi` must succeed).
+- Docker Engine, Compose 2.30 or later, and Buildx for the gateway image build.
+- NVIDIA Container Toolkit configured for Docker and permission to use the daemon.
+
+Host Go and CUDA development tools are not required for this Compose deployment.
+Go is needed for host development and automated tests.
+
+On Arch Linux, install the container tools and configure NVIDIA support:
+
+```sh
+sudo pacman -S --needed docker docker-compose docker-buildx nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+sudo usermod -aG docker "$USER"
+```
+
+The runtime command updates `/etc/docker/daemon.json`. Restarting Docker can
+interrupt existing containers. Docker-group membership grants root-equivalent
+access. Log out and back in, then reopen terminal and agent applications so they
+inherit the group. Alternatively, `newgrp docker` opens a child shell with access;
+it does not update applications already running. A permission error without
+`sudo`, while root can run Docker, indicates an access problem rather than a
+failed NVIDIA setup.
+
+Verify the daemon and GPU visibility:
+
+```sh
+docker info --format '{{.ServerVersion}}'
+docker compose version
+docker buildx version
+docker run --rm --runtime=nvidia --gpus all ubuntu:24.04 nvidia-smi
+```
+
+The last command downloads Ubuntu if missing and removes the test container on
+exit. For a check without downloads, add `--pull=never`, choose a compatible
+image from `docker image ls`, and use `--entrypoint nvidia-smi` if it has a server
+entrypoint. No large CUDA image is needed just to check GPU visibility. Expect
+the host GPU and driver in the output; this does not establish model inference.
+See [NVIDIA setup](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html#configuring-docker),
+[Docker access](https://docs.docker.com/engine/install/linux-postinstall/), and
+[Compose GPU support](https://docs.docker.com/compose/how-tos/gpu-support/).
 
 Download and verify the GGUF using the model commands in
 [host setup](#1-prepare-the-model-and-start-the-backend-in-terminal-one).
@@ -90,10 +127,28 @@ restart a running container. Container logs rotate at 10 MiB with three files
 per service. Preserve Postgres and Redis volumes, and the host
 model, across restarts. No volume deletion is needed for routine startup.
 
-Configuration, image references, and static gateway compilation were checked.
-Docker daemon access was unavailable during this change, so actual image
-builds, GPU injection, complete startup, and container shutdown remain unverified.
-Host-process GPU tests below do not substitute for those checks.
+The gateway image build, migrations, full startup, all four service health
+checks, authenticated JSON/SSE inference, and metrics scraping passed on the
+RTX 3060. The pinned CUDA backend loaded the model and used the GPU; the
+gateway ran as UID 10001. Keys, usage rows, request buckets, and quota state
+survived clean Postgres/Redis container restarts.
+
+[Recorded verification](../bench/results/2026-10-25-phase1-verification.json)
+covers prefill cancellation, a killed GPU backend mid-stream, a paused backend,
+controlled header/stream stalls, dependency outages, different per-key rates,
+and three concurrent requests during both draining and forced shutdown.
+The separate verification gateway used 2s header/idle deadlines, a 3s auth cache
+TTL and shutdown deadline, and a 500ms usage-write deadline. The forced-shutdown
+recheck used a 10s header deadline so all three requests were still active when
+the 3s shutdown deadline expired. These shorten the checks; they do not change
+deployment defaults.
+
+Two durability limits remain: Postgres outages can lose final usage rows while
+cached-key inference succeeds, and forced shutdown can exit before every final
+row is written. The forced-shutdown recheck persisted none of the three active requests' rows.
+These follow the agreed best-effort accounting policy; successful inference
+is not a guarantee of a durable usage row. The [benchmark](benchmarks.md)
+records the authenticated baseline separately.
 
 For host development, use three terminals for backend logs, gateway logs, and
 client output. The host backend listens on localhost port 8081 and the gateway
@@ -362,8 +417,12 @@ The gateway logged `completed: false` for the interrupted request. This means
 its handler did not return normally. It is not a cancellation flag and does not
 establish that model computation stopped without backend evidence.
 
-This check covers disconnection during decode. Disconnection during prefill
-still needs a separate check.
+The example above covers disconnection during decode. The recorded GPU
+verification also used a long, uncached prompt, waited for the backend to launch
+its task, and disconnected before the first complete SSE event. It checked the
+canceled usage row with unknown counts and no TTFT, plus the matching backend
+cancellation and slot-release logs. See the
+[prefill evidence](../bench/results/2026-10-25-phase1-verification.json).
 
 ## 7. Test an unavailable backend
 

@@ -3,6 +3,98 @@
 GLM-Edge-4B-Chat Q6_K is the primary model. Normal local inference now uses
 CUDA. Earlier CPU gateway measurements remain historical evidence.
 
+## Final authenticated baseline on October 25, 2026
+
+This run includes authentication caching, per-key request limits, exact prompt
+counting, daily quotas, durable Redis admission/final handoffs, batched Postgres
+delivery, recovery workers, and Prometheus metrics. Redis uses AOF `always`,
+`noeviction`, and a same-connection `WAITAOF` barrier for accounting writes.
+
+| Measurement | Direct CUDA backend | Authenticated gateway |
+| --- | ---: | ---: |
+| Successful measured streams | 50/50 | 50/50 |
+| Median first-content latency | 18.32 ms | 34.85 ms |
+| p95 first-content latency | 18.63 ms | 49.40 ms |
+| Median total response time | 1.730 s | 1.743 s |
+| Median backend decode speed | 57.24 tokens/s | 57.44 tokens/s |
+| Completion tokens per stream | 99 | 99 |
+
+Each path excluded one warm-up, then ran 50 sequential streams with alternating,
+reversed pair order. The repeated prompt asked for three sentences about gateway
+timeouts, using temperature zero, `max_tokens: 128`, and final streaming usage.
+All measured streams ended with `[DONE]` and `finish_reason: stop`. p95 uses
+nearest rank. First-content latency measures the first nonempty content delta;
+the gateway's TTFT metric can instead observe an earlier role-only event.
+
+The pinned b11681 CUDA backend used GLM-Edge-4B-Chat Q6_K, a 2048-token context,
+six CPU threads, one parallel slot, and all GPU layers on the 6 GiB RTX 3060
+Laptop GPU. The CPU governor was `powersave`. The verification gateway used the
+application defaults and its own Compose Postgres/Redis volumes, while sharing
+the already-loaded learning backend. Its dedicated key allowed 6,000 requests
+per minute and 1,000,000 tokens per day; quota grace was zero. See the
+[raw samples](../bench/results/2026-10-25-durable-accounting-gpu.json) and
+[metadata](../bench/results/2026-10-25-durable-accounting-gpu.metadata.json) for
+source fingerprint, exact image IDs, model checksum, settings, and GPU telemetry.
+The source was uncommitted; the metadata identifies that explicitly.
+
+All 51 gateway requests, including warm-up, produced completed, non-recovered
+usage rows. Their 5,916 input/output tokens exactly matched Redis charging.
+TTFT samples increased by 51, active streams returned to zero, and all durable
+queue slots were delivered and released. Public request counts include probes.
+Client response duration ends at `[DONE]`; final durable handoff and database
+delivery were checked separately afterward.
+
+Median first-content latency was 16.53 ms above the direct path. This combines
+prompt counting, Redis admission and disk persistence, proxying, and different
+network paths. Direct calls used the container bridge IP; gateway calls used a
+published loopback port. It does not isolate disk-sync or proxy CPU cost. Warm
+prefix state, uncontrolled laptop thermals, and desktop activity limit the
+comparison. This is a single-stream baseline, not a concurrent-capacity claim.
+
+To reproduce, prepare the [Compose stack](manual-testing.md#compose-deployment),
+create a private key with the limits above, and export `API_KEY`. With a Linux
+Docker bridge backend:
+
+```sh
+DIRECT_URL="http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' llmgate-learning-backend-1):8080"
+python3 bench/single_stream.py \
+  --model glm-edge-4b-chat \
+  --direct-url "$DIRECT_URL" \
+  --gateway-url http://127.0.0.1:8080 \
+  --requests-per-path 50 > /tmp/llmgate-final-baseline.json
+```
+
+Substitute your backend container and gateway URL. The recorded run used gateway
+port 18091 in a disposable verification deployment. Never commit the key.
+
+### Final fault and durability checks
+
+The [verification results](../bench/results/2026-10-25-phase1-final-verification.json)
+record 14 passing deployed checks: JSON/SSE completion, decoding and prefill
+disconnects, different per-key rates, Redis/Postgres outages, a killed GPU backend
+mid-stream, gateway SIGKILL recovery, graceful and forced shutdown with three
+active requests, forced shutdown during a Postgres outage, never-responding and
+idle backends, and active admin revocation.
+
+One 867-token uncached prefill request released the backend about 0.394 seconds
+after disconnect. A killed gateway's unfinished attempt became interrupted with
+unknown counts and `recovered = true` after its remaining ownership lease expired,
+about 23.73 seconds in that check. These are individual observations, not latency
+distributions. Three requests drained normally in 1.907 seconds. Forced shutdown
+took 3.275 seconds with healthy storage and 18.306 seconds with frozen Postgres;
+the latter includes the driver's failed-connection cleanup. Both forced cases
+saved all three canceled outcomes, including replay after Postgres recovery.
+
+Separate disposable-storage checks passed unsafe-fsync rejection, final-slot
+writes under memory pressure, and Redis SIGKILL/restart replay. A real ENOSPC
+check used a 4 MiB tmpfs with a 3 MiB filler: 61 admissions received disk
+acknowledgment before Redis stopped accepting writes. All 61 survived restart
+on the same filesystem. This proves the tested intact-disk failure path, not
+survival of disk loss or stale-replica promotion. Focused race tests also cover
+fenced ownership, duplicate delivery, settlement retry, UTC rollover, capacity,
+AOF admission limits, and bounded retention. Reproduction commands live in the
+[accounting checks](manual-testing.md#persistent-inference-usage).
+
 ## Authenticated Compose baseline on October 25, 2026 (before durable admission)
 
 This is the first recorded baseline with authentication caching, Redis request
@@ -10,8 +102,9 @@ limits, daily token reservations, Postgres usage recording, and Prometheus
 metrics enabled. The gateway used its application defaults. Its dedicated key
 allowed 6,000 requests/minute and 1,000,000 tokens/day, so this workload did not
 hit admission limits. Grace was zero. This run predates synchronous Postgres
-admission and does not measure the current admission write. Rerun the baseline
-after the remaining accounting middleware is implemented.
+admission and the durable Redis accounting queue. It does not measure the current
+AOF-always handoff or batch-delivery path. The final baseline above supersedes
+this run for the current middleware.
 
 | Measurement | Direct CUDA backend | Authenticated gateway |
 | --- | ---: | ---: |

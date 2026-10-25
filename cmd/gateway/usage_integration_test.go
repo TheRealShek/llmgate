@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"errors"
 	"io"
 	"log/slog"
@@ -17,19 +18,26 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/therealshek/llmgate/internal/accounting"
 	"github.com/therealshek/llmgate/internal/auth"
 	"github.com/therealshek/llmgate/internal/gateway"
 	"github.com/therealshek/llmgate/internal/proxy"
+	"github.com/therealshek/llmgate/internal/ratelimit"
 	"github.com/therealshek/llmgate/internal/requestlog"
 	"github.com/therealshek/llmgate/internal/store"
 	"github.com/therealshek/llmgate/internal/usage"
 )
 
-// TestInferenceUsageRecords checks actual proxy outcomes persist even after cancellation or an HTTP copy abort.
-func TestInferenceUsageRecords(t *testing.T) {
-	pool, _ := authenticationTestPool(t)
+type accountingBatchFunc func(context.Context, []store.AccountingRecord) error
 
-	for _, name := range []string{"000002_usage.up.sql", "000003_inference_admissions.up.sql"} {
+func (f accountingBatchFunc) RecordBatch(ctx context.Context, records []store.AccountingRecord) error {
+	return f(ctx, records)
+}
+
+func migrateUsage(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+
+	for _, name := range []string{"000002_usage.up.sql", "000003_inference_admissions.up.sql", "000004_recovered_usage.up.sql"} {
 		migration, err := os.ReadFile("../../migrations/" + name)
 		if err != nil {
 			t.Fatal(err)
@@ -39,6 +47,159 @@ func TestInferenceUsageRecords(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+}
+
+// TestDurableAccountingBatches checks inference avoids Postgres writes and replay survives lost commit replies and pool failure.
+func TestDurableAccountingBatches(t *testing.T) {
+	address := os.Getenv("LLMGATE_TEST_ACCOUNTING_REDIS_URL")
+	if address == "" {
+		t.Skip("set LLMGATE_TEST_ACCOUNTING_REDIS_URL to isolated AOF-always Redis")
+	}
+
+	pool, databaseURL := authenticationTestPool(t)
+	migrateUsage(t, pool)
+
+	client, err := ratelimit.OpenClient(t.Context(), address, ratelimit.ClientLimits{
+		MaxConns: 4, ConnectTimeout: time.Second, CommandTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(func() { _ = client.Close() })
+
+	options := accounting.Options{
+		Namespace: "llmgate:test:batch-flow:" + rand.Text(), MaxPending: 16, BatchSize: 8,
+		FlushInterval: 250 * time.Millisecond, Timeout: time.Second, LeaseTimeout: 6 * time.Second, MaxAOFBytes: 256 << 20, Retention: 30 * 24 * time.Hour, PruneInterval: time.Hour,
+	}
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+
+		for _, suffix := range []string{":records", ":ready", ":writer", ":healthy"} {
+			_ = client.Del(ctx, options.Namespace+suffix).Err()
+		}
+	})
+
+	usageStore := store.NewUsageStore(pool)
+	loseReply := false
+
+	queue, err := accounting.Open(t.Context(), client, accountingBatchFunc(func(ctx context.Context, records []store.AccountingRecord) error {
+		if err := usageStore.RecordBatch(ctx, records); err != nil {
+			return err
+		}
+
+		if loseReply && len(records) > 0 {
+			loseReply = false
+			return context.DeadlineExceeded
+		}
+
+		return nil
+	}), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	keys := store.NewKeyStore(pool)
+
+	_, secret, err := keys.CreateKey(t.Context(), store.CreateKeyParams{
+		Name: "batched", RequestsPerMin: 1000, TokensPerDay: 10000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	calls := 0
+	backend := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		_, _ = io.WriteString(w, `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`)
+	})
+	routes := gateway.NewHandler(gateway.HandlerOptions{
+		NonStreaming: backend, RequestLimits: testRequestLimits(), Quota: testTokenQuota(),
+		Authentication: auth.NewAuthenticator(keys, auth.Options{
+			LookupTimeout: time.Second, CacheTTL: time.Minute, CacheCapacity: 32,
+		}),
+		Usage: usage.NewRecorder(usage.Options{
+			Store: queue, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
+		}),
+		Limits: gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 128},
+	})
+	handler := requestlog.NewHandler(routes, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+
+	request := func(want int) {
+		t.Helper()
+
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
+		r.Header.Set("Authorization", "Bearer "+secret)
+		r.Header.Set("Content-Type", "application/json")
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+
+		if w.Code != want {
+			t.Fatal("unexpected response", w.Code, w.Body.String())
+		}
+	}
+	for range 16 {
+		request(200)
+	}
+
+	var count int
+	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM usage").Scan(&count); err != nil || count != 0 {
+		t.Fatal("request path wrote to Postgres before a batch", count, err)
+	}
+
+	loseReply = true
+
+	if _, err := queue.Flush(t.Context()); err == nil {
+		t.Fatal("lost commit reply not reported")
+	}
+
+	request(503)
+
+	if _, err := queue.Flush(t.Context()); err != nil {
+		t.Fatal("committed batch replay failed", err)
+	}
+
+	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM usage").Scan(&count); err != nil || count != 8 {
+		t.Fatal("replay duplicated records or exceeded batch size", count, err)
+	}
+
+	pool.Close()
+
+	if _, err := queue.Flush(t.Context()); err == nil {
+		t.Fatal("closed Postgres pool did not pause admission")
+	}
+
+	request(503)
+
+	if calls != 16 {
+		t.Fatal("paused accounting reached inference", calls)
+	}
+
+	reopened, err := pgxpool.New(t.Context(), databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(reopened.Close)
+
+	if _, err := accounting.Open(t.Context(), client, store.NewUsageStore(reopened), options); err != nil {
+		t.Fatal("replacement worker could not recover the backlog", err)
+	}
+
+	if err := reopened.QueryRow(t.Context(), `SELECT count(*) FROM usage u JOIN inference_admissions a
+	    ON a.request_id=u.request_id`).Scan(&count); err != nil || count != 16 {
+		t.Fatal("backlog recovery lost request identity or usage", count, err)
+	}
+}
+
+// TestInferenceUsageRecords checks actual proxy outcomes persist even after cancellation or an HTTP copy abort.
+func TestInferenceUsageRecords(t *testing.T) {
+	pool, _ := authenticationTestPool(t)
+
+	migrateUsage(t, pool)
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -92,7 +253,7 @@ func TestInferenceUsageRecords(t *testing.T) {
 		Authentication: authentication, RequestLimits: testRequestLimits(),
 		Quota: testTokenQuota(),
 		Usage: usage.NewRecorder(usage.Options{
-			Store: store.NewUsageStore(pool), Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
+			Store: directUsageStore{store.NewUsageStore(pool)}, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
 		}),
 		Limits: gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 128},
 	})
@@ -214,16 +375,7 @@ func TestInferenceUsageRecords(t *testing.T) {
 func TestAdmissionSurvivesDeliveryFailure(t *testing.T) {
 	pool, databaseURL := authenticationTestPool(t)
 
-	for _, name := range []string{"000002_usage.up.sql", "000003_inference_admissions.up.sql"} {
-		migration, err := os.ReadFile("../../migrations/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if _, err := pool.Exec(t.Context(), string(migration)); err != nil {
-			t.Fatal(err)
-		}
-	}
+	migrateUsage(t, pool)
 
 	keys := store.NewKeyStore(pool)
 
@@ -249,7 +401,7 @@ func TestAdmissionSurvivesDeliveryFailure(t *testing.T) {
 		NonStreaming: backend, Authentication: authentication, RequestLimits: testRequestLimits(),
 		Quota: testTokenQuota(), Limits: gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 128},
 		Usage: usage.NewRecorder(usage.Options{
-			Store: store.NewUsageStore(pool), Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
+			Store: directUsageStore{store.NewUsageStore(pool)}, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
 		}),
 	})
 	handler := requestlog.NewHandler(routes, slog.New(slog.NewJSONHandler(io.Discard, nil)))
@@ -296,7 +448,9 @@ func TestAdmissionSurvivesDeliveryFailure(t *testing.T) {
 // discardUsage keeps route, authentication, and logging tests independent of persistence.
 type discardUsage struct{}
 
-func (discardUsage) RecordAdmission(context.Context, store.Admission) error { return nil }
+func (discardUsage) RecordAdmission(context.Context, store.Admission, context.CancelFunc) error {
+	return nil
+}
 
 func (discardUsage) RecordUsage(context.Context, store.Usage) error { return nil }
 
@@ -310,16 +464,7 @@ func testUsageRecorder() *usage.Recorder {
 func TestForcedShutdownPersistsUsage(t *testing.T) {
 	pool, _ := authenticationTestPool(t)
 
-	for _, name := range []string{"000002_usage.up.sql", "000003_inference_admissions.up.sql"} {
-		migration, err := os.ReadFile("../../migrations/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if _, err := pool.Exec(t.Context(), string(migration)); err != nil {
-			t.Fatal(err)
-		}
-	}
+	migrateUsage(t, pool)
 
 	backendCanceled := make(chan struct{}, 3)
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -359,7 +504,7 @@ func TestForcedShutdownPersistsUsage(t *testing.T) {
 		}),
 		RequestLimits: testRequestLimits(), Quota: testTokenQuota(),
 		Usage: usage.NewRecorder(usage.Options{
-			Store: store.NewUsageStore(pool), Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
+			Store: directUsageStore{store.NewUsageStore(pool)}, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
 		}),
 		Limits: gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
@@ -461,4 +606,15 @@ func TestForcedShutdownPersistsUsage(t *testing.T) {
 			t.Fatal("backend request did not receive cancellation")
 		}
 	}
+}
+
+// directUsageStore isolates response-observation checks from the Redis transport.
+type directUsageStore struct{ *store.UsageStore }
+
+func (s directUsageStore) RecordAdmission(ctx context.Context, record store.Admission, _ context.CancelFunc) error {
+	return s.RecordBatch(ctx, []store.AccountingRecord{{Admission: record}})
+}
+
+func (f accountingBatchFunc) PruneAccounting(context.Context, time.Time, int) (int64, error) {
+	return 0, nil
 }

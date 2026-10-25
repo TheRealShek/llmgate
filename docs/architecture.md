@@ -3,8 +3,7 @@
 This page explains the implemented, single-backend gateway in Phase 1. Start
 with the [system map](../README.md#architecture), then use this page to
 trace a request and find the package responsible for each step. The
-[project intent](PROJECT_INTENT.md) describes planned work. Queues, multi-backend
-routing remain later-phase work.
+[project intent](PROJECT_INTENT.md) describes planned work. Backend admission queues and multi-backend routing remain later-phase work.
 
 ## One chat request
 
@@ -17,18 +16,23 @@ request ID before metrics and routing, then logs completion when the inner handl
 flowchart TD
     subgraph Logged[Request logging surrounds the public handler]
         direction TD
-        Metrics[Observe public request] --> Routes[Match method and path]
+        Metrics[Observe public request] --> Storage[Check accounting storage guard]
+        Storage --> Routes[Match method and path]
         Routes --> Auth[Authenticate key]
         Auth -->|identity accepted| Rate[Check request credit]
         Rate -->|admitted and backend configured| Chat[Validate bounded chat body]
         Chat -->|supported text chat| Quota[Count input and reserve token allowance]
-        Quota -->|capped request| Usage[Commit admission and observe the response]
+        Quota -->|capped request| Usage[Durably queue admission and observe response]
         Usage -->|stream false or omitted| JSON[JSON proxy]
         Usage -->|stream true| SSE[Streaming proxy]
-        JSON -.->|after proxy returns or aborts| Finalize[Settle token allowance, then insert usage]
+        JSON -.->|after proxy returns or aborts| Finalize[Durably queue final usage, then settle tokens]
         SSE -.->|after proxy returns or aborts| Finalize
     end
 ```
+
+A cached background storage check runs before routing. Unsafe accounting
+storage rejects models and chat before authentication or rate-limit writes;
+probes and metrics still reach their handlers.
 
 Authentication requires one Bearer credential. A successful lookup registers
 the request for local revocation and adds the key identity and limits to its
@@ -56,18 +60,16 @@ and request ID, and forwards the request. The backend generates the response;
 the proxy copies its status, headers, and body to the client. Responses travel
 back through the same HTTP handler call, not through a second admission check.
 
-Validated chat commits an `inference_admissions` row before calling the selected
-proxy. It contains request identity, backend/model metadata, and the Redis
+Validated chat hands admission to the shared Redis queue before calling the
+selected proxy. It records identity, backend/model metadata, and the Redis
 reservation ID, original UTC day, and allowance. `usage.Recorder.Observe` uses a
-client-cancelable deadline and a synchronous Postgres transaction. Failure
-returns `503` and attempts to refund the unused token allowance. Models do not
-use this admission gate. A successful commit prepares the usage observation.
+client-cancelable deadline. Queue failure returns `503` and attempts to refund the
+unused allowance. Successful disk acknowledgment prepares response observation.
 Its writer observes only bytes accepted by the client-facing writer and preserves
-flushes. The chat handler owns deferred cleanup: end proxy metrics, classify the
-observed outcome, settle tokens, then attempt one bounded usage insert. This also
-runs on disconnect or proxy abort, without swallowing the original panic. It records the request ID, key, backend, requested model,
-HTTP status, outcome, timings, and observed backend token counts. The row contains
-no prompt or response text. Models and pre-inference rejections do not create rows.
+flushes. The chat handler ends proxy metrics, classifies the outcome, durably
+hands off final usage, then settles quota. Failed final handoff retains the charge.
+This cleanup also runs on disconnect or proxy abort without swallowing the panic.
+There are no prompt/response bodies or credentials in accounting records.
 
 Other routes take shorter paths. Models authenticate and consume a credit but
 skip chat validation. Liveness checks only the process. Readiness makes a fresh
@@ -89,8 +91,9 @@ below connects the handlers for one streaming request.
 | [`internal/quota`](../internal/quota/limiter.go) | Exact backend prompt counting, atomic daily reservations, output caps, and settlement. | Backend enforces generation limits; Redis owns shared budget state. |
 | [`internal/proxy`](../internal/proxy/forward.go) | Upstream HTTP forwarding, credential removal, JSON deadlines, and streaming flushes and idle cancellation. | `gateway` selects response mode; backend generates tokens. |
 | [`internal/backend`](../internal/backend/readiness.go) | On-demand backend readiness probes. | No periodic health registry or backend selection yet. |
-| [`internal/usage`](../internal/usage/recorder.go) | Durable admission, bounded JSON/SSE observation, and one final usage-write attempt. | Returns the observed outcome and writes usage when called; `gateway` owns metrics and quota finalization. |
-| [`internal/store`](../internal/store/usage.go) | Postgres pool setup, key lifecycle, admission commits, and usage insertion. | Callers own pool lifetime and operation deadlines. |
+| [`internal/usage`](../internal/usage/recorder.go) | Bounded JSON/SSE observation and durable admission/final handoffs. | Returns the observed outcome and writes usage when called; `gateway` owns metrics and quota finalization. |
+| [`internal/accounting`](../internal/accounting/queue.go) | Shared durable Redis slots, owner fencing, recovery, settlement replay, and retention. | Postgres and quota settlement finish before Redis acknowledgment; no inference body is retained. |
+| [`internal/store`](../internal/store/usage.go) | Postgres pool setup, key lifecycle, and atomic accounting batches. | Callers own pool lifetime and operation deadlines. |
 | [`internal/admin`](../internal/admin/handler.go) | Operator-token authentication and private key-management routes. | Creation calls `store`; revocation calls the shared authenticator. |
 | [`internal/metrics`](../internal/metrics/metrics.go) | Private Prometheus registry, bounded key labels, request observations, TTFT, active streams, and scraping. | Authentication tags identity; the usage observer supplies streaming events. Scraping reads no external dependencies. |
 | [`internal/requestlog`](../internal/requestlog/handler.go) | Request IDs and start/finish logs around handlers. | Normal handler return does not establish successful inference or delivery. |
@@ -103,6 +106,7 @@ For `POST /v1/chat/completions` with `stream: true`, follow these entry points:
 1. [`run`](../cmd/gateway/run.go) constructs dependencies and assembles handlers.
 2. [`requestlog.NewHandler`](../internal/requestlog/handler.go) surrounds
    [`metrics.Metrics.Observe`](../internal/metrics/metrics.go) and
+   [`accounting.Queue.Protect`](../internal/accounting/storage.go), then
    [`gateway.NewHandler`](../internal/gateway/handler.go), which matches the route.
 3. [`auth.handler.ServeHTTP`](../internal/auth/handler.go) authenticates and
    registers the request through [`lookupAndRegister`](../internal/auth/active.go).
@@ -112,7 +116,7 @@ For `POST /v1/chat/completions` with `stream: true`, follow these entry points:
 5. [`chatHandler.ServeHTTP`](../internal/gateway/chat.go) validates the body and
    selects the response mode. [`Limiter.Admit`](../internal/quota/limiter.go) counts
    input and reserves output. [`Recorder.Observe`](../internal/usage/recorder.go)
-   commits admission through [`RecordAdmission`](../internal/store/admission.go)
+   hands admission to [`accounting.Queue`](../internal/accounting/queue.go)
    before preparing the response observer. The handler supplies the first-data
    notification for metrics, and starts proxy metrics.
 6. [`streamHandler.ServeHTTP`](../internal/proxy/stream.go) adds idle cancellation;
@@ -122,9 +126,10 @@ For `POST /v1/chat/completions` with `stream: true`, follow these entry points:
    [`NewNonStreamingHandler`](../internal/proxy/nonstream.go) and a total deadline.
 7. On normal return or panic unwinding, the chat handler releases the active-stream
    gauge and gets the outcome from [`Observation.Finish`](../internal/usage/recorder.go).
-   It settles the permit through [`Permit.Finish`](../internal/quota/limiter.go),
-   then calls [`Recorder.Write`](../internal/usage/recorder.go) for the bounded
-   Postgres insert. The original panic continues after the write attempt.
+   It calls [`Recorder.Write`](../internal/usage/recorder.go) for the bounded
+   durable final handoff, then settles the permit through
+   [`Permit.Finish`](../internal/quota/limiter.go) only when handoff succeeds.
+   The original panic continues after cleanup.
 
 Use the ownership sections below for revocation and shutdown. Setup and test
 commands live in the [manual testing guide](manual-testing.md).
@@ -132,18 +137,20 @@ commands live in the [manual testing guide](manual-testing.md).
 ## Where state lives
 
 - **Postgres** stores key hashes, identities, configured limits, and revocation
-  timestamps, durable inference admissions, and final usage records. Raw keys are returned once on creation.
+  timestamps and delivered inference admissions/final usage records. Raw keys are returned once on creation.
   `tokens_per_day` supplies the normal daily token budget.
 - **Redis** stores request credits per key, plus daily spent and reserved tokens
   in `llmgate:tokens:v1:<key_id>`. Models and chat share the request bucket;
-  only validated chat reserves token budget.
+  only validated chat reserves token budget. It also holds durable accounting
+  slots, a ready index, writer and request-owner leases, ownership mappings,
+  and an expiring Postgres-health marker.
   Gateways serving the same key database must share the Redis database for a
   shared limit. Credits are admission state, not a durable billing ledger.
 - **Process memory** holds the bounded identity cache and active-request registry
   in one shared authenticator. Cache hits do not renew expiry. During a database
   outage, unexpired cached identities can authenticate; misses and expired entries
   fail closed. Cached models can still pass Redis admission, but chat also needs
-  a committed Postgres admission and returns `503` during the outage. Cache expiry affects new
+  a durable Redis admission. A detected Postgres delivery failure pauses chat. Cache expiry affects new
   authentication, not streams already admitted.
 - **Each request context** carries logging metadata, authenticated identity, and
   cancellation through the handler chain. Authentication and admission use
@@ -193,10 +200,11 @@ an aborted proxy response can have `completed: false`.
 `quota.Limiter` owns immutable dependencies. Each admitted chat gets one
 `Permit` containing its Redis reservation, with no retained body or context.
 The chat handler finishes that permit during normal return or panic unwinding.
-Before generation starts, a failed Postgres admission releases the unused allowance
+Before generation starts, a failed durable admission releases the unused allowance
 with a zero charge. A failed release logs the failure and retains the charge.
 A completed response with matching usage refunds unused output. Uncertain
-outcomes retain the full allowance while releasing the pending marker.
+outcomes retain the full allowance while releasing the pending marker. A failed
+final handoff leaves the marker pending as well.
 
 Redis serializes reservations and settlement with Lua. Pending allowances count
 against admission, and duplicate settlements cannot refund twice. The Redis day
@@ -231,23 +239,69 @@ or SSE EOF without `[DONE]` is `interrupted`. HTTP status remains separate, so
 an interrupted stream can have HTTP 200. These states describe observation at
 the gateway, not a durable billing or delivery guarantee.
 
-The final write uses `context.WithoutCancel` to retain logging metadata while
-detaching client/revocation cancellation, then adds its own timeout. It is
-synchronous and may delay handler or response completion up to that bound.
-No connection is held for the duration of inference; the insert acquires one
-from the existing pool. Failure logs a fixed error and does not rewrite the
-response.
+Final handoff uses `context.WithoutCancel` to retain logging metadata while
+removing client/revocation cancellation, then adds its own timeout. It can delay
+handler or response completion, but its timeout does not bound generation.
 
-The store acknowledges an identical re-delivery under the same request ID
-without creating another row. It compares all stored accounting values, including NULL
-versus known zero; conflicting data returns `ErrUsageConflict` and leaves the
-original accounting unchanged. This is a retry prerequisite, not a delivery worker.
-The durable admission remains when a final write is lost. Join it to `usage` by
-request ID to identify attempts without a final outcome. No worker currently
-claims those attempts, reconstructs interrupted outcomes, or retries settlement.
-Process exit, storage failure, or cleanup-budget exhaustion can still lose exact
-final usage. No connection or transaction stays open throughout inference. The
-[decision](decisions.md#inference-usage-recording) records this availability tradeoff.
+`accounting.Queue` uses fixed 8 KiB admission and outcome values in
+`llmgate:accounting:v1:records`, with a ready sorted set. Admission allocates both
+values atomically and checks shared capacity and writer health. Outcome writes
+replace an existing reserved value; Lua allows these bounded replacements under
+memory pressure. `WAITAOF` on the same Redis connection confirms local AOF sync
+before either handoff succeeds. All replicas must share this namespace and use
+consistent capacity settings. Redis Cluster is not configured by this deployment.
+
+The leased writer polls at the flush interval, pipelines Redis reads, and sends
+at most one configured batch to `store.RecordBatch`. Admissions and known final
+usage commit in one synchronous transaction. An admission-only acknowledgment
+retains its outcome slot. A final acknowledgment frees both slots, but only if
+neither value changed during the database write. Multiple gateway replicas may
+run workers; a lease prevents normal concurrent batch ownership. Lease expiry
+can cause duplicate delivery, which immutable Postgres conflict checks make safe.
+Full batches drain without waiting for another timer tick, up to eight batches
+per turn so cancellation and other work remain responsive.
+
+When no records or expired owners need attention, fresh shared health skips
+redundant writer leases and Postgres probes. Once half the health lifetime has
+elapsed, an empty batch probes Postgres. A failed delivery clears shared
+admission health;
+a stalled/dead writer loses health after `2 * write timeout + 2 * flush interval`.
+New chat then returns `503`; existing streams retain final-write capacity. There
+is no per-request Postgres availability check. A lost queue acknowledgment leaves
+records for replay after restart. Never trim pending records to free space.
+
+Each gateway owns a random, expiring accounting identity. Its heartbeat renews
+every third of the lease lifetime; renewal cannot revive an expired identity.
+Admission registers its cancellation callback only while the same identity is
+still current. Losing ownership cancels those requests, and Redis fences late
+final writes. The next successful heartbeat can establish a fresh identity.
+
+The writer uses Redis time to find expired owners and reconstructs their
+unfinished requests in bounded batches. Recovery produces `interrupted` usage
+with unknown token counts, HTTP status zero, and `recovered = true`. Its duration
+is the interval from admission to recovery, not an observed inference duration.
+Saved final outcomes take precedence. A crash before final handoff can lose exact
+backend usage, but leaves a durable admission from which this outcome is recovered.
+
+After Postgres commit, the writer retries quota settlement against the admission's
+original UTC day before acknowledging the queue record. Settlement is
+idempotent with the request's normal cleanup path. Unknown consumption retains
+the reservation; replay never refunds twice or changes the next day's allowance.
+
+A storage guard runs before protected routes can write rate-limit state. Bounded
+background checks reject models and chat with `503` when AOF writes fail or the
+configured AOF admission threshold is reached. They cancel active generation
+while preserving ownership so reserved final slots can still be filled. The
+threshold leaves rewrite and final-result headroom; it is not a filesystem quota.
+
+`Queue.Run` owns and joins its heartbeat and retention goroutines. Retention
+deletes old finalized accounting pairs in bounded Postgres transactions, keeping
+unfinished admissions and API keys. Its cutoff uses an indexed request-start
+time and request ID. Startup keeps these workers alive through HTTP drain, then
+stops and joins them before
+closing storage pools. Redis local AOF does not protect against disk loss or
+stale-replica failover.
+The [decision](decisions.md#durable-accounting-admission-policy) owns the tradeoffs.
 
 ## Prometheus measurement boundaries
 
@@ -285,7 +339,9 @@ these application collectors, with no default process or Go-runtime collectors.
 
 [`run`](../cmd/gateway/run.go) opens and checks Postgres and Redis before binding
 HTTP listeners, constructs one authenticator shared by public and admin handlers,
-and owns the shared upstream transport. Both enabled listeners bind before
+and owns the shared upstream transport. It validates Redis persistence and starts
+one accounting loop with owned heartbeat and retention workers before binding
+listeners. Their independent context keeps them alive through HTTP draining. Both enabled listeners bind before
 either serves. A partial bind failure closes listeners already opened. The
 one-off key-creation command uses Postgres without starting either HTTP server.
 
@@ -303,12 +359,13 @@ extra goroutine per request or abandoned wait goroutine on timeout. Both listene
 share the window. A cleanup timeout reports the remaining handler count.
 
 Only after serving workers, shutdown workers, and bounded request cleanup does
-`run` close idle upstream connections and release Redis and Postgres. Postgres
+`run` cancel and join its accounting worker, then release Redis and Postgres.
+Already acknowledged records can remain queued for a replacement worker. Postgres
 pool teardown can separately wait for the pinned driver's failed-connection
 cleanup deadline; the container stop grace includes that allowance. The process
 signal starts draining; it does not immediately cancel every active stream.
-Crashes, external `SIGKILL`, storage errors, or cleanup-budget exhaustion can
-still lose accounting; controlled shutdown is not durable crash recovery.
+A crash before final handoff or unavailable recording storage can still leave
+only an admission. Local disk acknowledgment does not reconstruct missing usage.
 
 
 ## Container boundaries

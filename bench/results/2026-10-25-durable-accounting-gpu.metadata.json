@@ -1,0 +1,435 @@
+{
+  "utc_start": "2026-10-25T16:31:05.240351+00:00",
+  "utc_finish": "2026-10-25T16:34:02.294909+00:00",
+  "gateway_source_base": "94a6ae62dd32ee98b106b54498c1ac9812de5a5b",
+  "source_dirty": true,
+  "runtime_source_sha256": "3c32817cf2db75b83df9e13fb6751f6791b7b0b9fe2007bd3c19d156140feb32",
+  "runtime_source_hash_rule": "sorted relative path + NUL + contents + NUL; non-test cmd/internal Go and Lua, go.mod/go.sum/Dockerfile",
+  "benchmark_script_sha256": "81253eac79e379ec005b56d36d11047ec0cb7abbfdd42783e4f6ce9c9e092135",
+  "backend_image": "ghcr.io/ggml-org/llama.cpp:server-cuda-b11681@sha256:53bec65a6120e8ab8cb76af725c3b05a7f098b5308c96e5d9f8dad98f1f1f639",
+  "backend_image_id": "sha256:53bec65a6120e8ab8cb76af725c3b05a7f098b5308c96e5d9f8dad98f1f1f639",
+  "backend_command": [
+    "--model",
+    "/models/model.gguf",
+    "--alias",
+    "glm-edge-4b-chat",
+    "--host",
+    "0.0.0.0",
+    "--port",
+    "8080",
+    "--ctx-size",
+    "2048",
+    "--parallel",
+    "1",
+    "--threads",
+    "6",
+    "--device",
+    "CUDA0",
+    "--n-gpu-layers",
+    "all"
+  ],
+  "gateway_image_id": "sha256:2bfbaa9845adac4d0c741031385f970bbfe6bfd170fe384624af917a36016cf9",
+  "model_sha256": "d8e83d4f9b6c6c89214d5c1dd17355d44be99173c15efa846d31ce01d1bda1f3",
+  "model_bytes": 3554369472,
+  "kernel": "7.2.8-9-omarchy",
+  "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU, 615.78.08, 6144 MiB",
+  "cpu_governors": [
+    "powersave"
+  ],
+  "gateway_settings": {
+    "requests_per_min": 6000,
+    "tokens_per_day": 1000000,
+    "quota_grace_percent": 0,
+    "accounting_max_pending": 1024,
+    "accounting_batch_size": 64,
+    "accounting_flush_interval": "250ms",
+    "accounting_lease_timeout": "30s",
+    "accounting_max_aof_bytes": 268435456,
+    "retention": "720h",
+    "prune_interval": "1h",
+    "usage_write_timeout": "2s",
+    "redis_appendfsync": "always",
+    "redis_maxmemory_bytes": 134217728,
+    "metrics_key_capacity": 0
+  },
+  "usage_accounting": {
+    "rows": 51,
+    "completed": 51,
+    "total_tokens": 5916
+  },
+  "redis_charged_tokens": 5916,
+  "queue_slots_after": 0,
+  "metrics_before": {
+    "gateway_requests_total": 1505.0,
+    "gateway_ttft_seconds_count": 52.0,
+    "gateway_active_streams": 0.0
+  },
+  "metrics_after": {
+    "gateway_requests_total": 1591.0,
+    "gateway_ttft_seconds_count": 103.0,
+    "gateway_active_streams": 0.0
+  },
+  "gpu_samples": [
+    {
+      "utc": "2026-10-25T16:31:05.271771+00:00",
+      "temperature_utilization_memory_power": "54, 0, 4350, 14.05"
+    },
+    {
+      "utc": "2026-10-25T16:31:07.295919+00:00",
+      "temperature_utilization_memory_power": "60, 98, 4350, 69.05"
+    },
+    {
+      "utc": "2026-10-25T16:31:09.320625+00:00",
+      "temperature_utilization_memory_power": "61, 98, 4350, 69.74"
+    },
+    {
+      "utc": "2026-10-25T16:31:11.347483+00:00",
+      "temperature_utilization_memory_power": "62, 98, 4350, 69.80"
+    },
+    {
+      "utc": "2026-10-25T16:31:13.374659+00:00",
+      "temperature_utilization_memory_power": "63, 98, 4350, 69.59"
+    },
+    {
+      "utc": "2026-10-25T16:31:15.400613+00:00",
+      "temperature_utilization_memory_power": "63, 99, 4350, 69.91"
+    },
+    {
+      "utc": "2026-10-25T16:31:17.425644+00:00",
+      "temperature_utilization_memory_power": "63, 98, 4350, 69.08"
+    },
+    {
+      "utc": "2026-10-25T16:31:19.450707+00:00",
+      "temperature_utilization_memory_power": "64, 98, 4350, 69.64"
+    },
+    {
+      "utc": "2026-10-25T16:31:21.475759+00:00",
+      "temperature_utilization_memory_power": "64, 98, 4350, 69.93"
+    },
+    {
+      "utc": "2026-10-25T16:31:23.501292+00:00",
+      "temperature_utilization_memory_power": "65, 98, 4350, 69.92"
+    },
+    {
+      "utc": "2026-10-25T16:31:25.524711+00:00",
+      "temperature_utilization_memory_power": "65, 98, 4350, 69.98"
+    },
+    {
+      "utc": "2026-10-25T16:31:27.553329+00:00",
+      "temperature_utilization_memory_power": "65, 98, 4350, 69.97"
+    },
+    {
+      "utc": "2026-10-25T16:31:29.578819+00:00",
+      "temperature_utilization_memory_power": "65, 97, 4350, 69.90"
+    },
+    {
+      "utc": "2026-10-25T16:31:31.603370+00:00",
+      "temperature_utilization_memory_power": "66, 98, 4350, 69.88"
+    },
+    {
+      "utc": "2026-10-25T16:31:33.630511+00:00",
+      "temperature_utilization_memory_power": "66, 99, 4350, 69.89"
+    },
+    {
+      "utc": "2026-10-25T16:31:35.656686+00:00",
+      "temperature_utilization_memory_power": "66, 98, 4350, 69.89"
+    },
+    {
+      "utc": "2026-10-25T16:31:37.683072+00:00",
+      "temperature_utilization_memory_power": "66, 98, 4350, 69.79"
+    },
+    {
+      "utc": "2026-10-25T16:31:39.711132+00:00",
+      "temperature_utilization_memory_power": "66, 99, 4350, 69.83"
+    },
+    {
+      "utc": "2026-10-25T16:31:41.737632+00:00",
+      "temperature_utilization_memory_power": "66, 98, 4350, 69.85"
+    },
+    {
+      "utc": "2026-10-25T16:31:43.764083+00:00",
+      "temperature_utilization_memory_power": "66, 99, 4350, 69.84"
+    },
+    {
+      "utc": "2026-10-25T16:31:45.789491+00:00",
+      "temperature_utilization_memory_power": "66, 98, 4350, 69.85"
+    },
+    {
+      "utc": "2026-10-25T16:31:47.814385+00:00",
+      "temperature_utilization_memory_power": "66, 99, 4350, 69.49"
+    },
+    {
+      "utc": "2026-10-25T16:31:49.839375+00:00",
+      "temperature_utilization_memory_power": "66, 98, 4350, 69.90"
+    },
+    {
+      "utc": "2026-10-25T16:31:51.866064+00:00",
+      "temperature_utilization_memory_power": "66, 99, 4350, 69.99"
+    },
+    {
+      "utc": "2026-10-25T16:31:53.892102+00:00",
+      "temperature_utilization_memory_power": "66, 98, 4350, 69.74"
+    },
+    {
+      "utc": "2026-10-25T16:31:55.917346+00:00",
+      "temperature_utilization_memory_power": "67, 96, 4350, 70.00"
+    },
+    {
+      "utc": "2026-10-25T16:31:57.945710+00:00",
+      "temperature_utilization_memory_power": "67, 98, 4350, 70.04"
+    },
+    {
+      "utc": "2026-10-25T16:31:59.972302+00:00",
+      "temperature_utilization_memory_power": "67, 98, 4350, 70.33"
+    },
+    {
+      "utc": "2026-10-25T16:32:02.001027+00:00",
+      "temperature_utilization_memory_power": "67, 98, 4350, 70.01"
+    },
+    {
+      "utc": "2026-10-25T16:32:04.028444+00:00",
+      "temperature_utilization_memory_power": "67, 98, 4350, 69.97"
+    },
+    {
+      "utc": "2026-10-25T16:32:06.053298+00:00",
+      "temperature_utilization_memory_power": "67, 98, 4350, 69.83"
+    },
+    {
+      "utc": "2026-10-25T16:32:08.077502+00:00",
+      "temperature_utilization_memory_power": "67, 98, 4350, 69.97"
+    },
+    {
+      "utc": "2026-10-25T16:32:10.105115+00:00",
+      "temperature_utilization_memory_power": "67, 98, 4350, 69.97"
+    },
+    {
+      "utc": "2026-10-25T16:32:12.129712+00:00",
+      "temperature_utilization_memory_power": "67, 98, 4350, 70.01"
+    },
+    {
+      "utc": "2026-10-25T16:32:14.156262+00:00",
+      "temperature_utilization_memory_power": "67, 98, 4350, 69.93"
+    },
+    {
+      "utc": "2026-10-25T16:32:16.182474+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.95"
+    },
+    {
+      "utc": "2026-10-25T16:32:18.207295+00:00",
+      "temperature_utilization_memory_power": "68, 97, 4350, 69.93"
+    },
+    {
+      "utc": "2026-10-25T16:32:20.234909+00:00",
+      "temperature_utilization_memory_power": "67, 99, 4350, 69.91"
+    },
+    {
+      "utc": "2026-10-25T16:32:22.261687+00:00",
+      "temperature_utilization_memory_power": "67, 98, 4350, 69.81"
+    },
+    {
+      "utc": "2026-10-25T16:32:24.286609+00:00",
+      "temperature_utilization_memory_power": "67, 98, 4350, 69.70"
+    },
+    {
+      "utc": "2026-10-25T16:32:26.311842+00:00",
+      "temperature_utilization_memory_power": "67, 99, 4350, 69.83"
+    },
+    {
+      "utc": "2026-10-25T16:32:28.337073+00:00",
+      "temperature_utilization_memory_power": "67, 98, 4350, 69.89"
+    },
+    {
+      "utc": "2026-10-25T16:32:30.362435+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.86"
+    },
+    {
+      "utc": "2026-10-25T16:32:32.387662+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.81"
+    },
+    {
+      "utc": "2026-10-25T16:32:34.412895+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.85"
+    },
+    {
+      "utc": "2026-10-25T16:32:36.437463+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.51"
+    },
+    {
+      "utc": "2026-10-25T16:32:38.462855+00:00",
+      "temperature_utilization_memory_power": "68, 99, 4350, 70.03"
+    },
+    {
+      "utc": "2026-10-25T16:32:40.488088+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 70.00"
+    },
+    {
+      "utc": "2026-10-25T16:32:42.513074+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.52"
+    },
+    {
+      "utc": "2026-10-25T16:32:44.538918+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.88"
+    },
+    {
+      "utc": "2026-10-25T16:32:46.566252+00:00",
+      "temperature_utilization_memory_power": "68, 99, 4350, 69.86"
+    },
+    {
+      "utc": "2026-10-25T16:32:48.592713+00:00",
+      "temperature_utilization_memory_power": "68, 99, 4350, 69.47"
+    },
+    {
+      "utc": "2026-10-25T16:32:50.618469+00:00",
+      "temperature_utilization_memory_power": "68, 99, 4350, 69.94"
+    },
+    {
+      "utc": "2026-10-25T16:32:52.643461+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 70.07"
+    },
+    {
+      "utc": "2026-10-25T16:32:54.668554+00:00",
+      "temperature_utilization_memory_power": "68, 91, 4350, 69.85"
+    },
+    {
+      "utc": "2026-10-25T16:32:56.693852+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.87"
+    },
+    {
+      "utc": "2026-10-25T16:32:58.718343+00:00",
+      "temperature_utilization_memory_power": "68, 99, 4350, 69.89"
+    },
+    {
+      "utc": "2026-10-25T16:33:00.746183+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.97"
+    },
+    {
+      "utc": "2026-10-25T16:33:02.770582+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.87"
+    },
+    {
+      "utc": "2026-10-25T16:33:04.795301+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.91"
+    },
+    {
+      "utc": "2026-10-25T16:33:06.821418+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.91"
+    },
+    {
+      "utc": "2026-10-25T16:33:08.847251+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.84"
+    },
+    {
+      "utc": "2026-10-25T16:33:10.873075+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.92"
+    },
+    {
+      "utc": "2026-10-25T16:33:12.897546+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.83"
+    },
+    {
+      "utc": "2026-10-25T16:33:14.922380+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.88"
+    },
+    {
+      "utc": "2026-10-25T16:33:16.949565+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.72"
+    },
+    {
+      "utc": "2026-10-25T16:33:18.973287+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.84"
+    },
+    {
+      "utc": "2026-10-25T16:33:20.997107+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.78"
+    },
+    {
+      "utc": "2026-10-25T16:33:23.021345+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.89"
+    },
+    {
+      "utc": "2026-10-25T16:33:25.046451+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.48"
+    },
+    {
+      "utc": "2026-10-25T16:33:27.071717+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.92"
+    },
+    {
+      "utc": "2026-10-25T16:33:29.098705+00:00",
+      "temperature_utilization_memory_power": "68, 99, 4350, 69.94"
+    },
+    {
+      "utc": "2026-10-25T16:33:31.125182+00:00",
+      "temperature_utilization_memory_power": "68, 99, 4350, 69.73"
+    },
+    {
+      "utc": "2026-10-25T16:33:33.151168+00:00",
+      "temperature_utilization_memory_power": "68, 99, 4350, 69.96"
+    },
+    {
+      "utc": "2026-10-25T16:33:35.177555+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 70.01"
+    },
+    {
+      "utc": "2026-10-25T16:33:37.198667+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.78"
+    },
+    {
+      "utc": "2026-10-25T16:33:39.224699+00:00",
+      "temperature_utilization_memory_power": "68, 99, 4350, 70.01"
+    },
+    {
+      "utc": "2026-10-25T16:33:41.249835+00:00",
+      "temperature_utilization_memory_power": "68, 99, 4350, 69.96"
+    },
+    {
+      "utc": "2026-10-25T16:33:43.277799+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.80"
+    },
+    {
+      "utc": "2026-10-25T16:33:45.303240+00:00",
+      "temperature_utilization_memory_power": "68, 76, 4350, 70.09"
+    },
+    {
+      "utc": "2026-10-25T16:33:47.327932+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.92"
+    },
+    {
+      "utc": "2026-10-25T16:33:49.353039+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.85"
+    },
+    {
+      "utc": "2026-10-25T16:33:51.378259+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.98"
+    },
+    {
+      "utc": "2026-10-25T16:33:53.404665+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.93"
+    },
+    {
+      "utc": "2026-10-25T16:33:55.430193+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.92"
+    },
+    {
+      "utc": "2026-10-25T16:33:57.455304+00:00",
+      "temperature_utilization_memory_power": "68, 99, 4350, 70.06"
+    },
+    {
+      "utc": "2026-10-25T16:33:59.481107+00:00",
+      "temperature_utilization_memory_power": "69, 98, 4350, 69.92"
+    },
+    {
+      "utc": "2026-10-25T16:34:01.507814+00:00",
+      "temperature_utilization_memory_power": "68, 98, 4350, 69.88"
+    }
+  ],
+  "limitations": [
+    "Sequential warm repeated prompt; concurrency 1; laptop thermal state and desktop load uncontrolled.",
+    "Direct bridge IP versus gateway published loopback port; does not isolate proxy CPU overhead.",
+    "Client duration ends at DONE, durable final handoff can finish later."
+  ],
+  "final_review_source_sha256": "fa84e03522996a4c8ae5bbbf6e3a055131e01fcc08011818ca06a7549eb2e4a4",
+  "post_measurement_changes": "Go formatting only in runtime source; added retention-worker tests and the retention index to the uncommitted migration. No runtime behavior changed after measurement.",
+  "go_version": "go version go1.27.3-X:nodwarf5 linux/amd64",
+  "cpu": "12th Gen Intel(R) Core(TM) i7-12650H"
+}

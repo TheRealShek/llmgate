@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/therealshek/llmgate/internal/accounting"
 	"github.com/therealshek/llmgate/internal/admin"
 	"github.com/therealshek/llmgate/internal/auth"
 	"github.com/therealshek/llmgate/internal/backend"
@@ -59,7 +60,7 @@ func run(ctx context.Context) error {
 	redisClient, err := ratelimit.OpenClient(ctx, cfg.redisURL, ratelimit.ClientLimits{
 		MaxConns:       cfg.redisMaxConns,
 		ConnectTimeout: cfg.redisConnectTimeout,
-		CommandTimeout: max(cfg.rateLimitTimeout, cfg.quotaRedisTimeout),
+		CommandTimeout: max(cfg.rateLimitTimeout, cfg.quotaRedisTimeout, cfg.usageWriteTimeout),
 	})
 	if err != nil {
 		return fmt.Errorf("initialize request limiting: %w", err)
@@ -70,8 +71,39 @@ func run(ctx context.Context) error {
 	requestLimits := ratelimit.NewLimiter(buckets, cfg.rateLimitTimeout)
 
 	usageStore := store.NewUsageStore(pool)
+
+	accountingQueue, err := accounting.Open(ctx, redisClient, usageStore, accounting.Options{
+		Namespace:     "llmgate:accounting:v1",
+		MaxPending:    cfg.accountingMaxPending,
+		BatchSize:     cfg.accountingBatchSize,
+		FlushInterval: cfg.accountingFlushInterval,
+		Timeout:       cfg.usageWriteTimeout,
+		LeaseTimeout:  cfg.accountingLeaseTimeout,
+		MaxAOFBytes:   cfg.accountingMaxAOFBytes,
+		Retention:     cfg.accountingRetention,
+		PruneInterval: cfg.accountingPruneInterval,
+	})
+	if err != nil {
+		return fmt.Errorf("initialize durable accounting: %w", err)
+	}
+
+	// Keep delivery running through HTTP drain; join it before closing either pool.
+	accountingCtx, stopAccounting := context.WithCancel(context.Background())
+
+	accountingDone := make(chan struct{})
+	go func() {
+		defer close(accountingDone)
+
+		accountingQueue.Run(accountingCtx)
+	}()
+
+	defer func() {
+		stopAccounting()
+		<-accountingDone
+	}()
+
 	usageRecorder := usage.NewRecorder(usage.Options{
-		Store:        usageStore,
+		Store:        accountingQueue,
 		Backend:      "primary",
 		WriteTimeout: cfg.usageWriteTimeout,
 		MaxBytes:     cfg.usageMaxBytes,
@@ -121,7 +153,7 @@ func run(ctx context.Context) error {
 			MaxTokens:    cfg.maxTokens,
 		},
 	})
-	observedRoutes := gatewayMetrics.Observe(routes)
+	observedRoutes := gatewayMetrics.Observe(accountingQueue.Protect(routes))
 	loggedRoutes := requestlog.NewHandler(observedRoutes, slog.Default())
 
 	// Bound request reads and idle connections without limiting response streams.

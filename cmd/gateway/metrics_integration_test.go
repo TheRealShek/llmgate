@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -16,7 +17,7 @@ func TestLlamaMetrics(t *testing.T) {
 		t.Skip("set LLMGATE_TEST_LLAMA_URL for GPU metric integration")
 	}
 
-	public, secret, _, _, _ := quotaTestGateway(t, address, 0)
+	public, secret, id, _, _ := quotaTestGateway(t, address, 0)
 
 	r, err := http.NewRequestWithContext(t.Context(), http.MethodPost, public.URL+"/v1/chat/completions", strings.NewReader(`{"model":"glm-edge-4b-chat","messages":[{"role":"user","content":"Count from one to ten."}],"max_tokens":50,"stream":true}`))
 	if err != nil {
@@ -54,7 +55,7 @@ func TestLlamaMetrics(t *testing.T) {
 		}
 
 		data := string(body)
-		if strings.Contains(data, `gateway_requests_total{backend="primary",key="1",status="200"} 1`) &&
+		if strings.Contains(data, fmt.Sprintf(`gateway_requests_total{backend="primary",key="%d",status="200"} 1`, id)) &&
 			strings.Contains(data, `gateway_ttft_seconds_count{backend="primary"} 1`) &&
 			strings.Contains(data, `gateway_request_duration_seconds_count{backend="primary"} 1`) &&
 			strings.Contains(data, `gateway_active_streams{backend="primary"} 0`) {

@@ -57,6 +57,15 @@ type config struct {
 	usageWriteTimeout time.Duration // Per write; final writes detach client cancellation.
 	usageMaxBytes     int           // Observation buffer limit, not an output limit.
 
+	// Shared durable accounting queue. Active requests retain their final-result slots.
+	accountingMaxAOFBytes   int64
+	accountingRetention     time.Duration
+	accountingPruneInterval time.Duration
+	accountingLeaseTimeout  time.Duration
+	accountingMaxPending    int
+	accountingBatchSize     int
+	accountingFlushInterval time.Duration // Background delivery only; inference does not wait for this timer.
+
 	// Prometheus metrics.
 	metricsKeyCapacity   int // Zero groups all key IDs under "other".
 	metricsMaxScrapes    int
@@ -73,42 +82,49 @@ type config struct {
 
 func loadConfig(getenv func(string) string) (config, error) {
 	cfg := config{
-		metricsKeyCapacity:     0,
-		metricsMaxScrapes:      2,
-		metricsScrapeTimeout:   2 * time.Second,
-		adminAddr:              "127.0.0.1:8082",
-		adminMaxBodyBytes:      4096,
-		adminCreateTimeout:     2 * time.Second,
-		adminRevokeTimeout:     2 * time.Second,
-		databaseURL:            getenv("GATEWAY_DATABASE_URL"),
-		databaseMaxConns:       10,
-		databaseConnectTimeout: 5 * time.Second,
-		authLookupTimeout:      2 * time.Second,
-		authCacheTTL:           30 * time.Second,
-		authCacheCapacity:      1024,
-		redisURL:               "redis://127.0.0.1:6379/0",
-		redisMaxConns:          10,
-		redisConnectTimeout:    2 * time.Second,
-		rateLimitTimeout:       500 * time.Millisecond,
-		quotaGracePercent:      0,
-		quotaCountTimeout:      2 * time.Second,
-		quotaRedisTimeout:      500 * time.Millisecond,
-		quotaCountMaxBytes:     8 << 20,
-		usageWriteTimeout:      2 * time.Second,
-		usageMaxBytes:          64 << 10,
-		addr:                   ":8080",
-		upstreamTimeout:        30 * time.Second,
-		readHeaderTimeout:      5 * time.Second,
-		idleTimeout:            60 * time.Second,
-		shutdownTimeout:        10 * time.Second,
-		shutdownCleanupTimeout: 3 * time.Second,
-		readTimeout:            10 * time.Second,
-		maxBodyBytes:           1 << 20, // 1 MiB
-		maxTokens:              1024,
-		upstreamConnectTimeout: 5 * time.Second,
-		upstreamHeaderTimeout:  30 * time.Second,
-		streamIdleTimeout:      30 * time.Second,
-		readinessTimeout:       2 * time.Second,
+		accountingMaxAOFBytes:   256 << 20,
+		accountingRetention:     30 * 24 * time.Hour,
+		accountingPruneInterval: time.Hour,
+		accountingLeaseTimeout:  30 * time.Second,
+		accountingMaxPending:    1024,
+		accountingBatchSize:     64,
+		accountingFlushInterval: 250 * time.Millisecond,
+		metricsKeyCapacity:      0,
+		metricsMaxScrapes:       2,
+		metricsScrapeTimeout:    2 * time.Second,
+		adminAddr:               "127.0.0.1:8082",
+		adminMaxBodyBytes:       4096,
+		adminCreateTimeout:      2 * time.Second,
+		adminRevokeTimeout:      2 * time.Second,
+		databaseURL:             getenv("GATEWAY_DATABASE_URL"),
+		databaseMaxConns:        10,
+		databaseConnectTimeout:  5 * time.Second,
+		authLookupTimeout:       2 * time.Second,
+		authCacheTTL:            30 * time.Second,
+		authCacheCapacity:       1024,
+		redisURL:                "redis://127.0.0.1:6379/0",
+		redisMaxConns:           10,
+		redisConnectTimeout:     2 * time.Second,
+		rateLimitTimeout:        500 * time.Millisecond,
+		quotaGracePercent:       0,
+		quotaCountTimeout:       2 * time.Second,
+		quotaRedisTimeout:       500 * time.Millisecond,
+		quotaCountMaxBytes:      8 << 20,
+		usageWriteTimeout:       2 * time.Second,
+		usageMaxBytes:           64 << 10,
+		addr:                    ":8080",
+		upstreamTimeout:         30 * time.Second,
+		readHeaderTimeout:       5 * time.Second,
+		idleTimeout:             60 * time.Second,
+		shutdownTimeout:         10 * time.Second,
+		shutdownCleanupTimeout:  3 * time.Second,
+		readTimeout:             10 * time.Second,
+		maxBodyBytes:            1 << 20, // 1 MiB
+		maxTokens:               1024,
+		upstreamConnectTimeout:  5 * time.Second,
+		upstreamHeaderTimeout:   30 * time.Second,
+		streamIdleTimeout:       30 * time.Second,
+		readinessTimeout:        2 * time.Second,
 	}
 
 	if val := getenv("GATEWAY_ADMIN_ENABLED"); val != "" {
@@ -299,6 +315,64 @@ func loadConfig(getenv func(string) string) (config, error) {
 	cfg.usageWriteTimeout, err = envDuration(getenv, "GATEWAY_USAGE_WRITE_TIMEOUT", cfg.usageWriteTimeout)
 	if err != nil {
 		return config{}, err
+	}
+
+	for _, setting := range []struct {
+		name  string
+		value *int
+	}{
+		{"GATEWAY_ACCOUNTING_MAX_PENDING", &cfg.accountingMaxPending},
+		{"GATEWAY_ACCOUNTING_BATCH_SIZE", &cfg.accountingBatchSize},
+	} {
+		if value := getenv(setting.name); value != "" {
+			*setting.value, err = strconv.Atoi(value)
+			if err != nil || *setting.value <= 0 {
+				return config{}, fmt.Errorf("validate %s: requires a positive integer", setting.name)
+			}
+		}
+	}
+
+	if cfg.accountingBatchSize > cfg.accountingMaxPending {
+		return config{}, fmt.Errorf("validate accounting batch size: exceeds pending capacity")
+	}
+
+	cfg.accountingFlushInterval, err = envDuration(getenv, "GATEWAY_ACCOUNTING_FLUSH_INTERVAL", cfg.accountingFlushInterval)
+	if err != nil {
+		return config{}, err
+	}
+
+	if value := getenv("GATEWAY_ACCOUNTING_MAX_AOF_BYTES"); value != "" {
+		cfg.accountingMaxAOFBytes, err = strconv.ParseInt(value, 10, 64)
+		if err != nil || cfg.accountingMaxAOFBytes <= 0 {
+			return config{}, fmt.Errorf("validate accounting AOF bytes: requires a positive integer")
+		}
+	}
+
+	cfg.accountingRetention, err = envDuration(getenv, "GATEWAY_ACCOUNTING_RETENTION", cfg.accountingRetention)
+	if err != nil {
+		return config{}, err
+	}
+
+	cfg.accountingPruneInterval, err = envDuration(getenv, "GATEWAY_ACCOUNTING_PRUNE_INTERVAL", cfg.accountingPruneInterval)
+	if err != nil {
+		return config{}, err
+	}
+
+	cfg.accountingLeaseTimeout, err = envDuration(getenv, "GATEWAY_ACCOUNTING_LEASE_TIMEOUT", cfg.accountingLeaseTimeout)
+	if err != nil {
+		return config{}, err
+	}
+
+	if cfg.usageWriteTimeout > time.Duration(1<<63-1)/8 || cfg.accountingFlushInterval > time.Duration(1<<63-1)/8 {
+		return config{}, fmt.Errorf("validate accounting intervals: duration too large")
+	}
+
+	if cfg.accountingLeaseTimeout <= 3*(cfg.usageWriteTimeout+cfg.accountingFlushInterval) {
+		return config{}, fmt.Errorf("validate accounting lease: must exceed three operation/poll intervals")
+	}
+
+	if cfg.usageWriteTimeout < time.Millisecond {
+		return config{}, fmt.Errorf("validate GATEWAY_USAGE_WRITE_TIMEOUT: requires at least 1ms for durable recording")
 	}
 
 	if value := getenv("GATEWAY_USAGE_MAX_BYTES"); value != "" {

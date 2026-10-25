@@ -16,7 +16,7 @@ func usageTestPool(t *testing.T) *pgxpool.Pool {
 
 	pool := testPool(t)
 
-	for _, name := range []string{"000002_usage.up.sql", "000003_inference_admissions.up.sql"} {
+	for _, name := range []string{"000002_usage.up.sql", "000003_inference_admissions.up.sql", "000004_recovered_usage.up.sql"} {
 		migration, err := os.ReadFile("../../migrations/" + name)
 		if err != nil {
 			t.Fatal(err)
@@ -51,6 +51,7 @@ func TestUsageValidation(t *testing.T) {
 		func(r *Usage) { r.Backend = "" },
 		func(r *Usage) { r.Duration = -time.Second },
 		func(r *Usage) { r.Status = "unknown" },
+		func(r *Usage) { r.Recovered = true },
 		func(r *Usage) { r.HTTPStatus = 199 },
 		func(r *Usage) { r.ObservedSSEChunks = 1 },
 		func(r *Usage) { r.Streaming = true; r.ObservedSSEChunks = -1 },
@@ -183,8 +184,8 @@ func TestUsageMigrationRollback(t *testing.T) {
 	pool := usageTestPool(t)
 
 	for _, path := range []string{
-		"000003_inference_admissions.down.sql", "000002_usage.down.sql", "000001_api_keys.down.sql",
-		"000001_api_keys.up.sql", "000002_usage.up.sql", "000003_inference_admissions.up.sql",
+		"000004_recovered_usage.down.sql", "000003_inference_admissions.down.sql", "000002_usage.down.sql", "000001_api_keys.down.sql",
+		"000001_api_keys.up.sql", "000002_usage.up.sql", "000003_inference_admissions.up.sql", "000004_recovered_usage.up.sql",
 	} {
 		migration, err := os.ReadFile("../../migrations/" + path)
 		if err != nil {
@@ -333,5 +334,43 @@ func TestUsageConflictingRetries(t *testing.T) {
 	var count int
 	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM usage").Scan(&count); err != nil || count != 1 {
 		t.Fatal("conflicting retries created additional rows", count, err)
+	}
+}
+
+// TestRecoveredUsage checks reconstructed outcomes are distinguishable and immutable against observed outcomes.
+func TestRecoveredUsage(t *testing.T) {
+	pool := usageTestPool(t)
+
+	key, _, err := NewKeyStore(pool).CreateKey(t.Context(), CreateKeyParams{Name: "recovered", RequestsPerMin: 60, TokensPerDay: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	record := usageRecord()
+	record.KeyID = key.ID
+	record.HTTPStatus = 0
+	record.Status = UsageInterrupted
+
+	storage := NewUsageStore(pool)
+	if err := storage.RecordUsage(t.Context(), record); err != nil {
+		t.Fatal(err)
+	}
+
+	record.Recovered = true
+	if err := storage.RecordUsage(t.Context(), record); !errors.Is(err, ErrUsageConflict) {
+		t.Fatal("recovery replaced an observed outcome", err)
+	}
+
+	record.RequestID = "recovered-only"
+	if err := storage.RecordUsage(t.Context(), record); err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		recovered          bool
+		prompt, completion *int64
+	)
+	if err := pool.QueryRow(t.Context(), "SELECT recovered,prompt_tokens,completion_tokens FROM usage WHERE request_id=$1", record.RequestID).Scan(&recovered, &prompt, &completion); err != nil || !recovered || prompt != nil || completion != nil {
+		t.Fatal("recovery provenance or unknown counts lost", err)
 	}
 }

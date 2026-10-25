@@ -97,6 +97,7 @@ func TestLoadConfig(t *testing.T) {
 			name: "defaults",
 			env:  map[string]string{},
 			want: config{
+				accountingMaxAOFBytes: 256 << 20, accountingRetention: 30 * 24 * time.Hour, accountingPruneInterval: time.Hour, accountingLeaseTimeout: 30 * time.Second, accountingMaxPending: 1024, accountingBatchSize: 64, accountingFlushInterval: 250 * time.Millisecond,
 				metricsKeyCapacity: 0, metricsMaxScrapes: 2, metricsScrapeTimeout: 2 * time.Second,
 				adminAddr:              "127.0.0.1:8082",
 				adminMaxBodyBytes:      4096,
@@ -150,6 +151,7 @@ func TestLoadConfig(t *testing.T) {
 				"GATEWAY_SHUTDOWN_CLEANUP_TIMEOUT": "4s",
 			},
 			want: config{
+				accountingMaxAOFBytes: 256 << 20, accountingRetention: 30 * 24 * time.Hour, accountingPruneInterval: time.Hour, accountingLeaseTimeout: 30 * time.Second, accountingMaxPending: 1024, accountingBatchSize: 64, accountingFlushInterval: 250 * time.Millisecond,
 				metricsKeyCapacity: 0, metricsMaxScrapes: 2, metricsScrapeTimeout: 2 * time.Second,
 				adminAddr:              "127.0.0.1:8082",
 				adminMaxBodyBytes:      4096,
@@ -713,6 +715,7 @@ func TestUsageConfiguration(t *testing.T) {
 		invalid        bool
 	}{
 		{setting: "GATEWAY_USAGE_WRITE_TIMEOUT", value: "750ms"},
+		{setting: "GATEWAY_USAGE_WRITE_TIMEOUT", value: "1ns", invalid: true},
 		{setting: "GATEWAY_USAGE_MAX_BYTES", value: "4096"},
 		{setting: "GATEWAY_USAGE_WRITE_TIMEOUT", value: "0s", invalid: true},
 		{setting: "GATEWAY_USAGE_WRITE_TIMEOUT", value: "-1s", invalid: true},
@@ -947,5 +950,42 @@ func TestShutdownCleanupConfiguration(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "GATEWAY_SHUTDOWN_CLEANUP_TIMEOUT") {
 			t.Fatal("invalid cleanup timeout accepted or misidentified", value, err)
 		}
+	}
+}
+
+// TestAccountingConfig checks shared capacity, batch bounds, and delivery interval validation.
+func TestAccountingConfig(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		values  map[string]string
+		invalid bool
+	}{
+		{name: "custom", values: map[string]string{"GATEWAY_ACCOUNTING_MAX_PENDING": "128", "GATEWAY_ACCOUNTING_BATCH_SIZE": "32", "GATEWAY_ACCOUNTING_FLUSH_INTERVAL": "100ms", "GATEWAY_ACCOUNTING_MAX_AOF_BYTES": "536870912", "GATEWAY_ACCOUNTING_RETENTION": "48h", "GATEWAY_ACCOUNTING_PRUNE_INTERVAL": "1m", "GATEWAY_ACCOUNTING_LEASE_TIMEOUT": "10s"}},
+		{name: "zero storage budget", values: map[string]string{"GATEWAY_ACCOUNTING_MAX_AOF_BYTES": "0"}, invalid: true},
+		{name: "zero retention", values: map[string]string{"GATEWAY_ACCOUNTING_RETENTION": "0s"}, invalid: true},
+		{name: "zero prune interval", values: map[string]string{"GATEWAY_ACCOUNTING_PRUNE_INTERVAL": "0s"}, invalid: true},
+		{name: "unsafe lease", values: map[string]string{"GATEWAY_ACCOUNTING_LEASE_TIMEOUT": "2s"}, invalid: true},
+		{name: "zero capacity", values: map[string]string{"GATEWAY_ACCOUNTING_MAX_PENDING": "0"}, invalid: true},
+		{name: "negative batch", values: map[string]string{"GATEWAY_ACCOUNTING_BATCH_SIZE": "-1"}, invalid: true},
+		{name: "batch exceeds capacity", values: map[string]string{"GATEWAY_ACCOUNTING_MAX_PENDING": "4"}, invalid: true},
+		{name: "zero interval", values: map[string]string{"GATEWAY_ACCOUNTING_FLUSH_INTERVAL": "0s"}, invalid: true},
+		{name: "invalid integer", values: map[string]string{"GATEWAY_ACCOUNTING_BATCH_SIZE": "private-value"}, invalid: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := loadConfig(func(name string) string {
+				if name == "GATEWAY_DATABASE_URL" {
+					return "postgres://localhost/llmgate"
+				}
+
+				return tt.values[name]
+			})
+			if (err != nil) != tt.invalid {
+				t.Fatal("unexpected accounting configuration validation", err)
+			}
+
+			if !tt.invalid && (cfg.accountingMaxPending != 128 || cfg.accountingBatchSize != 32 || cfg.accountingFlushInterval != 100*time.Millisecond || cfg.accountingMaxAOFBytes != 536870912 || cfg.accountingRetention != 48*time.Hour || cfg.accountingPruneInterval != time.Minute || cfg.accountingLeaseTimeout != 10*time.Second) {
+				t.Fatal("custom accounting settings ignored")
+			}
+		})
 	}
 }

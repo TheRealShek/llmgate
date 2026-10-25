@@ -152,10 +152,11 @@ the follow-up persisted all three canceled rows before shutdown returned.
 [Follow-up evidence](../bench/results/2026-10-25-shutdown-accounting.json) also
 covers normal draining and a frozen database. The latter logs bounded write
 failures, then allows the driver's separate failed-connection cleanup to finish.
-Postgres outages, crashes, or cleanup-budget exhaustion can still lose final
-usage rows. Successful inference is not a guarantee of durable usage. The
-[durable accounting requirements](PROJECT_INTENT.md#durable-accounting-requirements)
-remain unfinished Phase 1 work. The [benchmark](benchmarks.md) records the earlier baseline.
+These historical checks predate durable admission. The current queue preserves
+admissions across process crashes and replays saved finals after Postgres recovery.
+A crash before final handoff produces a recovered interrupted row with unknown
+counts, rather than reconstructing exact usage. See the [final verification and
+baseline](benchmarks.md) for the complete middleware path.
 
 Run the lifecycle race and cleanup-budget checks without external services:
 
@@ -841,8 +842,9 @@ sudo --preserve-env=POSTGRES_PASSWORD docker compose \
 ```
 
 Before the first entry expires, its key should still reach the models backend.
-Chat must return `503` even for that cached key because durable admission requires
-Postgres. The
+Chat must return `503` once the accounting worker detects Postgres delivery
+failure. Until that bounded detection completes, requests may still enter through
+the durable Redis queue. The
 unused key should return `503`. After 60 seconds from the warm request, the first
 key should also return `503`, even if you kept using it. Restart Postgres:
 
@@ -939,7 +941,8 @@ or a direct database update cannot signal this process's requests.
 ## Persistent inference usage
 
 Apply the existing migration command again before running the updated gateway.
-Migration `000002_usage` adds the usage table and its key/time index:
+Migration `000002_usage` adds the usage table; apply through
+`000004_recovered_usage` for recovery provenance and the retention index:
 
 ```sh
 sudo --preserve-env=POSTGRES_PASSWORD docker compose \
@@ -962,13 +965,14 @@ USAGE_REQUEST_ID="$(python3 -c 'import pathlib,sys; print(next(line.split(":",1)
 psql "$GATEWAY_DATABASE_URL" -v ON_ERROR_STOP=1 -v request_id="$USAGE_REQUEST_ID" <<'SQL'
 \pset null 'unknown'
 SELECT request_id, key_id, backend, model, streaming, prompt_tokens,
-       completion_tokens, observed_sse_chunks, ttft_ms, total_ms, http_status, status
+       completion_tokens, observed_sse_chunks, ttft_ms, total_ms, http_status, status, recovered
 FROM usage WHERE request_id = :'request_id';
 SQL
 rm -f "$USAGE_HEADERS"
 unset USAGE_HEADERS USAGE_REQUEST_ID
 ```
 
+Delivery is asynchronous; repeat the query until the next batch arrives.
 Expect one row, the same request ID, the key's ID, backend `primary`, and model
 `glm-edge-4b-chat`. A normally completed stream has HTTP 200 and status
 `completed`. Backend token counts appear only if the backend emits its usage
@@ -1000,36 +1004,93 @@ usage-write failures. Store tests also deliver identical records concurrently,
 verify only one usage row remains, and reject conflicting retries without
 changing the original accounting. Database tests skip without the test URL.
 
-Apply migration `000003_inference_admissions` before running this gateway version.
-Validated chat commits an admission before forwarding. Each admission write uses
-`GATEWAY_USAGE_WRITE_TIMEOUT` and honors client cancellation. Failed admission
-returns `503` with `usage_unavailable`, logs `inference admission write failed`,
-and attempts to refund the unused token reservation. No generation starts.
-Models can still use an unexpired cached key during Postgres outages.
+Apply all migrations through `000004_recovered_usage` before running this gateway version.
+Redis must use AOF `always`, `maxmemory-policy noeviction`, and persistent storage.
+The gateway validates those settings at startup and needs permission for
+`CONFIG GET`, Lua, and `WAITAOF` (Redis 7.2+). Compose configures these settings;
+rebuild/restart the prepared deployment to apply changes. Do not change persistence
+settings underneath a running gateway. Quota/rate writes on this Redis also use
+synchronous AOF. The final [baseline](benchmarks.md) measures this configuration.
 
-A final usage write happens after proxy copying and can extend handler or response
-completion by up to the same timeout. If Postgres becomes unavailable afterward,
-expect a request-correlated `usage record write failed` error log and potentially
-no final usage row. The inference response is not replaced. Its admission remains
-in `inference_admissions`; join `request_id` to `usage` to find missing final
-outcomes. No recovery worker is implemented yet. Token quota settlement runs
-independently before the final insert.
+Each admission and final handoff waits for local Redis disk acknowledgment under
+`GATEWAY_USAGE_WRITE_TIMEOUT`. Failed admission returns `503` with
+`usage_unavailable` and attempts to refund the unused quota reservation. No
+generation starts. Failed final handoff logs `usage record write failed`, keeps
+the quota charged, and does not replace the inference response.
 
-```sql
-SELECT a.request_id, a.key_id, a.created_at, a.reservation_id
-FROM inference_admissions a
-LEFT JOIN usage u USING (request_id)
-WHERE u.request_id IS NULL;
+Background delivery uses `GATEWAY_ACCOUNTING_BATCH_SIZE` per Postgres transaction
+and `GATEWAY_ACCOUNTING_FLUSH_INTERVAL` for idle polling. Full batches drain
+immediately, up to eight batches per worker turn. Idle polls skip redundant
+Postgres probes while shared health has more than half its lifetime left. Failed delivery logs `accounting batch delivery failed; new inference
+paused` and clears the shared health marker. Health expires after twice the write
+timeout plus twice the polling interval if the writer stops. This bounds failure
+detection; it is not an instantaneous Postgres outage check. Active requests can
+still record final outcomes. Delivery recovery reopens admission.
+
+`GATEWAY_ACCOUNTING_MAX_PENDING` counts active and undelivered requests together.
+Each reserves two fixed 8 KiB payload slots (16 MiB total at default capacity,
+plus Redis/index overhead). A full queue rejects new inference. Pending records
+are never trimmed. `GATEWAY_ACCOUNTING_MAX_AOF_BYTES` defaults to 256 MiB; the
+gateway reserves Redis maxmemory plus four 8 KiB slot sizes per pending request
+for rewrites and final outcomes. With the default 128 MiB Redis memory limit,
+new protected traffic stops at 96 MiB current AOF size. The background guard
+returns `503 accounting_storage_unavailable` for models and chat before request
+credits are consumed, and cancels active generation so finalization can use its
+reserved space. Probes and metrics stay accessible.
+
+This is an admission threshold, not a hard filesystem quota. Allow for concurrent
+writes, AOF rewrites, backups, and other processes when provisioning the volume.
+A failed AOF write also closes admission; a missing disk acknowledgment never
+starts inference. Automatic AOF rewriting can make the guard healthy again.
+A Redis restart on the same intact volume preserves acknowledged handoffs.
+Disk loss and failover to a stale replica are outside this guarantee.
+
+The ready backlog and occupied slots can be inspected on the development stack:
+
+```sh
+docker compose -f deploy/docker-compose.yml exec -T redis \
+  redis-cli HLEN llmgate:accounting:v1:records
+docker compose -f deploy/docker-compose.yml exec -T redis \
+  redis-cli ZCOUNT llmgate:accounting:v1:ready -inf 9007199254740991
 ```
 
-This query also includes currently active requests. A missing row alone does not
-prove the request was abandoned. The integration check below verifies failed
-final delivery leaves an admission and cached authentication cannot bypass it:
+Divide `HLEN` by two for occupied request slots. Delivered admissions without a
+final outcome retain their slots while their owner is alive. An owner heartbeat
+runs every third of `GATEWAY_ACCOUNTING_LEASE_TIMEOUT` (30s by default). After
+expiry, bounded recovery creates interrupted usage with NULL tokens, HTTP zero,
+and `recovered = true`; its `total_ms` is admission-to-recovery time, not observed
+generation time. A late old owner cannot replace that result. Missing database
+rows can still represent active or queued work.
+
+The writer retries quota settlement before freeing final slots, against the
+original UTC day. Unknown consumption keeps its conservative charge. Postgres
+retention removes usage/admission pairs older than `GATEWAY_ACCOUNTING_RETENTION`
+from request start (720h), sweeping every `GATEWAY_ACCOUNTING_PRUNE_INTERVAL` (1h).
+Each transaction deletes at most the configured batch size, then continues while
+full batches remain. Unfinished admissions and API keys are retained.
+
+Run against isolated test Postgres schemas and a disposable Redis configured with
+the settings above. Queue tests use random namespaces; quota tests use random
+key IDs. Keep mutation/restart checks separate from the normal suite:
 
 ```sh
 LLMGATE_TEST_DATABASE_URL="$GATEWAY_DATABASE_URL" \
-  go test -race -count=1 ./cmd/gateway -run '^TestAdmissionSurvivesDeliveryFailure$'
+LLMGATE_TEST_ACCOUNTING_REDIS_URL="$TEST_REDIS_URL" \
+  go test -race -count=1 ./internal/accounting ./internal/store ./cmd/gateway
 ```
+
+`TestDurableAccountingBatches` covers batch limits, cached-key rejection, a lost
+Postgres commit reply, and replacement-worker replay. `TestQueueRedisRestart`
+supports `LLMGATE_ACCOUNTING_RESTART_PHASE=seed` followed by `replay` around an
+external Redis SIGKILL/restart on the same test volume. Run
+`TestQueueRedisConfiguration` alone with `LLMGATE_ACCOUNTING_ADMIN_CHECK=1` only
+on disposable Redis: it temporarily changes fsync/maxmemory to verify rejection
+of unsafe settings and final-slot replacement under memory pressure.
+`TestDiskFullRecovery` has separate `LLMGATE_ACCOUNTING_DISK_PHASE=seed` and
+`replay` modes for an externally constrained disposable filesystem. Never fill
+the host or the learning volume to exercise it. The final verification used a
+4 MiB tmpfs, preserved acknowledged admissions through Redis ENOSPC and restart,
+and removed the disposable filesystem afterward.
 
 ## Daily token quotas
 
@@ -1155,8 +1216,15 @@ are not part of this initial exporter deployment.
 | `GATEWAY_METRICS_KEY_CAPACITY` | `0` | Maximum distinct numeric key labels for the process lifetime; zero groups all keys under `other`, as does overflow |
 | `GATEWAY_METRICS_MAX_SCRAPES` | `2` | Maximum simultaneous scrapes |
 | `GATEWAY_METRICS_SCRAPE_TIMEOUT` | `2s` | Scrape response deadline |
-| `GATEWAY_USAGE_WRITE_TIMEOUT` | `2s` | Per-write admission/final usage deadline; only final writes detach client cancellation |
+| `GATEWAY_USAGE_WRITE_TIMEOUT` | `2s` | Each Redis handoff and Postgres batch deadline; final handoff detaches client cancellation |
 | `GATEWAY_USAGE_MAX_BYTES` | `65536` | JSON response capture and each SSE line/event observation bound |
+| `GATEWAY_ACCOUNTING_MAX_PENDING` | `1024` | Shared capacity including active requests and undelivered outcomes |
+| `GATEWAY_ACCOUNTING_BATCH_SIZE` | `64` | Maximum requests per Postgres transaction; cannot exceed capacity |
+| `GATEWAY_ACCOUNTING_FLUSH_INTERVAL` | `250ms` | Background idle polling interval; not an inference batching delay |
+| `GATEWAY_ACCOUNTING_LEASE_TIMEOUT` | `30s` | Request-owner lifetime; greater than `3 × (write timeout + polling interval)` |
+| `GATEWAY_ACCOUNTING_MAX_AOF_BYTES` | `268435456` | AOF admission budget including reserved rewrite/final headroom; not a filesystem quota |
+| `GATEWAY_ACCOUNTING_RETENTION` | `720h` | Request-start age before final accounting pairs become eligible for deletion |
+| `GATEWAY_ACCOUNTING_PRUNE_INTERVAL` | `1h` | Postgres retention sweep interval |
 | `GATEWAY_ADMIN_ENABLED` | `false` | Enable operator-local admin HTTP |
 | `GATEWAY_ADMIN_ADDR` | `127.0.0.1:8082` | Literal loopback IP and numeric port |
 | `GATEWAY_ADMIN_TOKEN` | Unset | Required when enabled; 32 to 256 URL-safe ASCII characters |

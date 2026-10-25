@@ -145,14 +145,10 @@ func (p *Permit) Finish(ctx context.Context, record store.Usage) {
 		return
 	}
 
-	charge := int64(-1)
+	charge := Charge(p.reservation, record)
 	if record.Status == store.UsageCompleted && record.PromptTokens != nil && record.CompletionTokens != nil &&
-		*record.PromptTokens >= 0 && *record.CompletionTokens >= 0 && *record.PromptTokens <= maxExact-*record.CompletionTokens {
-		charge = *record.PromptTokens + *record.CompletionTokens
-		if *record.PromptTokens != p.reservation.PromptTokens || *record.CompletionTokens > p.reservation.OutputTokens {
-			requestlog.Logger(ctx).ErrorContext(ctx, "quota backend usage exceeded or differed from reservation", "key_id", p.reservation.KeyID)
-			charge = max(charge, p.reservation.PromptTokens+p.reservation.OutputTokens)
-		}
+		(*record.PromptTokens != p.reservation.PromptTokens || *record.CompletionTokens > p.reservation.OutputTokens) {
+		requestlog.Logger(ctx).ErrorContext(ctx, "quota backend usage exceeded or differed from reservation", "key_id", p.reservation.KeyID)
 	}
 
 	p.settle(ctx, charge)
@@ -246,4 +242,18 @@ func prepare(body []byte) (map[string]json.RawMessage, int64, error) {
 	fields["max_tokens"] = json.RawMessage(fmt.Sprint(output))
 
 	return fields, output, nil
+}
+
+// Charge reconciles known completed usage, retaining the allowance for uncertain consumption.
+func Charge(reservation Reservation, record store.Usage) int64 {
+	charge := int64(-1)
+	if record.Status == store.UsageCompleted && record.PromptTokens != nil && record.CompletionTokens != nil &&
+		*record.PromptTokens >= 0 && *record.CompletionTokens >= 0 && *record.PromptTokens <= maxExact-*record.CompletionTokens {
+		charge = *record.PromptTokens + *record.CompletionTokens
+		if *record.PromptTokens != reservation.PromptTokens || *record.CompletionTokens > reservation.OutputTokens {
+			charge = max(charge, reservation.PromptTokens+reservation.OutputTokens)
+		}
+	}
+
+	return charge
 }

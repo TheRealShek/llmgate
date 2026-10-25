@@ -176,6 +176,9 @@ func TestDailyQuotaFlow(t *testing.T) {
 			expected := int64(20) + tt.grace/5
 			if tt.refund {
 				expected = 7
+				if tt.dbDown {
+					expected = 15
+				}
 			}
 
 			deadline := time.Now().Add(2 * time.Second)
@@ -197,7 +200,12 @@ func TestDailyQuotaFlow(t *testing.T) {
 					t.Fatal(err, queryErr)
 				}
 
-				if fields == 2 && rows == 1 {
+				wantFields := int64(2)
+				if tt.dbDown {
+					wantFields = 3
+				}
+
+				if fields == wantFields && rows == 1 {
 					break
 				}
 
@@ -242,16 +250,7 @@ func quotaTestGateway(t *testing.T, address string, grace int64) (*httptest.Serv
 	t.Helper()
 	pool, _ := authenticationTestPool(t)
 
-	for _, name := range []string{"000002_usage.up.sql", "000003_inference_admissions.up.sql"} {
-		migration, err := os.ReadFile("../../migrations/" + name)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if _, err := pool.Exec(t.Context(), string(migration)); err != nil {
-			t.Fatal(err)
-		}
-	}
+	migrateUsage(t, pool)
 
 	redisURL := os.Getenv("LLMGATE_TEST_REDIS_URL")
 	if redisURL == "" {
@@ -304,7 +303,7 @@ func quotaTestGateway(t *testing.T, address string, grace int64) (*httptest.Serv
 		Streaming:      proxy.NewStreamingHandler(target, transport, time.Second),
 		Authentication: auth.NewAuthenticator(keys, auth.Options{LookupTimeout: time.Second, CacheTTL: time.Minute, CacheCapacity: 16}),
 		RequestLimits:  testRequestLimits(), Quota: tokenQuota,
-		Usage:  usage.NewRecorder(usage.Options{Store: store.NewUsageStore(pool), Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024}),
+		Usage:  usage.NewRecorder(usage.Options{Store: directUsageStore{store.NewUsageStore(pool)}, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024}),
 		Limits: gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 128},
 	})
 	public := httptest.NewServer(requestlog.NewHandler(m.Observe(routes), slog.New(slog.NewJSONHandler(io.Discard, nil))))

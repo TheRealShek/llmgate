@@ -439,7 +439,9 @@ func TestChatTokenLimitOmitted(t *testing.T) {
 
 type captureUsage func(context.Context, store.Usage) error
 
-func (captureUsage) RecordAdmission(context.Context, store.Admission) error { return nil }
+func (captureUsage) RecordAdmission(context.Context, store.Admission, context.CancelFunc) error {
+	return nil
+}
 
 func (f captureUsage) RecordUsage(ctx context.Context, record store.Usage) error {
 	return f(ctx, record)
@@ -450,7 +452,7 @@ type admissionUsage struct {
 	admit func(context.Context, store.Admission) error
 }
 
-func (s admissionUsage) RecordAdmission(ctx context.Context, record store.Admission) error {
+func (s admissionUsage) RecordAdmission(ctx context.Context, record store.Admission, _ context.CancelFunc) error {
 	return s.admit(ctx, record)
 }
 
@@ -609,7 +611,9 @@ func TestMissingUsageRecorder(t *testing.T) {
 // discardUsage keeps route, authentication, and logging tests independent of persistence.
 type discardUsage struct{}
 
-func (discardUsage) RecordAdmission(context.Context, store.Admission) error { return nil }
+func (discardUsage) RecordAdmission(context.Context, store.Admission, context.CancelFunc) error {
+	return nil
+}
 
 func (discardUsage) RecordUsage(context.Context, store.Usage) error { return nil }
 
@@ -711,12 +715,12 @@ func (s accountingReservations) Settle(ctx context.Context, r quota.Reservation,
 // TestChatAccountingLifecycle checks proxy metrics end before settlement and writing across request outcomes.
 func TestChatAccountingLifecycle(t *testing.T) {
 	for _, tt := range []struct {
-		name                                                  string
-		stream, cancel, abort, missingRecorder, settleFailure bool
-		body, suffix                                          string
-		status                                                store.UsageStatus
-		charge                                                int64
-		ttft                                                  int
+		name                                                                string
+		stream, cancel, abort, missingRecorder, settleFailure, usageFailure bool
+		body, suffix                                                        string
+		status                                                              store.UsageStatus
+		charge                                                              int64
+		ttft                                                                int
 	}{
 		{name: "JSON", body: `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`, status: store.UsageCompleted, charge: 9},
 		{name: "fragmented SSE", stream: true, body: "data: {}", suffix: "\n\ndata: {\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n", status: store.UsageCompleted, charge: 9, ttft: 1},
@@ -726,6 +730,7 @@ func TestChatAccountingLifecycle(t *testing.T) {
 		{name: "proxy abort", stream: true, abort: true, body: "data: {}\n\n", status: store.UsageInterrupted, charge: -1, ttft: 1},
 		{name: "settlement failure", settleFailure: true, body: `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`, status: store.UsageCompleted, charge: 9},
 		{name: "missing recorder", missingRecorder: true, charge: 0},
+		{name: "failed durable handoff", usageFailure: true, body: `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`, status: store.UsageCompleted},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			m := metrics.New(metrics.Options{MaxScrapes: 2, ScrapeTimeout: time.Second})
@@ -743,8 +748,8 @@ func TestChatAccountingLifecycle(t *testing.T) {
 					t.Error("settlement lost its deadline, cancellation independence, or charge", charge)
 				}
 
-				if writes != 0 || !strings.Contains(scrape(), `gateway_active_streams{backend="primary"} 0`) {
-					t.Error("settlement ran before proxy cleanup or after persistence")
+				if writes != 1 && !tt.missingRecorder || !strings.Contains(scrape(), `gateway_active_streams{backend="primary"} 0`) {
+					t.Error("settlement ran before durable handoff or proxy cleanup")
 				}
 
 				if tt.settleFailure {
@@ -758,15 +763,19 @@ func TestChatAccountingLifecycle(t *testing.T) {
 				Store: captureUsage(func(ctx context.Context, record store.Usage) error {
 					writes++
 
-					if settlements != 1 || record.Status != tt.status || ctx.Err() != nil {
-						t.Error("usage write preceded settlement or lost the observed outcome", record.Status)
+					if settlements != 0 || record.Status != tt.status || ctx.Err() != nil {
+						t.Error("durable handoff followed settlement or lost the observed outcome", record.Status)
 					}
 
 					if !strings.Contains(scrape(), `gateway_active_streams{backend="primary"} 0`) {
 						t.Error("stream remained active during usage writing")
 					}
 
-					return errors.New("usage unavailable")
+					if tt.usageFailure {
+						return errors.New("usage unavailable")
+					}
+
+					return nil
 				}), Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
 			})
 			if tt.missingRecorder {
@@ -842,7 +851,12 @@ func TestChatAccountingLifecycle(t *testing.T) {
 				t.Error("accounting changed the forwarded response")
 			}
 
-			if settlements != 1 || writes != wantWrites {
+			wantSettlements := 1
+			if tt.usageFailure {
+				wantSettlements = 0
+			}
+
+			if settlements != wantSettlements || writes != wantWrites {
 				t.Fatal("accounting did not finish exactly once", settlements, writes)
 			}
 

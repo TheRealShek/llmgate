@@ -501,17 +501,12 @@ and requests rejected before inference remain outside this ledger. Correlate
 records with gateway-generated request IDs, unique in Postgres; retain key
 identity after revocation and do not store prompts or response bodies.
 
-The original slice used a bounded final write with visible failures. Durable
-Postgres admission now precedes generation, while the final write remains bounded.
-The insert runs synchronously after proxy copying ends, independent of client
-cancellation, with no retries or background queue.
-This preserves an already-admitted inference response on final-write failure.
-Cached keys no longer allow new inference during Postgres outages. The final
-write can delay handler or response completion until its timeout. An outage,
-crash, or exhausted shutdown-cleanup window can lose the final result while
-leaving its admission identifiable. Stronger recovery remains part of the
-[required durable accounting work](PROJECT_INTENT.md#durable-accounting-requirements).
-Final-outcome recovery and retryable quota settlement remain unimplemented.
+The original bounded final Postgres write and later per-request Postgres
+admission transaction are superseded by the
+[shared accounting queue](#durable-accounting-admission-policy). Observation and
+outcome classification remain unchanged. Final handoff still has its own
+deadline, independent of client cancellation, and never rewrites an already
+started inference response.
 
 Abhishek chose unknown token counts plus observed SSE chunk counts over charging
 chunk-based estimates. Store both token counts as NULL unless the backend
@@ -673,35 +668,82 @@ for failed-connection cleanup, so Docker's stop grace also allows that teardown
 instead of killing the process while the driver is closing sockets. Missing
 storage or an exhausted cleanup budget still prevents a durability guarantee.
 
-Durable request recording and recovery are
-[required remaining Phase 1 work](PROJECT_INTENT.md#durable-accounting-requirements).
-They were not implemented by this controlled-shutdown fix and do not depend on
-Phase 2.
+The later [durable accounting path](#durable-accounting-admission-policy) covers
+process crashes and Postgres outages. Controlled shutdown still needs this cleanup
+window to preserve an observed final outcome before abandoning request ownership.
 
 
 ## Durable accounting admission policy
 
-Reject new inference with `503` if its durable admission record cannot be saved,
-including unavailable or full recording storage. Do not start generation and
-fall back silently to best-effort accounting.
+Use shared Redis for durable admission and known final outcomes, then deliver
+records to Postgres in batches. This supersedes a synchronous Postgres admission
+transaction per inference request. It keeps batch timers and Postgres writes out
+of the inference path without making accounting local to one gateway replica.
+The design follows the separation described in
+[LiteLLM's production guidance](https://docs.litellm.ai/docs/proxy/prod#batch-spend-writes),
+while retaining our stronger disk-acknowledged handoff requirement.
 
-Admission now uses shared Postgres, so replacement gateway replicas do not need
-another replica's disk. Abhishek chose rejection during database outages over
-maintaining a separate local journal. There is no outage grace setting.
+Abhishek chose stronger durability over an acknowledged one-second loss window.
+Require AOF `always` and `noeviction`; use `WAITAOF 1 0` on the same reserved Redis
+connection after each admission/final write. This acknowledges local disk
+persistence, not survival of disk loss or promotion of a stale replica. Redis
+must honor filesystem syncs. See [WAITAOF](https://redis.io/docs/latest/commands/waitaof/).
+Persistence adds latency and applies to quota/rate writes on this shared Redis
+instance too. The [final baseline](benchmarks.md) measures the complete path; it
+does not isolate disk-sync cost from prompt counting, proxying, or network paths.
 
-Commit request metadata and its Redis reservation identity before forwarding to
-inference. Set `synchronous_commit=on` within that transaction, even when the
-connection default is asynchronous. A failed or uncertain commit acknowledgment
-must stop generation. Refund the unused quota reservation under an independent
-bounded deadline; if Redis fails too, its allowance remains conservatively charged.
+Reserve two fixed-size 8 KiB slots per request before generation. One retains
+admission metadata; the other is preallocated for the final outcome. A shared
+pending-request cap includes active attempts and undelivered outcomes. Keeping
+active slots after admission delivery prevents new work from consuming their
+final-result capacity. Finalization only replaces reserved values, including
+under Redis memory pressure. This bounds queue payload allocation.
 
-The admission and final usage rows share a request ID. A missing final row leaves
-an identifiable unfinished attempt, without inventing token counts. These rows
-are evidence for recovery, not an implemented recovery worker. Admission does not
-make final usage durable during a later Postgres outage: a gateway crash can
-still lose the exact final result. Postgres storage durability and failover must
-also preserve acknowledged commits. Recovery ownership, retention bounds, and
-retryable quota settlement remain required Phase 1 work.
+A separate AOF budget stops protected
+traffic before rate-limit writes when current AOF bytes reach the budget minus
+Redis maxmemory and four slot sizes per pending request. At defaults, 256 MiB
+minus 128 MiB minus 32 MiB leaves a 96 MiB admission threshold. The reserve leaves
+room for a rewrite and final outcomes. Background checks and concurrent writes
+mean this is an admission threshold, not a hard filesystem quota. Operators must
+provision disk capacity for Redis, rewrite scratch space, and backups. Actual
+ENOSPC fails closed: a handoff without a disk acknowledgment never authorizes
+generation.
+
+Postgres retention defaults to 30 days from request start, swept hourly in
+bounded transactions. Each full batch is followed immediately by another, so
+cleanup can catch up with incoming traffic. Only usage rows and their matching
+admissions are removed; unfinished admissions and keys survive. Eligibility age
+and cleanup lag are explicit, rather than promising a fixed physical database
+size. Redis removes delivered final records only after settlement succeeds.
+
+One leased writer commits at most the configured batch size per transaction.
+It acknowledges only unchanged Redis records after Postgres commit. A final
+outcome arriving during admission delivery remains queued. Lost acknowledgments
+cause retry-safe replay; a conflict pauses admission rather than dropping data.
+Full batches drain immediately; the background timer bounds idle polling.
+
+Keep the agreed rejection policy: no new inference once Postgres delivery fails.
+The writer removes its short-lived shared health marker on failure. If it dies,
+that marker expires after twice the write timeout plus twice the flush interval.
+This is failure-detection time, not an optional serving grace period. Already
+admitted requests can still save final outcomes. Redis failure or full capacity
+also returns `503` before generation. Cached model listing is unaffected.
+
+Persist the final outcome before attempting quota refunds. Failed handoff keeps
+the allowance pending and charged. The writer repeats settlement after Postgres
+commit and before Redis acknowledgment, using the same idempotent operation and
+original UTC day as request cleanup. A settlement failure retains the queue record
+for retry; a lost acknowledgment cannot refund twice.
+
+Each gateway maintains an expiring ownership identity and registers active
+request cancellation under that identity. Lease loss cancels local generation;
+expired identities cannot renew or submit a late final result. After expiry, a
+worker reconstructs missing finals as interrupted with unknown counts and retains
+the conservative quota charge. `recovered = true` distinguishes their admission-
+to-recovery interval from an observed duration. Waiting for the ownership lease
+avoids declaring a live request abandoned merely because its admission reached
+Postgres. Known final outcomes are replayed without replacing them with recovery
+estimates. A gateway that resumes after suspension must establish a fresh epoch.
 
 
 ## Retry-safe usage delivery
@@ -717,4 +759,7 @@ creates a PostgreSQL row version but changes no accounting values. This is a
 small retry-path cost for an atomic comparison. See
 [Postgres conflict handling](https://www.postgresql.org/docs/current/sql-insert.html)
 and [NULL-safe comparison](https://www.postgresql.org/docs/current/functions-comparison.html).
-The admission gate uses the same request IDs. No delivery or recovery worker is implemented yet.
+The batch writer uses the same conflict checks for admission and final usage.
+Queued records replay after restart, including fenced abandoned-attempt recovery
+and retryable quota settlement. Retention keeps both the admission and final row
+for the configured eligibility period.

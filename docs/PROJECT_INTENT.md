@@ -92,50 +92,33 @@ Target: weeks 1 to 3.
 - API keys in Postgres with a migration tool (`goose` or `golang-migrate`). Keys are stored as hashes.
 - Token bucket rate limit per key in Redis. Write it as a Lua script so the check and the decrement are atomic.
 - Daily token quota per key covering input and output, with exact backend prompt counting, shared reservations, and configurable grace defaulting to zero. Reconcile completed requests from backend usage; retain reservations when consumption is uncertain.
-- Durable accounting for admitted inference, final usage delivery, and recoverable quota settlement, including interrupted requests. See the remaining requirements below.
+- Durable accounting for admitted inference, final usage delivery, and recoverable quota settlement, including interrupted requests. See the requirements below.
 - Structured logs with `log/slog` and a request ID on every line.
 - Graceful shutdown. On SIGTERM, stop accepting new requests and let active streams finish, with a hard deadline.
 - First Prometheus metrics. Request count, request duration, TTFT, active streams.
 
-**Current checkpoint and next slices**
+**Current checkpoint**
 
-Streaming and JSON forwarding, request validation, cancellation, deadlines,
-request logs, readiness, and graceful shutdown are implemented. API-key storage
-now feeds route authentication through a bounded in-memory cache with Postgres
-lookups on misses. Models and chat require an active key; health and readiness
-remain public. A local command creates keys. An opt-in loopback admin listener creates and revokes keys over HTTP using a
-separate operator token. Revocation persists in the same store and signals
-active requests for that key through the shared authenticator. Public routes never expose admin
-operations. Both servers share bounded startup and graceful shutdown ownership.
-The authenticated CUDA baseline is recorded in [benchmarks](benchmarks.md).
+Phase 1 implementation is complete. The single-backend gateway supports JSON and
+SSE chat, exact daily input/output quotas with zero default grace, per-key Redis
+request limits, cached authentication, local admin creation/revocation with active
+cancellation, deadlines, structured logs, readiness, graceful shutdown, and the
+four initial Prometheus metric families. Compose provides the gateway, pinned
+CUDA backend, Postgres migrations, and persistent Redis/Postgres storage.
 
-Authentication caches successful identities for a fixed lifetime. Admin revocation
-invalidates local entries; unexpired entries work during database outages, while
-misses and expired entries fail closed. Redis now enforces per-key request rates
-using an atomic token bucket. Models and chat share each key's bucket; exhaustion
-returns `429` with retry guidance, and Redis errors fail closed with `503`.
-Compose now defines the gateway, pinned CUDA backend, Postgres, Redis, and
-startup migrations with health checks and persistent storage. Container inference,
-CUDA model loading, persistence, dependency outages, cancellation, backend failures,
-and concurrent shutdown have been exercised. Controlled shutdown now waits for
-bounded request accounting before dependency teardown. Storage outages, crashes,
-or an exhausted cleanup window can still lose best-effort usage rows. Validated
-inference attempts now produce bounded, best-effort Postgres usage records with
-timings, outcomes, backend token counts when present, and separate observed SSE
-chunk counts. Daily input/output quotas now use exact prompt counting on the
-pinned text backend, atomic Redis reservations, and a capped backend response.
-Grace defaults to zero. Missing or interrupted usage retains the allowance
-without inventing token counts. Initial request-count, duration, TTFT, and active-stream
-metrics are exposed at `/v1/metrics`. The authenticated GPU baseline and operational
-evidence are recorded. The forced-shutdown accounting regression is fixed and
-covered by real-storage and GPU checks. Phase 1 remains incomplete until the
-required durable accounting and recovery below are implemented and verified.
-These have no dependency on Phase 2. Retry-safe usage persistence and synchronous
-Postgres admission are implemented.
-New inference returns `503` when admission cannot commit, even for cached keys.
-Terminal-outcome recovery and quota-settlement retries remain unfinished.
-Later-phase routing and overload protection have not started.
-See [decisions](decisions.md) for authentication and revocation boundaries.
+Inference admission and final outcomes use a bounded shared Redis queue with
+local disk acknowledgment before generation or handoff success. Batched Postgres
+delivery, idempotent quota settlement, fenced abandoned-request recovery, storage
+exhaustion rejection, and retention are implemented. The final race suite,
+deployed failure checks, and authenticated GPU baseline are recorded in
+[benchmarks](benchmarks.md). The [architecture](architecture.md) owns request and
+worker lifetimes; [decisions](decisions.md) explains their tradeoffs.
+
+Unknown consumption retains its reservation. Crash recovery records unknown
+counts and distinguishes recovery time from observed inference duration. Local
+Redis AOF does not cover disk loss or stale-replica promotion. Phase 1 completion
+covers the agreed single-backend scope, not production readiness or later-phase
+routing, overload queues, circuit breakers, or prefix-aware routing.
 
 **Learn**
 
@@ -154,8 +137,8 @@ See [decisions](decisions.md) for authentication and revocation boundaries.
 
 ### Durable accounting requirements
 
-This is required unfinished Phase 1 work, not a Phase 2 dependency or an optional
-later improvement. Admission is now durable in Postgres; final usage delivery remains best effort.
+These are implemented Phase 1 requirements. Admission and known final outcomes
+have a durable Redis handoff, followed by retry-safe batch delivery into Postgres.
 
 - Record request identity and associate its quota reservation durably before
   inference starts. Keep prompts, response bodies, and credentials out of this record.
@@ -166,12 +149,14 @@ later improvement. Admission is now durable in Postgres; final usage delivery re
   against the original UTC day; do not invent exact counts from SSE chunks.
 - Bound durable storage, backlog, and retries. Reject new inference with `503`
   before generation when a durable admission record cannot be saved, including
-  unavailable or full recording storage. Use shared Postgres with synchronous
-  admission commits, without a local journal or database-outage grace period.
+  unavailable or full recording storage. Use a shared Redis accounting queue
+  with disk acknowledgment and batched Postgres delivery. No local journal or
+  configured database-outage grace period is used; failure detection is bounded
+  by worker operations and health expiry.
 
-Finish and verify these behaviors before declaring Phase 1 complete. The
-conservative charge for genuinely unknown consumption remains an explicit policy
-to review, separate from losing a known usage record or a retryable settlement.
+The conservative charge for genuinely unknown consumption remains the agreed
+policy. It is separate from losing a known usage record or retryable settlement.
+Bounded ownership recovery, storage rejection, and retention complete this scope.
 
 ---
 

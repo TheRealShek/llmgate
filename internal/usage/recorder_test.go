@@ -21,7 +21,9 @@ import (
 
 type usageFunc func(context.Context, store.Usage) error
 
-func (usageFunc) RecordAdmission(context.Context, store.Admission) error { return nil }
+func (usageFunc) RecordAdmission(context.Context, store.Admission, context.CancelFunc) error {
+	return nil
+}
 
 func (f usageFunc) RecordUsage(ctx context.Context, record store.Usage) error { return f(ctx, record) }
 
@@ -30,7 +32,7 @@ type admissionStore struct {
 	admit func(context.Context, store.Admission) error
 }
 
-func (s admissionStore) RecordAdmission(ctx context.Context, record store.Admission) error {
+func (s admissionStore) RecordAdmission(ctx context.Context, record store.Admission, _ context.CancelFunc) error {
 	return s.admit(ctx, record)
 }
 

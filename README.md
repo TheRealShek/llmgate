@@ -2,13 +2,16 @@
 
 `llmgate` is an OpenAI-compatible LLM gateway written in Go. It sits in front of
 an inference server such as llama.cpp and handles API-key authentication,
-request-rate limits, daily token quotas, validation, streaming, cancellation, and deadlines. The
-inference server loads the model and generates tokens.
+request-rate limits, daily token quotas, validation, streaming, cancellation,
+and deadlines. The inference server loads the model and generates tokens.
 
-Phase 1 is in progress with one backend. Model listing, JSON and streaming chat,
-health checks, request logs, durable admission before inference, persistent final usage, initial Prometheus
-metrics, and optional operator-local key management work today. Compose defines
-the gateway, pinned CUDA backend, Postgres, Redis, and startup migrations.
+Phase 1 is complete for one backend. Model listing, JSON and streaming chat,
+health checks, request logs, durable Redis accounting with batched Postgres
+delivery, initial Prometheus metrics, and optional operator-local key management
+are implemented and verified.
+Crash recovery, quota-settlement replay, storage guards, and retention complete
+the accounting path. The [final baseline and fault checks](docs/benchmarks.md)
+record the evidence. Compose defines the gateway, pinned CUDA backend, Postgres, Redis, and startup migrations.
 
 > **Not production-ready.** This is a project under active development.
 > Do not use it in production.
@@ -36,17 +39,20 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 ## Architecture
 
 ```mermaid
-flowchart LR
+flowchart TB
     Client[Inference client] -->|models and chat| Public
     Operator[Operator] -->|separate operator token| Admin
     Scraper[Metrics client] -->|GET /v1/metrics| Public
     subgraph Gateway[Gateway process]
         Public[Public HTTP listener]
         Admin[Optional loopback admin listener]
+        Writer[Accounting batch writer]
     end
-    Public -->|key lookup, inference admission, final usage| PG[(Postgres)]
+    Public -->|key lookup on cache miss| PG[(Postgres)]
     Admin -->|create or revoke key| PG
-    Public -->|request credits and token reservations| Redis[(Redis)]
+    Public -->|limits, reservations, durable accounting| Redis[(Redis)]
+    Writer -->|claim and acknowledge records| Redis
+    Writer -->|batched admissions and final usage| PG
     Public -->|prompt counting, inference, and health probes| Backend[Inference server]
 ```
 

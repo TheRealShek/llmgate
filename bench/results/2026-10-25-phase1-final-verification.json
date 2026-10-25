@@ -1,0 +1,446 @@
+{
+  "utc": "2026-10-25T14:14:04.862238+00:00",
+  "scope": "Isolated Compose gateway/Postgres/Redis and existing pinned CUDA backend; all final accounting middleware enabled",
+  "checks": [
+    {
+      "name": "json_and_streaming",
+      "result": "passed",
+      "seconds": 1.054,
+      "key_id": 1,
+      "usage": [
+        {
+          "request_id": "UZSKIRN6K6KLIA3SPY2QYXI3ES",
+          "prompt_tokens": 12,
+          "completion_tokens": 3,
+          "streaming": false,
+          "status": "completed",
+          "http_status": 200,
+          "ttft_ms": null,
+          "total_ms": 100.447974,
+          "recovered": false
+        },
+        {
+          "request_id": "C3B4N5CWLCXFPDDGGBJFR2LZ54",
+          "prompt_tokens": 25,
+          "completion_tokens": 32,
+          "streaming": true,
+          "status": "completed",
+          "http_status": 200,
+          "ttft_ms": 48.800739,
+          "total_ms": 578.441005,
+          "recovered": false
+        }
+      ]
+    },
+    {
+      "name": "decoding_disconnect",
+      "result": "passed",
+      "seconds": 0.175,
+      "usage": {
+        "request_id": "APR22WRZY57LFA4S3AAHEEM7XV",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "streaming": true,
+        "status": "canceled",
+        "http_status": 200,
+        "ttft_ms": 21.199237,
+        "total_ms": 21.494188,
+        "recovered": false
+      }
+    },
+    {
+      "name": "prefill_disconnect",
+      "result": "passed",
+      "seconds": 0.578,
+      "prompt_tokens": 867,
+      "disconnect_to_release_s": 0.39425131600000896,
+      "usage": {
+        "request_id": "WQOYFBXJLHDUFGU4V34J7RIGWU",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "streaming": true,
+        "status": "canceled",
+        "http_status": 200,
+        "ttft_ms": null,
+        "total_ms": 21.080276,
+        "recovered": false
+      },
+      "backend_evidence": [
+        "281.41.191.138 I slot launch_slot_: id  0 | task 20082 | processing task, is_child = 0",
+        "281.41.567.672 W srv          stop: cancel task, id_task = 20082",
+        "281.41.585.235 I slot      release: id  0 | task 20082 | stop processing: n_tokens = 868, truncated = 0"
+      ]
+    },
+    {
+      "name": "different_key_rates",
+      "result": "passed",
+      "seconds": 0.181,
+      "2": {
+        "key_id": 4,
+        "statuses": [
+          200,
+          200,
+          429,
+          429,
+          429
+        ]
+      },
+      "5": {
+        "key_id": 5,
+        "statuses": [
+          200,
+          200,
+          200,
+          200,
+          200
+        ]
+      }
+    },
+    {
+      "name": "redis_outage",
+      "result": "passed",
+      "seconds": 1.088,
+      "key_id": 7,
+      "recovered_automatically": true,
+      "usage": [
+        {
+          "request_id": "SVRC7SGOHGDLYOSJXX6354QYOP",
+          "prompt_tokens": 8,
+          "completion_tokens": 8,
+          "streaming": false,
+          "status": "completed",
+          "http_status": 200,
+          "ttft_ms": null,
+          "total_ms": 151.704184,
+          "recovered": false
+        }
+      ]
+    },
+    {
+      "name": "real_backend_killed_midstream",
+      "result": "passed",
+      "seconds": 4.036,
+      "usage": {
+        "request_id": "WXLOP3OYPCBMG5FVJTYYSZJIIO",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "streaming": true,
+        "status": "interrupted",
+        "http_status": 200,
+        "ttft_ms": 21.480392,
+        "total_ms": 61.806618,
+        "recovered": false
+      },
+      "backend_restarted": true
+    },
+    {
+      "name": "gateway_crash_recovery",
+      "result": "passed",
+      "seconds": 23.731,
+      "usage": {
+        "request_id": "7P2LQ6NPSQVMEM3FRVMEPFCTJ3",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "streaming": true,
+        "status": "interrupted",
+        "http_status": 0,
+        "ttft_ms": null,
+        "total_ms": 23491.108834,
+        "recovered": true
+      },
+      "unknown_usage_kept_charged": true,
+      "reserved_tokens": 537
+    },
+    {
+      "name": "graceful_three_requests",
+      "result": "passed",
+      "seconds": 20.111,
+      "elapsed_s": 1.9069758879995788,
+      "exit_code": "0",
+      "clients": [
+        {
+          "status": 200,
+          "done": true
+        },
+        {
+          "status": 200,
+          "done": true
+        },
+        {
+          "status": 200,
+          "done": true
+        }
+      ],
+      "usage": [
+        {
+          "request_id": "ZEAERC4KSSY5QDMQB2T5ZQ35J4",
+          "prompt_tokens": 25,
+          "completion_tokens": 32,
+          "streaming": true,
+          "status": "completed",
+          "http_status": 200,
+          "ttft_ms": 45.521022,
+          "total_ms": 577.147885,
+          "recovered": false
+        },
+        {
+          "request_id": "3VR4ZU5KOJU3GFTX4J2ZZ7W3UN",
+          "prompt_tokens": 25,
+          "completion_tokens": 32,
+          "streaming": true,
+          "status": "completed",
+          "http_status": 200,
+          "ttft_ms": 596.807938,
+          "total_ms": 1147.026524,
+          "recovered": false
+        },
+        {
+          "request_id": "T25KYDROWOXGH57ESVRWKR7ORM",
+          "prompt_tokens": 25,
+          "completion_tokens": 32,
+          "streaming": true,
+          "status": "completed",
+          "http_status": 200,
+          "ttft_ms": 1163.639524,
+          "total_ms": 1698.446965,
+          "recovered": false
+        }
+      ]
+    },
+    {
+      "name": "forced_three_requests",
+      "result": "passed",
+      "seconds": 21.403,
+      "elapsed_s": 3.274779704002867,
+      "exit_code": "1",
+      "clients": [
+        {
+          "error": "IncompleteRead"
+        },
+        {
+          "error": "RemoteDisconnected"
+        },
+        {
+          "error": "RemoteDisconnected"
+        }
+      ],
+      "usage": [
+        {
+          "request_id": "DU6Z3WVHSABVI5YPG5XQZ2NEKM",
+          "prompt_tokens": null,
+          "completion_tokens": null,
+          "streaming": true,
+          "status": "canceled",
+          "http_status": 200,
+          "ttft_ms": 57.289053,
+          "total_ms": 3146.668019,
+          "recovered": false
+        },
+        {
+          "request_id": "TWZKFYIV6U4J3ZMCURIUIKOTBK",
+          "prompt_tokens": null,
+          "completion_tokens": null,
+          "streaming": true,
+          "status": "canceled",
+          "http_status": 0,
+          "ttft_ms": null,
+          "total_ms": 3146.409393,
+          "recovered": false
+        },
+        {
+          "request_id": "ZJ2PU7RWVWYT3QQFX55TG63UV3",
+          "prompt_tokens": null,
+          "completion_tokens": null,
+          "streaming": true,
+          "status": "canceled",
+          "http_status": 0,
+          "ttft_ms": null,
+          "total_ms": 3146.80859,
+          "recovered": false
+        }
+      ]
+    },
+    {
+      "name": "forced_shutdown_postgres_unavailable",
+      "result": "passed",
+      "seconds": 36.524,
+      "elapsed_s": 18.30594652400032,
+      "exit_code": "1",
+      "clients": [
+        {
+          "error": "RemoteDisconnected"
+        },
+        {
+          "error": "IncompleteRead"
+        },
+        {
+          "error": "RemoteDisconnected"
+        }
+      ],
+      "usage": [
+        {
+          "request_id": "F2TVRX4H34KNXSULU5XMBLSK55",
+          "prompt_tokens": null,
+          "completion_tokens": null,
+          "streaming": true,
+          "status": "canceled",
+          "http_status": 200,
+          "ttft_ms": 43.235001,
+          "total_ms": 3197.058599,
+          "recovered": false
+        },
+        {
+          "request_id": "EQSTVPSWGI5ONYIHO77ZCTE2KB",
+          "prompt_tokens": null,
+          "completion_tokens": null,
+          "streaming": true,
+          "status": "canceled",
+          "http_status": 0,
+          "ttft_ms": null,
+          "total_ms": 3197.051239,
+          "recovered": false
+        },
+        {
+          "request_id": "UOVPY5N7MF7QEQPVIB43L3ORUO",
+          "prompt_tokens": null,
+          "completion_tokens": null,
+          "streaming": true,
+          "status": "canceled",
+          "http_status": 0,
+          "ttft_ms": null,
+          "total_ms": 3197.004601,
+          "recovered": false
+        }
+      ]
+    },
+    {
+      "name": "backend_never_responds",
+      "result": "passed",
+      "seconds": 2.336,
+      "elapsed_s": 2.0143254490030813,
+      "usage": {
+        "request_id": "PZWQAMGOCMSBQHTOYMZQQSVRQY",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "streaming": true,
+        "status": "failed",
+        "http_status": 504,
+        "ttft_ms": null,
+        "total_ms": 2009.349866,
+        "recovered": false
+      },
+      "configured_header_timeout_s": 2
+    },
+    {
+      "name": "backend_idle_timeout",
+      "result": "passed",
+      "seconds": 2.354,
+      "elapsed_s": 2.0348974709995673,
+      "client_error": "IncompleteRead",
+      "usage": {
+        "request_id": "YP5MFLYLPQK4HG3TQN2JLX4EDS",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "streaming": true,
+        "status": "interrupted",
+        "http_status": 200,
+        "ttft_ms": 29.819708,
+        "total_ms": 2030.041111,
+        "recovered": false
+      },
+      "configured_idle_timeout_s": 2
+    },
+    {
+      "name": "admin_active_revocation",
+      "result": "passed",
+      "seconds": 0.482,
+      "usage": {
+        "request_id": "ROGAGM75PNQ34OSSJGM4GHVNOE",
+        "prompt_tokens": null,
+        "completion_tokens": null,
+        "streaming": true,
+        "status": "canceled",
+        "http_status": 200,
+        "ttft_ms": 75.727135,
+        "total_ms": 263.345019,
+        "recovered": false
+      },
+      "revoked_key_status": 401
+    },
+    {
+      "name": "postgres_outage_and_active_final",
+      "result": "passed",
+      "seconds": 5.788,
+      "key_id": 19,
+      "durable_final_during_outage": true,
+      "unused_rejected_reservations_refunded": true,
+      "usage": [
+        {
+          "request_id": "XGQDCHPUU3SPK54E2NR4QAS2P6",
+          "prompt_tokens": 8,
+          "completion_tokens": 16,
+          "streaming": false,
+          "status": "completed",
+          "http_status": 200,
+          "ttft_ms": null,
+          "total_ms": 339.172722,
+          "recovered": false
+        },
+        {
+          "request_id": "AXW6CMTCYTAXMNNUSZHUNXH2J6",
+          "prompt_tokens": null,
+          "completion_tokens": null,
+          "streaming": true,
+          "status": "canceled",
+          "http_status": 200,
+          "ttft_ms": 49.914376,
+          "total_ms": 4777.510151,
+          "recovered": false
+        }
+      ],
+      "reserved_tokens": 537
+    }
+  ],
+  "limitations": [
+    "Redis local-disk acknowledgment does not cover disk loss or stale-replica promotion",
+    "Recovered duration ends at recovery; recovered=true distinguishes it from observed inference duration"
+  ],
+  "harness_notes": [
+    "GPU metrics uses the actual randomized key ID.",
+    "Admin client keeps its TCP write side open until the documented HTTP 204 response.",
+    "Database outage probes wait for failure detection before issuing a rejected request."
+  ],
+  "storage_checks": [
+    {
+      "name": "redis_sigkill_restart",
+      "result": "passed",
+      "evidence": "TestQueueRedisRestart seed, SIGKILL, same-volume restart, replay"
+    },
+    {
+      "name": "unsafe_fsync_and_memory_pressure",
+      "result": "passed",
+      "evidence": "TestQueueRedisConfiguration rejects everysec; reserved final write succeeds with maxmemory=1"
+    },
+    {
+      "name": "real_filesystem_enospc",
+      "result": "passed",
+      "filesystem_bytes": 4194304,
+      "acknowledged_admissions_recovered": 61,
+      "evidence": "TestDiskFullRecovery seed/replay; 3 MiB filler on disposable tmpfs; Redis fsync-always exited on ENOSPC; same filesystem replay recovered all acknowledged admissions"
+    }
+  ],
+  "automated_verification": {
+    "race_suite": "passed: go test -race -count=1 -timeout=180s ./... with real Postgres, isolated Redis, and CUDA backend",
+    "vet": "passed: go vet ./...",
+    "whitespace_lint": "passed: GOTOOLCHAIN=go1.27.0 wsl on affected packages",
+    "migration": "passed: up/down, recovered provenance constraint, retention index",
+    "documentation": "local file links checked; changed Mermaid request flow rendered and inspected in light mode",
+    "staticcheck": "unavailable; not installed"
+  },
+  "cleanup": {
+    "disposable_compose_project": "removed with owned volumes",
+    "disposable_redis_and_enospc_filesystem": "removed",
+    "learning_gateway_backend_postgres_redis": "all healthy; readiness HTTP 200",
+    "commits_or_pushes": "none"
+  }
+}

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -137,7 +138,10 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Reading r.Body drained the stream. Clone the request and attach a new reader
 	// for the buffered bytes so the upstream proxy can read the body.
-	request := r.Clone(r.Context())
+	requestCtx, cancelRequest := context.WithCancel(r.Context())
+	defer cancelRequest()
+
+	request := r.Clone(requestCtx)
 	request.Body = io.NopCloser(bytes.NewReader(body))
 	request.ContentLength = int64(len(body))
 	request.TransferEncoding = nil // Use Content-Length instead of chunked transfer.
@@ -150,6 +154,7 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	observation, err := h.usage.Observe(w, request, usage.Request{
 		Model: model, Streaming: options.stream,
 		Reservation: admission.Permit.Reservation(),
+		Cancel:      cancelRequest,
 		FirstData:   func(at time.Time) { metrics.FirstData(request.Context(), at) },
 	})
 	if err != nil {
@@ -166,13 +171,14 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	returned := false
 
 	// Finalize in this order on normal return, disconnect, or proxy abort.
-	// Proxy work ends before Redis settlement and the independent Postgres write.
+	// Proxy work ends before the durable final handoff and Redis settlement.
 	defer func() {
 		finishInference()
 
 		record := observation.Finish(request.Context(), returned)
-		admission.Permit.Finish(request.Context(), record)
-		h.usage.Write(request.Context(), record)
+		if err := h.usage.Write(request.Context(), record); err == nil {
+			admission.Permit.Finish(request.Context(), record)
+		}
 	}()
 
 	upstream.ServeHTTP(observation.Writer(), request)

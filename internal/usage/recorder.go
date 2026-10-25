@@ -16,7 +16,7 @@ import (
 
 // Store persists admission before inference and final accounting afterward.
 type Store interface {
-	RecordAdmission(context.Context, store.Admission) error
+	RecordAdmission(context.Context, store.Admission, context.CancelFunc) error
 	RecordUsage(context.Context, store.Usage) error
 }
 
@@ -44,6 +44,7 @@ type Request struct {
 	Streaming   bool
 	FirstData   func(time.Time) // Optional notification for the first complete SSE data event.
 	Reservation quota.Reservation
+	Cancel      context.CancelFunc // Stops this request if accounting ownership is lost.
 }
 
 // Observation owns the response writer and accounting state for one inference attempt.
@@ -52,7 +53,7 @@ type Observation struct {
 	record store.Usage
 }
 
-// Observe commits admission before returning a writer that may enter inference.
+// Observe durably hands off admission before returning a writer that may enter inference.
 func (r *Recorder) Observe(w http.ResponseWriter, request *http.Request, metadata Request) (*Observation, error) {
 	key, ok := auth.Identity(request.Context())
 	if !ok || r == nil || r.options.Store == nil || r.options.Backend == "" ||
@@ -91,7 +92,7 @@ func (r *Recorder) Observe(w http.ResponseWriter, request *http.Request, metadat
 		Model: record.Model, Streaming: record.Streaming, StartedAt: record.StartedAt,
 		ReservationID: reservation.ID, ReservationDay: reservation.Day,
 		PromptTokens: reservation.PromptTokens, OutputTokens: reservation.OutputTokens,
-	})
+	}, metadata.Cancel)
 	if err != nil || admitCtx.Err() != nil {
 		requestlog.Logger(request.Context()).ErrorContext(request.Context(), "inference admission write failed", "key_id", key.ID)
 		return nil, ErrUnavailable
@@ -150,12 +151,16 @@ func (o *Observation) Finish(ctx context.Context, returned bool) store.Usage {
 	return record
 }
 
-// Write attempts one bounded Postgres insert independently of client cancellation.
-func (r *Recorder) Write(ctx context.Context, record store.Usage) {
+// Write durably hands off the final outcome independently of client cancellation.
+// A failed handoff must leave uncertain quota charged rather than refunding it.
+func (r *Recorder) Write(ctx context.Context, record store.Usage) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.options.WriteTimeout)
 	defer cancel()
 
 	if err := r.options.Store.RecordUsage(ctx, record); err != nil {
 		requestlog.Logger(ctx).ErrorContext(ctx, "usage record write failed", "key_id", record.KeyID)
+		return err
 	}
+
+	return nil
 }

@@ -3,13 +3,15 @@
 GLM-Edge-4B-Chat Q6_K is the primary model. Normal local inference now uses
 CUDA. Earlier CPU gateway measurements remain historical evidence.
 
-## Authenticated Compose baseline on October 25, 2026
+## Authenticated Compose baseline on October 25, 2026 (before durable admission)
 
 This is the first recorded baseline with authentication caching, Redis request
 limits, daily token reservations, Postgres usage recording, and Prometheus
 metrics enabled. The gateway used its application defaults. Its dedicated key
 allowed 6,000 requests/minute and 1,000,000 tokens/day, so this workload did not
-hit admission limits. Grace was zero.
+hit admission limits. Grace was zero. This run predates synchronous Postgres
+admission and does not measure the current admission write. Rerun the baseline
+after the remaining accounting middleware is implemented.
 
 | Measurement | Direct CUDA backend | Authenticated gateway |
 | --- | ---: | ---: |

@@ -6,7 +6,7 @@ request-rate limits, daily token quotas, validation, streaming, cancellation, an
 inference server loads the model and generates tokens.
 
 Phase 1 is in progress with one backend. Model listing, JSON and streaming chat,
-health checks, request logs, persistent inference usage, initial Prometheus
+health checks, request logs, durable admission before inference, persistent final usage, initial Prometheus
 metrics, and optional operator-local key management work today. Compose defines
 the gateway, pinned CUDA backend, Postgres, Redis, and startup migrations.
 
@@ -44,7 +44,7 @@ flowchart LR
         Public[Public HTTP listener]
         Admin[Optional loopback admin listener]
     end
-    Public -->|key lookup on cache miss and final usage write| PG[(Postgres)]
+    Public -->|key lookup, inference admission, final usage| PG[(Postgres)]
     Admin -->|create or revoke key| PG
     Public -->|request credits and token reservations| Redis[(Redis)]
     Public -->|prompt counting, inference, and health probes| Backend[Inference server]

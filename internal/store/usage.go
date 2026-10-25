@@ -51,7 +51,8 @@ func NewUsageStore(pool *pgxpool.Pool) *UsageStore {
 	return &UsageStore{pool: pool}
 }
 
-// RecordUsage persists one final record. The caller owns the operation deadline and retry policy.
+// RecordUsage persists a final record or acknowledges an identical retry.
+// The caller owns deadlines and retry policy; conflicting records remain unchanged.
 func (s *UsageStore) RecordUsage(ctx context.Context, record Usage) error {
 	if !validUsage(record) {
 		return fmt.Errorf("validate usage record: %w", ErrInvalidUsage)
@@ -68,11 +69,20 @@ func (s *UsageStore) RecordUsage(ctx context.Context, record Usage) error {
 		ttft = &milliseconds
 	}
 
-	_, err := s.pool.Exec(ctx, `
+	// Lock and compare on conflict so concurrent retries cannot overwrite accounting.
+	result, err := s.pool.Exec(ctx, `
 		INSERT INTO usage (request_id, key_id, backend, model, streaming,
 		    prompt_tokens, completion_tokens, observed_sse_chunks, ttft_ms, total_ms,
 		    http_status, status, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		ON CONFLICT (request_id) DO UPDATE SET request_id = EXCLUDED.request_id
+		WHERE (usage.key_id, usage.backend, usage.model, usage.streaming,
+		    usage.prompt_tokens, usage.completion_tokens, usage.observed_sse_chunks,
+		    usage.ttft_ms, usage.total_ms, usage.http_status, usage.status, usage.created_at)
+		IS NOT DISTINCT FROM
+		    (EXCLUDED.key_id, EXCLUDED.backend, EXCLUDED.model, EXCLUDED.streaming,
+		    EXCLUDED.prompt_tokens, EXCLUDED.completion_tokens, EXCLUDED.observed_sse_chunks,
+		    EXCLUDED.ttft_ms, EXCLUDED.total_ms, EXCLUDED.http_status, EXCLUDED.status, EXCLUDED.created_at)`,
 		record.RequestID, record.KeyID, record.Backend, record.Model, record.Streaming,
 		record.PromptTokens, record.CompletionTokens, record.ObservedSSEChunks, ttft,
 		float64(record.Duration)/float64(time.Millisecond), record.HTTPStatus, record.Status,
@@ -80,6 +90,10 @@ func (s *UsageStore) RecordUsage(ctx context.Context, record Usage) error {
 	)
 	if err != nil {
 		return fmt.Errorf("record inference usage: %w", err)
+	}
+
+	if result.RowsAffected() != 1 {
+		return fmt.Errorf("record inference usage: %w", ErrUsageConflict)
 	}
 
 	return nil

@@ -15,7 +15,6 @@ import (
 	"github.com/therealshek/llmgate/internal/metrics"
 	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/requestlog"
-	"github.com/therealshek/llmgate/internal/store"
 	"github.com/therealshek/llmgate/internal/usage"
 )
 
@@ -117,7 +116,7 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	admission, err := h.quota.Admit(r.Context(), key, body)
 	if r.Context().Err() != nil {
-		admission.Permit.Finish(r.Context(), store.Usage{})
+		admission.Permit.Release(r.Context())
 		return
 	}
 
@@ -150,10 +149,11 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	observation, err := h.usage.Observe(w, request, usage.Request{
 		Model: model, Streaming: options.stream,
-		FirstData: func(at time.Time) { metrics.FirstData(request.Context(), at) },
+		Reservation: admission.Permit.Reservation(),
+		FirstData:   func(at time.Time) { metrics.FirstData(request.Context(), at) },
 	})
 	if err != nil {
-		admission.Permit.Finish(request.Context(), store.Usage{})
+		admission.Permit.Release(request.Context())
 
 		_ = api.WriteError(w, http.StatusServiceUnavailable, api.Error{
 			Message: "usage recording unavailable", Type: "server_error", Code: "usage_unavailable",

@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -240,13 +242,15 @@ func quotaTestGateway(t *testing.T, address string, grace int64) (*httptest.Serv
 	t.Helper()
 	pool, _ := authenticationTestPool(t)
 
-	migration, err := os.ReadFile("../../migrations/000002_usage.up.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, name := range []string{"000002_usage.up.sql", "000003_inference_admissions.up.sql"} {
+		migration, err := os.ReadFile("../../migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	if _, err := pool.Exec(t.Context(), string(migration)); err != nil {
-		t.Fatal(err)
+		if _, err := pool.Exec(t.Context(), string(migration)); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	redisURL := os.Getenv("LLMGATE_TEST_REDIS_URL")
@@ -260,6 +264,16 @@ func quotaTestGateway(t *testing.T, address string, grace int64) (*httptest.Serv
 	}
 
 	keys := store.NewKeyStore(pool)
+
+	// Each temporary Postgres schema needs distinct IDs in the shared test Redis.
+	firstID, err := rand.Int(rand.Reader, big.NewInt(1<<52))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := pool.Exec(t.Context(), "SELECT setval(pg_get_serial_sequence('api_keys', 'id'), $1, false)", firstID.Int64()+1); err != nil {
+		t.Fatal(err)
+	}
 
 	key, secret, err := keys.CreateKey(t.Context(), store.CreateKeyParams{Name: "quota", RequestsPerMin: 1000, TokensPerDay: 20})
 	if err != nil {

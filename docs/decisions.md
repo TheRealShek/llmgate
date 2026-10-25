@@ -501,14 +501,17 @@ and requests rejected before inference remain outside this ledger. Correlate
 records with gateway-generated request IDs, unique in Postgres; retain key
 identity after revocation and do not store prompts or response bodies.
 
-Abhishek chose a bounded final write with visible failures over requiring a
-durable record before serving. The insert runs synchronously after proxy copying
-ends, independent of client cancellation, with no retries or background queue.
-This keeps cached-key availability during Postgres outages and preserves the
-inference response on write failure. It can delay handler or response completion
-until its timeout, and an outage, crash, or exhausted shutdown-cleanup window
-can lose a record. A guaranteed ledger would require a separate durable handoff and
-recovery design before admitting requests.
+The original slice used a bounded final write with visible failures. Durable
+Postgres admission now precedes generation, while the final write remains bounded.
+The insert runs synchronously after proxy copying ends, independent of client
+cancellation, with no retries or background queue.
+This preserves an already-admitted inference response on final-write failure.
+Cached keys no longer allow new inference during Postgres outages. The final
+write can delay handler or response completion until its timeout. An outage,
+crash, or exhausted shutdown-cleanup window can lose the final result while
+leaving its admission identifiable. Stronger recovery remains part of the
+[required durable accounting work](PROJECT_INTENT.md#durable-accounting-requirements).
+Final-outcome recovery and retryable quota settlement remain unimplemented.
 
 Abhishek chose unknown token counts plus observed SSE chunk counts over charging
 chunk-based estimates. Store both token counts as NULL unless the backend
@@ -670,6 +673,48 @@ for failed-connection cleanup, so Docker's stop grace also allows that teardown
 instead of killing the process while the driver is closing sockets. Missing
 storage or an exhausted cleanup budget still prevents a durability guarantee.
 
-Durable request recording and recovery remain a
-[deferred follow-up](PROJECT_INTENT.md#deferred-durability-follow-up), not part
-of this lifecycle fix.
+Durable request recording and recovery are
+[required remaining Phase 1 work](PROJECT_INTENT.md#durable-accounting-requirements).
+They were not implemented by this controlled-shutdown fix and do not depend on
+Phase 2.
+
+
+## Durable accounting admission policy
+
+Reject new inference with `503` if its durable admission record cannot be saved,
+including unavailable or full recording storage. Do not start generation and
+fall back silently to best-effort accounting.
+
+Admission now uses shared Postgres, so replacement gateway replicas do not need
+another replica's disk. Abhishek chose rejection during database outages over
+maintaining a separate local journal. There is no outage grace setting.
+
+Commit request metadata and its Redis reservation identity before forwarding to
+inference. Set `synchronous_commit=on` within that transaction, even when the
+connection default is asynchronous. A failed or uncertain commit acknowledgment
+must stop generation. Refund the unused quota reservation under an independent
+bounded deadline; if Redis fails too, its allowance remains conservatively charged.
+
+The admission and final usage rows share a request ID. A missing final row leaves
+an identifiable unfinished attempt, without inventing token counts. These rows
+are evidence for recovery, not an implemented recovery worker. Admission does not
+make final usage durable during a later Postgres outage: a gateway crash can
+still lose the exact final result. Postgres storage durability and failover must
+also preserve acknowledged commits. Recovery ownership, retention bounds, and
+retryable quota settlement remain required Phase 1 work.
+
+
+## Retry-safe usage delivery
+
+A final usage record is immutable under its request ID. Identical delivery is
+acknowledged; different accounting data returns `store.ErrUsageConflict` rather
+than being discarded or overwriting the existing values. Compare every stored
+field, treating unknown counts as distinct from known zero.
+
+Use one atomic conflict-checked statement so concurrent delivery cannot race a
+separate existence lookup. An identical retry performs a no-op update, which
+creates a PostgreSQL row version but changes no accounting values. This is a
+small retry-path cost for an atomic comparison. See
+[Postgres conflict handling](https://www.postgresql.org/docs/current/sql-insert.html)
+and [NULL-safe comparison](https://www.postgresql.org/docs/current/functions-comparison.html).
+The admission gate uses the same request IDs. No delivery or recovery worker is implemented yet.

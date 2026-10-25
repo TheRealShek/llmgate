@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -438,8 +439,97 @@ func TestChatTokenLimitOmitted(t *testing.T) {
 
 type captureUsage func(context.Context, store.Usage) error
 
+func (captureUsage) RecordAdmission(context.Context, store.Admission) error { return nil }
+
 func (f captureUsage) RecordUsage(ctx context.Context, record store.Usage) error {
 	return f(ctx, record)
+}
+
+type admissionUsage struct {
+	captureUsage
+	admit func(context.Context, store.Admission) error
+}
+
+func (s admissionUsage) RecordAdmission(ctx context.Context, record store.Admission) error {
+	return s.admit(ctx, record)
+}
+
+// TestChatDurableAdmission checks generation waits for durable admission and failed admission refunds unused quota.
+func TestChatDurableAdmission(t *testing.T) {
+	for _, unavailable := range []bool{false, true} {
+		t.Run(strconv.FormatBool(unavailable), func(t *testing.T) {
+			admitted, generated, written := false, false, false
+			reservations := accountingReservations{settle: func(ctx context.Context, r quota.Reservation, charge int64) error {
+				want := int64(9)
+				if unavailable {
+					want = 0
+				}
+
+				if ctx.Err() != nil || r.ID != "request" || charge != want {
+					t.Error("incorrect quota cleanup", r, charge, ctx.Err())
+				}
+
+				return nil
+			}}
+			recorder := usage.NewRecorder(usage.Options{
+				Store: admissionUsage{
+					admit: func(ctx context.Context, record store.Admission) error {
+						if _, ok := ctx.Deadline(); !ok || ctx.Err() != nil || generated ||
+							record.ReservationID != "request" || record.PromptTokens != 7 ||
+							record.OutputTokens != 8 || record.KeyID != 1 {
+							t.Error("invalid admission order or reservation", record)
+						}
+
+						if unavailable {
+							return errors.New("private-postgres-diagnostics")
+						}
+
+						admitted = true
+
+						return nil
+					},
+					captureUsage: func(context.Context, store.Usage) error {
+						if !admitted || !generated {
+							t.Error("final usage preceded admitted inference")
+						}
+
+						written = true
+
+						return nil
+					},
+				}, Backend: "test", WriteTimeout: time.Second, MaxBytes: 1024,
+			})
+			backend := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if !admitted {
+					t.Error("generation preceded admission acknowledgment")
+				}
+
+				generated = true
+				_, _ = io.WriteString(w, `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`)
+			})
+			handler := NewHandler(HandlerOptions{
+				NonStreaming: backend, Usage: recorder, Authentication: testAuthenticator(),
+				RequestLimits: testRequestLimits(), Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+				Quota: quota.NewLimiter(accountingCounter{}, reservations, quota.Options{
+					CountTimeout: time.Second, RedisTimeout: time.Second,
+				}),
+			})
+			r := authenticatedRequest(http.MethodPost, "/v1/chat/completions",
+				strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`))
+			r.Header.Set("Content-Type", "application/json")
+
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+
+			if unavailable {
+				if w.Code != 503 || generated || written || strings.Contains(w.Body.String(), "private-postgres") {
+					t.Fatal("failed admission started inference or exposed diagnostics", w.Code)
+				}
+			} else if w.Code != 200 || !generated || !written {
+				t.Fatal("committed admission failed to reach inference", w.Code)
+			}
+		})
+	}
 }
 
 // TestUsageScope checks only validated inference attempts receive records, preserving request bodies.
@@ -518,6 +608,8 @@ func TestMissingUsageRecorder(t *testing.T) {
 
 // discardUsage keeps route, authentication, and logging tests independent of persistence.
 type discardUsage struct{}
+
+func (discardUsage) RecordAdmission(context.Context, store.Admission) error { return nil }
 
 func (discardUsage) RecordUsage(context.Context, store.Usage) error { return nil }
 
@@ -633,7 +725,7 @@ func TestChatAccountingLifecycle(t *testing.T) {
 		{name: "client cancellation", stream: true, cancel: true, body: "data: {}\n\n", status: store.UsageCanceled, charge: -1, ttft: 1},
 		{name: "proxy abort", stream: true, abort: true, body: "data: {}\n\n", status: store.UsageInterrupted, charge: -1, ttft: 1},
 		{name: "settlement failure", settleFailure: true, body: `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`, status: store.UsageCompleted, charge: 9},
-		{name: "missing recorder", missingRecorder: true, charge: -1},
+		{name: "missing recorder", missingRecorder: true, charge: 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			m := metrics.New(metrics.Options{MaxScrapes: 2, ScrapeTimeout: time.Second})

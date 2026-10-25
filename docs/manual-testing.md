@@ -154,8 +154,8 @@ covers normal draining and a frozen database. The latter logs bounded write
 failures, then allows the driver's separate failed-connection cleanup to finish.
 Postgres outages, crashes, or cleanup-budget exhaustion can still lose final
 usage rows. Successful inference is not a guarantee of durable usage. The
-[durability follow-up](PROJECT_INTENT.md#deferred-durability-follow-up) remains
-planned separately. The [benchmark](benchmarks.md) records the earlier baseline.
+[durable accounting requirements](PROJECT_INTENT.md#durable-accounting-requirements)
+remain unfinished Phase 1 work. The [benchmark](benchmarks.md) records the earlier baseline.
 
 Run the lifecycle race and cleanup-budget checks without external services:
 
@@ -840,7 +840,9 @@ sudo --preserve-env=POSTGRES_PASSWORD docker compose \
   -f deploy/docker-compose.yml stop postgres
 ```
 
-Before the first entry expires, its key should still reach the backend. The
+Before the first entry expires, its key should still reach the models backend.
+Chat must return `503` even for that cached key because durable admission requires
+Postgres. The
 unused key should return `503`. After 60 seconds from the warm request, the first
 key should also return `503`, even if you kept using it. Restart Postgres:
 
@@ -985,7 +987,7 @@ below rather than stopping a backend serving unrelated work.
 LLMGATE_TEST_DATABASE_URL="$GATEWAY_DATABASE_URL" \
   go test -race -count=1 -v ./cmd/gateway -run '^TestInferenceUsageRecords$'
 LLMGATE_TEST_DATABASE_URL="$GATEWAY_DATABASE_URL" \
-  go test -race -count=1 -v ./internal/store -run '^TestUsage'
+  go test -race -count=1 -v ./internal/store -run '^Test(Usage|Admission)'
 go test -race -count=1 ./internal/usage ./internal/gateway
 ```
 
@@ -994,14 +996,40 @@ HTTP backend. They cover JSON/SSE completion, upstream HTTP errors, header
 timeouts, mid-stream connection loss, client cancellation, and admin revocation.
 They do not exercise a real GPU backend. The focused unit tests cover fragmented
 SSE framing, observation bounds, partial writes, concurrent requests, and bounded
-usage-write failures. Database tests skip without the test URL.
+usage-write failures. Store tests also deliver identical records concurrently,
+verify only one usage row remains, and reject conflicting retries without
+changing the original accounting. Database tests skip without the test URL.
+
+Apply migration `000003_inference_admissions` before running this gateway version.
+Validated chat commits an admission before forwarding. Each admission write uses
+`GATEWAY_USAGE_WRITE_TIMEOUT` and honors client cancellation. Failed admission
+returns `503` with `usage_unavailable`, logs `inference admission write failed`,
+and attempts to refund the unused token reservation. No generation starts.
+Models can still use an unexpired cached key during Postgres outages.
 
 A final usage write happens after proxy copying and can extend handler or response
-completion by up to `GATEWAY_USAGE_WRITE_TIMEOUT`. If Postgres is unavailable,
+completion by up to the same timeout. If Postgres becomes unavailable afterward,
 expect a request-correlated `usage record write failed` error log and potentially
-no row. The inference response is not replaced. No retry or durable recovery is
-implemented; crash or forced shutdown can also lose a final record. Token quota
-settlement runs independently before this insert.
+no final usage row. The inference response is not replaced. Its admission remains
+in `inference_admissions`; join `request_id` to `usage` to find missing final
+outcomes. No recovery worker is implemented yet. Token quota settlement runs
+independently before the final insert.
+
+```sql
+SELECT a.request_id, a.key_id, a.created_at, a.reservation_id
+FROM inference_admissions a
+LEFT JOIN usage u USING (request_id)
+WHERE u.request_id IS NULL;
+```
+
+This query also includes currently active requests. A missing row alone does not
+prove the request was abandoned. The integration check below verifies failed
+final delivery leaves an admission and cached authentication cannot bypass it:
+
+```sh
+LLMGATE_TEST_DATABASE_URL="$GATEWAY_DATABASE_URL" \
+  go test -race -count=1 ./cmd/gateway -run '^TestAdmissionSurvivesDeliveryFailure$'
+```
 
 ## Daily token quotas
 
@@ -1127,7 +1155,7 @@ are not part of this initial exporter deployment.
 | `GATEWAY_METRICS_KEY_CAPACITY` | `0` | Maximum distinct numeric key labels for the process lifetime; zero groups all keys under `other`, as does overflow |
 | `GATEWAY_METRICS_MAX_SCRAPES` | `2` | Maximum simultaneous scrapes |
 | `GATEWAY_METRICS_SCRAPE_TIMEOUT` | `2s` | Scrape response deadline |
-| `GATEWAY_USAGE_WRITE_TIMEOUT` | `2s` | Final usage insert deadline, independent of client cancellation |
+| `GATEWAY_USAGE_WRITE_TIMEOUT` | `2s` | Per-write admission/final usage deadline; only final writes detach client cancellation |
 | `GATEWAY_USAGE_MAX_BYTES` | `65536` | JSON response capture and each SSE line/event observation bound |
 | `GATEWAY_ADMIN_ENABLED` | `false` | Enable operator-local admin HTTP |
 | `GATEWAY_ADMIN_ADDR` | `127.0.0.1:8082` | Literal loopback IP and numeric port |

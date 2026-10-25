@@ -55,6 +55,22 @@ type Permit struct {
 	timeout      time.Duration
 }
 
+// Reservation returns the immutable identity and allowance to record before inference.
+func (p *Permit) Reservation() Reservation {
+	if p == nil {
+		return Reservation{}
+	}
+
+	return p.reservation
+}
+
+// Release refunds an allowance only when the caller has not started generation.
+func (p *Permit) Release(ctx context.Context) {
+	if p != nil {
+		p.settle(ctx, 0)
+	}
+}
+
 // Admit counts input and atomically reserves it plus the output available to this request.
 // Its child deadlines end before the original context enters inference.
 func (l *Limiter) Admit(ctx context.Context, key store.Key, body []byte) (Admission, error) {
@@ -139,6 +155,10 @@ func (p *Permit) Finish(ctx context.Context, record store.Usage) {
 		}
 	}
 
+	p.settle(ctx, charge)
+}
+
+func (p *Permit) settle(ctx context.Context, charge int64) {
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.timeout)
 	defer cancel()
 

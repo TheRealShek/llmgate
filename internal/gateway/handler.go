@@ -41,7 +41,7 @@ type HandlerOptions struct {
 	RequestLimits *ratelimit.Limiter
 	// Quota reserves daily tokens before inference; nil fails closed.
 	Quota TokenQuota
-	// Usage records validated inference attempts; missing configuration fails closed.
+	// Usage commits admission before inference and writes final usage afterward; nil fails closed.
 	Usage *usage.Recorder
 	// Metrics exposes the private registry; nil leaves the route unavailable.
 	Metrics *metrics.Metrics

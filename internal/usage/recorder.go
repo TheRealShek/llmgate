@@ -1,4 +1,4 @@
-// Package usage observes inference responses and writes final accounting records.
+// Package usage records inference admission, observes responses, and writes final accounting.
 package usage
 
 import (
@@ -9,12 +9,14 @@ import (
 	"time"
 
 	"github.com/therealshek/llmgate/internal/auth"
+	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/requestlog"
 	"github.com/therealshek/llmgate/internal/store"
 )
 
-// Store persists the final accounting record under a caller-owned deadline.
+// Store persists admission before inference and final accounting afterward.
 type Store interface {
+	RecordAdmission(context.Context, store.Admission) error
 	RecordUsage(context.Context, store.Usage) error
 }
 
@@ -38,9 +40,10 @@ func NewRecorder(options Options) *Recorder {
 
 // Request describes validated chat metadata without retaining the prompt body.
 type Request struct {
-	Model     string
-	Streaming bool
-	FirstData func(time.Time) // Optional notification for the first complete SSE data event.
+	Model       string
+	Streaming   bool
+	FirstData   func(time.Time) // Optional notification for the first complete SSE data event.
+	Reservation quota.Reservation
 }
 
 // Observation owns the response writer and accounting state for one inference attempt.
@@ -49,7 +52,7 @@ type Observation struct {
 	record store.Usage
 }
 
-// Observe prepares bounded response observation without starting inference or writing usage.
+// Observe commits admission before returning a writer that may enter inference.
 func (r *Recorder) Observe(w http.ResponseWriter, request *http.Request, metadata Request) (*Observation, error) {
 	key, ok := auth.Identity(request.Context())
 	if !ok || r == nil || r.options.Store == nil || r.options.Backend == "" ||
@@ -73,6 +76,25 @@ func (r *Recorder) Observe(w http.ResponseWriter, request *http.Request, metadat
 	}
 	if metadata.Model != "" && len(metadata.Model) <= 256 && !strings.ContainsRune(metadata.Model, 0) {
 		record.Model = &metadata.Model
+	}
+
+	reservation := metadata.Reservation
+	if reservation.ID != "" && reservation.KeyID != key.ID {
+		return nil, ErrUnavailable
+	}
+
+	admitCtx, cancel := context.WithTimeout(request.Context(), r.options.WriteTimeout)
+	defer cancel()
+
+	err := r.options.Store.RecordAdmission(admitCtx, store.Admission{
+		RequestID: record.RequestID, KeyID: record.KeyID, Backend: record.Backend,
+		Model: record.Model, Streaming: record.Streaming, StartedAt: record.StartedAt,
+		ReservationID: reservation.ID, ReservationDay: reservation.Day,
+		PromptTokens: reservation.PromptTokens, OutputTokens: reservation.OutputTokens,
+	})
+	if err != nil || admitCtx.Err() != nil {
+		requestlog.Logger(request.Context()).ErrorContext(request.Context(), "inference admission write failed", "key_id", key.ID)
+		return nil, ErrUnavailable
 	}
 
 	observed := &observer{

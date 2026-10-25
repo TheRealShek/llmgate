@@ -21,7 +21,75 @@ import (
 
 type usageFunc func(context.Context, store.Usage) error
 
+func (usageFunc) RecordAdmission(context.Context, store.Admission) error { return nil }
+
 func (f usageFunc) RecordUsage(ctx context.Context, record store.Usage) error { return f(ctx, record) }
+
+type admissionStore struct {
+	usageFunc
+	admit func(context.Context, store.Admission) error
+}
+
+func (s admissionStore) RecordAdmission(ctx context.Context, record store.Admission) error {
+	return s.admit(ctx, record)
+}
+
+// TestAdmissionDeadline checks failed, expired, and canceled admission cannot return an inference writer.
+func TestAdmissionDeadline(t *testing.T) {
+	for _, scenario := range []string{"failure", "deadline", "late success", "canceled"} {
+		t.Run(scenario, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				calls := 0
+				recorder := NewRecorder(Options{
+					Store: admissionStore{
+						usageFunc: func(context.Context, store.Usage) error {
+							t.Error("admission wrote final usage")
+							return nil
+						},
+						admit: func(ctx context.Context, record store.Admission) error {
+							calls++
+
+							if _, ok := ctx.Deadline(); !ok || record.KeyID != 11 || record.Model == nil {
+								t.Error("admission lost deadline or identity")
+							}
+
+							if scenario != "failure" {
+								<-ctx.Done()
+							}
+
+							if scenario == "late success" {
+								return nil
+							}
+
+							return errors.New("private-database-diagnostics")
+						},
+					}, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
+				})
+				a := auth.NewAuthenticator(keyLookup{}, auth.Options{
+					LookupTimeout: time.Second, CacheTTL: time.Minute, CacheCapacity: 8,
+				})
+				handler := a.Protect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if scenario == "canceled" {
+						ctx, cancel := context.WithCancel(r.Context())
+						cancel()
+
+						r = r.WithContext(ctx)
+					}
+
+					observation, err := recorder.Observe(w, r, Request{Model: "model"})
+					if !errors.Is(err, ErrUnavailable) || observation != nil {
+						t.Error("failed admission returned an inference writer", err)
+					}
+				}))
+				handler.ServeHTTP(httptest.NewRecorder(), inferenceRequest())
+
+				if calls != 1 {
+					t.Fatal("admission was skipped or retried", calls)
+				}
+			})
+		})
+	}
+}
 
 type keyLookup struct{}
 

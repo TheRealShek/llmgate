@@ -53,8 +53,8 @@ type config struct {
 	quotaRedisTimeout  time.Duration
 	quotaCountMaxBytes int64 // Bounds backend token-counting responses.
 
-	// Final usage recording.
-	usageWriteTimeout time.Duration // Independent of client cancellation.
+	// Durable admission and final usage recording.
+	usageWriteTimeout time.Duration // Per write; final writes detach client cancellation.
 	usageMaxBytes     int           // Observation buffer limit, not an output limit.
 
 	// Prometheus metrics.

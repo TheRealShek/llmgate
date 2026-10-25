@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/therealshek/llmgate/internal/auth"
 	"github.com/therealshek/llmgate/internal/gateway"
 	"github.com/therealshek/llmgate/internal/proxy"
@@ -27,13 +29,15 @@ import (
 func TestInferenceUsageRecords(t *testing.T) {
 	pool, _ := authenticationTestPool(t)
 
-	migration, err := os.ReadFile("../../migrations/000002_usage.up.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, name := range []string{"000002_usage.up.sql", "000003_inference_admissions.up.sql"} {
+		migration, err := os.ReadFile("../../migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	if _, err := pool.Exec(t.Context(), string(migration)); err != nil {
-		t.Fatal(err)
+		if _, err := pool.Exec(t.Context(), string(migration)); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -206,8 +210,93 @@ func TestInferenceUsageRecords(t *testing.T) {
 	}
 }
 
+// TestAdmissionSurvivesDeliveryFailure checks a lost final write retains admission and cached auth cannot bypass storage.
+func TestAdmissionSurvivesDeliveryFailure(t *testing.T) {
+	pool, databaseURL := authenticationTestPool(t)
+
+	for _, name := range []string{"000002_usage.up.sql", "000003_inference_admissions.up.sql"} {
+		migration, err := os.ReadFile("../../migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if _, err := pool.Exec(t.Context(), string(migration)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	keys := store.NewKeyStore(pool)
+
+	key, secret, err := keys.CreateKey(t.Context(), store.CreateKeyParams{
+		Name: "durable-admission", RequestsPerMin: 60, TokensPerDay: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	authentication := auth.NewAuthenticator(keys, auth.Options{
+		LookupTimeout: time.Second, CacheTTL: time.Minute, CacheCapacity: 32,
+	})
+	calls := 0
+	backend := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+
+		pool.Close()
+
+		_, _ = io.WriteString(w, `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`)
+	})
+	routes := gateway.NewHandler(gateway.HandlerOptions{
+		NonStreaming: backend, Authentication: authentication, RequestLimits: testRequestLimits(),
+		Quota: testTokenQuota(), Limits: gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 128},
+		Usage: usage.NewRecorder(usage.Options{
+			Store: store.NewUsageStore(pool), Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
+		}),
+	})
+	handler := requestlog.NewHandler(routes, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+
+	var firstID string
+
+	for _, want := range []int{200, 503} {
+		r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"test-model"}`))
+		r.Header.Set("Authorization", "Bearer "+secret)
+		r.Header.Set("Content-Type", "application/json")
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+
+		if w.Code != want || calls != 1 {
+			t.Fatal("storage failure changed admitted output or let cached auth bypass admission", w.Code, calls)
+		}
+
+		if want == 200 {
+			firstID = w.Header().Get("X-Request-ID")
+		} else if !strings.Contains(w.Body.String(), "usage_unavailable") {
+			t.Fatal("request did not reach the durable admission gate", w.Body.String())
+		}
+	}
+
+	reopened, err := pgxpool.New(t.Context(), databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Cleanup(reopened.Close)
+
+	var admitted, missingFinal int
+
+	err = reopened.QueryRow(t.Context(), `
+	    SELECT count(*), count(*) FILTER (WHERE u.request_id IS NULL)
+	    FROM inference_admissions a LEFT JOIN usage u ON u.request_id = a.request_id
+	    WHERE a.request_id = $1 AND a.key_id = $2`, firstID, key.ID).Scan(&admitted, &missingFinal)
+	if err != nil || admitted != 1 || missingFinal != 1 {
+		t.Fatal("admission disappeared with failed final delivery", admitted, missingFinal, err)
+	}
+}
+
 // discardUsage keeps route, authentication, and logging tests independent of persistence.
 type discardUsage struct{}
+
+func (discardUsage) RecordAdmission(context.Context, store.Admission) error { return nil }
 
 func (discardUsage) RecordUsage(context.Context, store.Usage) error { return nil }
 
@@ -221,13 +310,15 @@ func testUsageRecorder() *usage.Recorder {
 func TestForcedShutdownPersistsUsage(t *testing.T) {
 	pool, _ := authenticationTestPool(t)
 
-	migration, err := os.ReadFile("../../migrations/000002_usage.up.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, name := range []string{"000002_usage.up.sql", "000003_inference_admissions.up.sql"} {
+		migration, err := os.ReadFile("../../migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	if _, err := pool.Exec(t.Context(), string(migration)); err != nil {
-		t.Fatal(err)
+		if _, err := pool.Exec(t.Context(), string(migration)); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	backendCanceled := make(chan struct{}, 3)

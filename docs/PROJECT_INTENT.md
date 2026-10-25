@@ -92,7 +92,7 @@ Target: weeks 1 to 3.
 - API keys in Postgres with a migration tool (`goose` or `golang-migrate`). Keys are stored as hashes.
 - Token bucket rate limit per key in Redis. Write it as a Lua script so the check and the decrement are atomic.
 - Daily token quota per key covering input and output, with exact backend prompt counting, shared reservations, and configurable grace defaulting to zero. Reconcile completed requests from backend usage; retain reservations when consumption is uncertain.
-- Usage row written when each request finishes, including TTFT and total time.
+- Durable accounting for admitted inference, final usage delivery, and recoverable quota settlement, including interrupted requests. See the remaining requirements below.
 - Structured logs with `log/slog` and a request ID on every line.
 - Graceful shutdown. On SIGTERM, stop accepting new requests and let active streams finish, with a hard deadline.
 - First Prometheus metrics. Request count, request duration, TTFT, active streams.
@@ -128,8 +128,13 @@ Grace defaults to zero. Missing or interrupted usage retains the allowance
 without inventing token counts. Initial request-count, duration, TTFT, and active-stream
 metrics are exposed at `/v1/metrics`. The authenticated GPU baseline and operational
 evidence are recorded. The forced-shutdown accounting regression is fixed and
-covered by real-storage and GPU checks. Durable recovery remains the deferred
-follow-up below; later-phase routing and overload protection have not started.
+covered by real-storage and GPU checks. Phase 1 remains incomplete until the
+required durable accounting and recovery below are implemented and verified.
+These have no dependency on Phase 2. Retry-safe usage persistence and synchronous
+Postgres admission are implemented.
+New inference returns `503` when admission cannot commit, even for cached keys.
+Terminal-outcome recovery and quota-settlement retries remain unfinished.
+Later-phase routing and overload protection have not started.
 See [decisions](decisions.md) for authentication and revocation boundaries.
 
 **Learn**
@@ -145,6 +150,28 @@ See [decisions](decisions.md) for authentication and revocation boundaries.
 - Killing the client mid-stream stops the backend within about a second. Show this in the llama.cpp logs.
 - Two keys with different limits get different behavior under the same load.
 - Baseline TTFT and tokens per second for one stream are written down in `docs/benchmarks.md`.
+- Durable admission, usage delivery, and quota-settlement recovery pass crash, storage-outage, duplicate-delivery, and UTC-rollover checks. Storage-full admission behavior is defined and tested.
+
+### Durable accounting requirements
+
+This is required unfinished Phase 1 work, not a Phase 2 dependency or an optional
+later improvement. Admission is now durable in Postgres; final usage delivery remains best effort.
+
+- Record request identity and associate its quota reservation durably before
+  inference starts. Keep prompts, response bodies, and credentials out of this record.
+- Persist known final outcomes and retry usage delivery and quota settlement
+  idempotently. Duplicate recovery must neither duplicate usage rows nor refund twice.
+- Recover unfinished requests after restart as interrupted with unknown token
+  counts when final backend usage was never received. Retry known settlements
+  against the original UTC day; do not invent exact counts from SSE chunks.
+- Bound durable storage, backlog, and retries. Reject new inference with `503`
+  before generation when a durable admission record cannot be saved, including
+  unavailable or full recording storage. Use shared Postgres with synchronous
+  admission commits, without a local journal or database-outage grace period.
+
+Finish and verify these behaviors before declaring Phase 1 complete. The
+conservative charge for genuinely unknown consumption remains an explicit policy
+to review, separate from losing a known usage record or a retryable settlement.
 
 ---
 
@@ -212,24 +239,6 @@ Target: weeks 5 to 8.
 - Someone can clone the repo and run `docker compose up` and `make bench` without asking me anything.
 
 ---
-
-## Deferred durability follow-up
-
-Revisit durable accounting after the current correctness fixes. It is not part
-of the controlled-shutdown fix, and its implementation phase is not assigned.
-
-- Durably record request identity and quota reservation before inference starts,
-  then retain the final outcome until delivery is acknowledged.
-- Recover unfinished requests after a crash. Mark interrupted attempts and
-  unknown token counts honestly; do not reconstruct model tokens from chunks.
-- Retry usage delivery and quota settlement idempotently using request and
-  reservation identities, always settling against the original UTC day.
-- Before implementation, choose storage and sync guarantees, bound disk/backlog
-  and retries, and decide admission behavior when durable storage is unavailable
-  or full. Guaranteed recording requires rejecting work that cannot be recorded.
-
-For now, Postgres writes remain best effort and uncertain Redis consumption
-remains conservatively charged. Fix and verify known lifecycle bugs first.
 
 ## Metrics to export
 

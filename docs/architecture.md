@@ -22,7 +22,7 @@ flowchart TD
         Auth -->|identity accepted| Rate[Check request credit]
         Rate -->|admitted and backend configured| Chat[Validate bounded chat body]
         Chat -->|supported text chat| Quota[Count input and reserve token allowance]
-        Quota -->|capped request| Usage[Usage recorder observes the response]
+        Quota -->|capped request| Usage[Commit admission and observe the response]
         Usage -->|stream false or omitted| JSON[JSON proxy]
         Usage -->|stream true| SSE[Streaming proxy]
         JSON -.->|after proxy returns or aborts| Finalize[Settle token allowance, then insert usage]
@@ -56,7 +56,12 @@ and request ID, and forwards the request. The backend generates the response;
 the proxy copies its status, headers, and body to the client. Responses travel
 back through the same HTTP handler call, not through a second admission check.
 
-Validated chat creates a usage observation before calling the selected proxy.
+Validated chat commits an `inference_admissions` row before calling the selected
+proxy. It contains request identity, backend/model metadata, and the Redis
+reservation ID, original UTC day, and allowance. `usage.Recorder.Observe` uses a
+client-cancelable deadline and a synchronous Postgres transaction. Failure
+returns `503` and attempts to refund the unused token allowance. Models do not
+use this admission gate. A successful commit prepares the usage observation.
 Its writer observes only bytes accepted by the client-facing writer and preserves
 flushes. The chat handler owns deferred cleanup: end proxy metrics, classify the
 observed outcome, settle tokens, then attempt one bounded usage insert. This also
@@ -84,8 +89,8 @@ below connects the handlers for one streaming request.
 | [`internal/quota`](../internal/quota/limiter.go) | Exact backend prompt counting, atomic daily reservations, output caps, and settlement. | Backend enforces generation limits; Redis owns shared budget state. |
 | [`internal/proxy`](../internal/proxy/forward.go) | Upstream HTTP forwarding, credential removal, JSON deadlines, and streaming flushes and idle cancellation. | `gateway` selects response mode; backend generates tokens. |
 | [`internal/backend`](../internal/backend/readiness.go) | On-demand backend readiness probes. | No periodic health registry or backend selection yet. |
-| [`internal/usage`](../internal/usage/recorder.go) | Bounded JSON/SSE observation and one final usage-write attempt. | Returns the observed outcome and writes usage when called; `gateway` owns metrics and quota finalization. |
-| [`internal/store`](../internal/store/usage.go) | Postgres pool setup, key lifecycle, and usage insertion. | Callers own pool lifetime and operation deadlines. |
+| [`internal/usage`](../internal/usage/recorder.go) | Durable admission, bounded JSON/SSE observation, and one final usage-write attempt. | Returns the observed outcome and writes usage when called; `gateway` owns metrics and quota finalization. |
+| [`internal/store`](../internal/store/usage.go) | Postgres pool setup, key lifecycle, admission commits, and usage insertion. | Callers own pool lifetime and operation deadlines. |
 | [`internal/admin`](../internal/admin/handler.go) | Operator-token authentication and private key-management routes. | Creation calls `store`; revocation calls the shared authenticator. |
 | [`internal/metrics`](../internal/metrics/metrics.go) | Private Prometheus registry, bounded key labels, request observations, TTFT, active streams, and scraping. | Authentication tags identity; the usage observer supplies streaming events. Scraping reads no external dependencies. |
 | [`internal/requestlog`](../internal/requestlog/handler.go) | Request IDs and start/finish logs around handlers. | Normal handler return does not establish successful inference or delivery. |
@@ -106,8 +111,9 @@ For `POST /v1/chat/completions` with `stream: true`, follow these entry points:
    [`bucket.lua`](../internal/ratelimit/bucket.lua).
 5. [`chatHandler.ServeHTTP`](../internal/gateway/chat.go) validates the body and
    selects the response mode. [`Limiter.Admit`](../internal/quota/limiter.go) counts
-   input and reserves output. The handler then creates a response observation with
-   [`Recorder.Observe`](../internal/usage/recorder.go), supplies the first-data
+   input and reserves output. [`Recorder.Observe`](../internal/usage/recorder.go)
+   commits admission through [`RecordAdmission`](../internal/store/admission.go)
+   before preparing the response observer. The handler supplies the first-data
    notification for metrics, and starts proxy metrics.
 6. [`streamHandler.ServeHTTP`](../internal/proxy/stream.go) adds idle cancellation;
    [`newForwarder`](../internal/proxy/forward.go) rewrites the upstream request.
@@ -126,7 +132,7 @@ commands live in the [manual testing guide](manual-testing.md).
 ## Where state lives
 
 - **Postgres** stores key hashes, identities, configured limits, and revocation
-  timestamps, plus final usage records. Raw keys are returned once on creation.
+  timestamps, durable inference admissions, and final usage records. Raw keys are returned once on creation.
   `tokens_per_day` supplies the normal daily token budget.
 - **Redis** stores request credits per key, plus daily spent and reserved tokens
   in `llmgate:tokens:v1:<key_id>`. Models and chat share the request bucket;
@@ -136,7 +142,8 @@ commands live in the [manual testing guide](manual-testing.md).
 - **Process memory** holds the bounded identity cache and active-request registry
   in one shared authenticator. Cache hits do not renew expiry. During a database
   outage, unexpired cached identities can authenticate; misses and expired entries
-  fail closed. Redis must still admit those requests. Cache expiry affects new
+  fail closed. Cached models can still pass Redis admission, but chat also needs
+  a committed Postgres admission and returns `503` during the outage. Cache expiry affects new
   authentication, not streams already admitted.
 - **Each request context** carries logging metadata, authenticated identity, and
   cancellation through the handler chain. Authentication and admission use
@@ -186,6 +193,8 @@ an aborted proxy response can have `completed: false`.
 `quota.Limiter` owns immutable dependencies. Each admitted chat gets one
 `Permit` containing its Redis reservation, with no retained body or context.
 The chat handler finishes that permit during normal return or panic unwinding.
+Before generation starts, a failed Postgres admission releases the unused allowance
+with a zero charge. A failed release logs the failure and retains the charge.
 A completed response with matching usage refunds unused output. Uncertain
 outcomes retain the full allowance while releasing the pending marker.
 
@@ -227,8 +236,17 @@ detaching client/revocation cancellation, then adds its own timeout. It is
 synchronous and may delay handler or response completion up to that bound.
 No connection is held for the duration of inference; the insert acquires one
 from the existing pool. Failure logs a fixed error and does not rewrite the
-response. There is no retry, background queue, or crash-recovery ledger. Process
-exit, storage failure, or cleanup-budget exhaustion can lose a final write. The
+response.
+
+The store acknowledges an identical re-delivery under the same request ID
+without creating another row. It compares all stored accounting values, including NULL
+versus known zero; conflicting data returns `ErrUsageConflict` and leaves the
+original accounting unchanged. This is a retry prerequisite, not a delivery worker.
+The durable admission remains when a final write is lost. Join it to `usage` by
+request ID to identify attempts without a final outcome. No worker currently
+claims those attempts, reconstructs interrupted outcomes, or retries settlement.
+Process exit, storage failure, or cleanup-budget exhaustion can still lose exact
+final usage. No connection or transaction stays open throughout inference. The
 [decision](decisions.md#inference-usage-recording) records this availability tradeoff.
 
 ## Prometheus measurement boundaries

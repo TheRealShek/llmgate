@@ -34,6 +34,34 @@ func (s reservationStub) Settle(ctx context.Context, r Reservation, n int64) err
 
 const chatBody = `{"model":"test","messages":[{"role":"user","content":"Hello"}],"max_tokens":200}`
 
+// TestPermitRelease checks unused allowances refund under a fresh deadline even after cancellation.
+func TestPermitRelease(t *testing.T) {
+	reservation := Reservation{ID: "reservation", KeyID: 1, Day: 10, PromptTokens: 7, OutputTokens: 20}
+	calls := 0
+	p := &Permit{
+		reservation: reservation, timeout: time.Second,
+		reservations: reservationStub{settle: func(ctx context.Context, got Reservation, charge int64) error {
+			calls++
+
+			if _, ok := ctx.Deadline(); !ok || ctx.Err() != nil || got != reservation || charge != 0 {
+				t.Error("unused allowance did not refund independently of cancellation", got, charge)
+			}
+
+			return nil
+		}},
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	p.Release(ctx)
+
+	var empty *Permit
+	empty.Release(ctx)
+
+	if p.Reservation() != reservation || empty.Reservation() != (Reservation{}) || calls != 1 {
+		t.Fatal("reservation snapshot or nil permit handling changed")
+	}
+}
+
 // TestQuotaPreparation checks safe aliases, usage requests, and unsupported accounting inputs.
 func TestQuotaPreparation(t *testing.T) {
 	for _, tt := range []struct {

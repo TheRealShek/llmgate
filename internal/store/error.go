@@ -13,6 +13,10 @@ var (
 	ErrInvalidKeyOptions = errors.New("invalid API key options")
 	// ErrInvalidUsage means a usage record violates its identity, timing, or count bounds.
 	ErrInvalidUsage = errors.New("invalid usage record")
+	// ErrInvalidAdmission means pre-inference identity or reservation data is invalid.
+	ErrInvalidAdmission = errors.New("invalid inference admission")
+	// ErrUsageConflict means a request ID already belongs to a different usage record.
+	ErrUsageConflict = errors.New("conflicting usage record")
 )
 
 // databaseError preserves a private driver cause while exposing only a safe category.

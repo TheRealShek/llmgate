@@ -7,32 +7,20 @@ trace a request and find the package responsible for each step. The
 
 ## One chat request
 
-What happens to `POST /v1/chat/completions`? The arrows below show handler
-order, including deferred finalization. External services appear in the README
-system map, not this handler diagram. The logging wrapper assigns a
-request ID before metrics and routing, then logs completion when the inner handlers return.
+What happens to `POST /v1/chat/completions`? The sequence shows admission,
+generation, response streaming, and durable accounting. The logging wrapper
+assigns a request ID before metrics and routing, then logs completion after the
+inner handlers return.
 
-```mermaid
-flowchart TD
-    subgraph Logged[Request logging surrounds the public handler]
-        direction TD
-        Metrics[Observe public request] --> Storage[Check accounting storage guard]
-        Storage --> Routes[Match method and path]
-        Routes --> Auth[Authenticate key]
-        Auth -->|identity accepted| Rate[Check request credit]
-        Rate -->|admitted and backend configured| Chat[Validate bounded chat body]
-        Chat -->|supported text chat| Quota[Count input and reserve token allowance]
-        Quota -->|capped request| Usage[Durably queue admission and observe response]
-        Usage -->|stream false or omitted| JSON[JSON proxy]
-        Usage -->|stream true| SSE[Streaming proxy]
-        JSON -.->|after proxy returns or aborts| Finalize[Durably queue final usage, then settle tokens]
-        SSE -.->|after proxy returns or aborts| Finalize
-    end
-```
+![Phase 1 chat and accounting sequence](images/phase-1-chat-completion-sequence.png)
 
 A cached background storage check runs before routing. Unsafe accounting
 storage rejects models and chat before authentication or rate-limit writes;
 probes and metrics still reach their handlers.
+
+### Authentication lifecycle
+
+![Phase 1 API-key authentication and management](images/phase-1-authentication-lifecycle.png)
 
 Authentication requires one Bearer credential. A successful lookup registers
 the request for local revocation and adds the key identity and limits to its

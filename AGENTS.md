@@ -111,9 +111,12 @@ Each document has a specific job:
   results. Every performance claim needs a measurement and reproduction command.
 - Private helper refactors need no documentation change unless they break a code
   link or make an explanation inaccurate. Keep entry-point links current.
-- Give each diagram one question and a clear scope. Use Mermaid in Markdown with
-  purposeful connection labels. Keep service boundaries separate from handler
-  order, and distinguish cancellation from request flow when both appear.
+- Give each diagram one question and a clear scope. Treat `.tldraw` files as
+  authoring sources only; never link readers to them. Export a light-mode image
+  with a white background and embed that image in Markdown, refreshing it when
+  its TLDraw source changes. Use purposeful connection labels. Keep service
+  boundaries separate from handler order, and distinguish cancellation from
+  request flow when both appear.
 - Before finishing, check affected claims, commands, defaults, and links against
   their sources. Preview changed diagrams for rendering and readability. Report
   checks that could not run.

@@ -38,23 +38,7 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    Client[Inference client] -->|models and chat| Public
-    Operator[Operator] -->|separate operator token| Admin
-    Scraper[Metrics client] -->|GET /v1/metrics| Public
-    subgraph Gateway[Gateway process]
-        Public[Public HTTP listener]
-        Admin[Optional loopback admin listener]
-        Writer[Accounting batch writer]
-    end
-    Public -->|key lookup on cache miss| PG[(Postgres)]
-    Admin -->|create or revoke key| PG
-    Public -->|limits, reservations, durable accounting| Redis[(Redis)]
-    Writer -->|claim and acknowledge records| Redis
-    Writer -->|batched admissions and final usage| PG
-    Public -->|prompt counting, inference, and health probes| Backend[Inference server]
-```
+![Phase 1 system map](docs/images/phase-1-system-architecture.png)
 
 Models and chat require an API key. Health and readiness are public. The optional
 admin listener binds to loopback and requires a separate operator token.

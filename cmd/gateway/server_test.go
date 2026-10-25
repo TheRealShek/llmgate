@@ -6,7 +6,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -62,7 +65,7 @@ func TestRunServersShutdown(t *testing.T) {
 			serverDone := make(chan error, 1)
 
 			workers.Go(func() {
-				serverDone <- runServers(ctx, []boundServer{{name: "gateway", server: server, listener: listener}}, tt.timeout)
+				serverDone <- runServers(ctx, []boundServer{{name: "gateway", server: server, listener: listener}}, tt.timeout, time.Second)
 			})
 
 			client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{}}
@@ -167,7 +170,7 @@ func TestRunServersListenerFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = runServers(t.Context(), []boundServer{{name: "gateway", server: &http.Server{}, listener: listener}}, time.Second)
+	err = runServers(t.Context(), []boundServer{{name: "gateway", server: &http.Server{}, listener: listener}}, time.Second, time.Second)
 	if !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("serve error = %v, want net.ErrClosed", err)
 	}
@@ -283,7 +286,7 @@ func TestPairedServersShutdown(t *testing.T) {
 
 			done := make(chan error, 1)
 
-			workers.Go(func() { done <- runServers(ctx, bound, timeout) })
+			workers.Go(func() { done <- runServers(ctx, bound, timeout, time.Second) })
 
 			client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{}}
 			t.Cleanup(client.CloseIdleConnections)
@@ -396,7 +399,7 @@ func TestServerFailureStopsPeer(t *testing.T) {
 
 			done := make(chan error, 1)
 
-			workers.Go(func() { done <- runServers(ctx, bound, time.Second) })
+			workers.Go(func() { done <- runServers(ctx, bound, time.Second, time.Second) })
 
 			for _, entry := range bound {
 				if entry.name == failed {
@@ -422,5 +425,267 @@ func TestServerFailureStopsPeer(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestForcedShutdownWaitsForAccounting checks both listeners finish deferred work before dependencies can close.
+func TestForcedShutdownWaitsForAccounting(t *testing.T) {
+	started := make(chan struct{}, 3)
+	finalizing := make(chan struct{}, 3)
+	release := make(chan struct{})
+	releaseCleanup := sync.OnceFunc(func() { close(release) })
+
+	var finished atomic.Int32
+
+	handler := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		defer func() {
+			finalizing <- struct{}{}
+
+			<-release
+			finished.Add(1)
+		}()
+
+		started <- struct{}{}
+
+		<-r.Context().Done()
+	})
+
+	bound, err := listenServers([]namedServer{
+		{name: "gateway", server: &http.Server{Addr: "127.0.0.1:0", Handler: handler}},
+		{name: "admin", server: &http.Server{Addr: "127.0.0.1:0", Handler: handler}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	var workers sync.WaitGroup
+
+	t.Cleanup(func() {
+		cancel()
+		releaseCleanup()
+
+		for _, entry := range bound {
+			_ = entry.server.Close()
+			_ = entry.listener.Close()
+		}
+
+		workers.Wait()
+	})
+
+	done := make(chan error, 1)
+
+	workers.Go(func() { done <- runServers(ctx, bound, 50*time.Millisecond, time.Second) })
+
+	for i := range 3 {
+		workers.Go(func() {
+			response, err := http.Get("http://" + bound[i%len(bound)].listener.Addr().String())
+			if err == nil {
+				_ = response.Body.Close()
+			}
+		})
+	}
+
+	for range 3 {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("request did not enter its handler")
+		}
+	}
+
+	cancel()
+
+	for range 3 {
+		select {
+		case <-finalizing:
+		case <-time.After(5 * time.Second):
+			t.Fatal("forced close did not start accounting")
+		}
+	}
+
+	var runErr error
+
+	early := false
+
+	select {
+	case runErr = <-done:
+		early = true
+
+		t.Error("shutdown returned while request accounting was still running")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	releaseCleanup()
+
+	if !early {
+		select {
+		case runErr = <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("shutdown did not finish after accounting")
+		}
+	}
+
+	if !errors.Is(runErr, context.DeadlineExceeded) {
+		t.Error("forced shutdown lost its deadline error", runErr)
+	}
+
+	if finished.Load() != 3 {
+		t.Error("shutdown did not join all request finalizers", finished.Load())
+	}
+}
+
+// TestRequestDrainAdmission checks closing admission cannot miss concurrent registrations or waiters.
+func TestRequestDrainAdmission(t *testing.T) {
+	drain := &requestDrain{done: make(chan struct{})}
+
+	var accepted atomic.Int32
+
+	handler := drain.track(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		accepted.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	begin := make(chan struct{})
+
+	var (
+		workers   sync.WaitGroup
+		responses atomic.Int32
+	)
+
+	for range 64 {
+		workers.Go(func() {
+			<-begin
+
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+
+			if w.Code == http.StatusNoContent {
+				responses.Add(1)
+			} else if w.Code != http.StatusServiceUnavailable {
+				t.Error("unexpected draining response", w.Code)
+			}
+		})
+	}
+
+	workers.Go(func() {
+		<-begin
+		drain.stop()
+	})
+
+	close(begin)
+	workers.Wait()
+	drain.stop()
+
+	if drain.count() != 0 || accepted.Load() != responses.Load() {
+		t.Fatal("concurrent admission lost request ownership")
+	}
+
+	select {
+	case <-drain.done:
+	default:
+		t.Fatal("drained requests did not signal completion")
+	}
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "server_shutting_down") {
+		t.Fatal("closed admission did not use the shared error format", w.Code)
+	}
+}
+
+// TestRequestDrainPanic checks abort panics still escape after request ownership is released.
+func TestRequestDrainPanic(t *testing.T) {
+	drain := &requestDrain{done: make(chan struct{})}
+	handler := drain.track(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+
+	var got any
+
+	func() {
+		defer func() { got = recover() }()
+
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	}()
+
+	drain.stop()
+
+	if got != http.ErrAbortHandler || drain.count() != 0 {
+		t.Fatal("abort panic was swallowed or retained an active request", got)
+	}
+
+	select {
+	case <-drain.done:
+	default:
+		t.Fatal("panic prevented request cleanup")
+	}
+}
+
+// TestRequestCleanupDeadline checks a stuck finalizer cannot hold shutdown open indefinitely.
+func TestRequestCleanupDeadline(t *testing.T) {
+	started := make(chan struct{})
+	finished := make(chan struct{})
+	release := make(chan struct{})
+	releaseCleanup := sync.OnceFunc(func() { close(release) })
+	server := &http.Server{Addr: "127.0.0.1:0", Handler: http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		defer close(finished)
+
+		close(started)
+		<-r.Context().Done()
+		<-release
+	})}
+
+	bound, err := listenServers([]namedServer{{name: "gateway", server: server}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	var workers sync.WaitGroup
+
+	t.Cleanup(func() {
+		cancel()
+		releaseCleanup()
+
+		_ = server.Close()
+
+		workers.Wait()
+
+		select {
+		case <-finished:
+		case <-time.After(time.Second):
+			t.Error("test finalizer did not exit")
+		}
+	})
+
+	done := make(chan error, 1)
+
+	workers.Go(func() { done <- runServers(ctx, bound, 25*time.Millisecond, 25*time.Millisecond) })
+	workers.Go(func() {
+		response, err := http.Get("http://" + bound[0].listener.Addr().String())
+		if err == nil {
+			_ = response.Body.Close()
+		}
+	})
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not enter handler")
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		var cleanup *requestCleanupError
+		if !errors.As(err, &cleanup) || cleanup.active != 1 || !errors.Is(cleanup, context.DeadlineExceeded) {
+			t.Fatal("missing bounded cleanup failure", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stuck accounting prevented bounded shutdown")
 	}
 }

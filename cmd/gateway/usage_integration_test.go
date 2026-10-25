@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -213,4 +215,159 @@ func testUsageRecorder() *usage.Recorder {
 	return usage.NewRecorder(usage.Options{
 		Store: discardUsage{}, Backend: "test", WriteTimeout: time.Second, MaxBytes: 64 << 10,
 	})
+}
+
+// TestForcedShutdownPersistsUsage checks forced cancellation joins every final Postgres insert.
+func TestForcedShutdownPersistsUsage(t *testing.T) {
+	pool, _ := authenticationTestPool(t)
+
+	migration, err := os.ReadFile("../../migrations/000002_usage.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := pool.Exec(t.Context(), string(migration)); err != nil {
+		t.Fatal(err)
+	}
+
+	backendCanceled := make(chan struct{}, 3)
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {}\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+
+		backendCanceled <- struct{}{}
+	}))
+	t.Cleanup(backend.Close)
+
+	target, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	t.Cleanup(transport.CloseIdleConnections)
+
+	keys := store.NewKeyStore(pool)
+
+	key, secret, err := keys.CreateKey(t.Context(), store.CreateKeyParams{
+		Name: "forced-shutdown", RequestsPerMin: 60, TokensPerDay: 10000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	routes := gateway.NewHandler(gateway.HandlerOptions{
+		Streaming:    proxy.NewStreamingHandler(target, transport, time.Second),
+		NonStreaming: proxy.NewNonStreamingHandler(target, transport, time.Second),
+		Authentication: auth.NewAuthenticator(keys, auth.Options{
+			LookupTimeout: time.Second, CacheTTL: time.Minute, CacheCapacity: 8,
+		}),
+		RequestLimits: testRequestLimits(), Quota: testTokenQuota(),
+		Usage: usage.NewRecorder(usage.Options{
+			Store: store.NewUsageStore(pool), Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
+		}),
+		Limits: gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+	})
+	server := &http.Server{Addr: "127.0.0.1:0", Handler: routes}
+
+	bound, err := listenServers([]namedServer{{name: "gateway", server: server}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+
+	var workers sync.WaitGroup
+
+	t.Cleanup(func() {
+		cancel()
+
+		_ = server.Close()
+
+		workers.Wait()
+	})
+
+	done := make(chan error, 1)
+
+	workers.Go(func() { done <- runServers(ctx, bound, 50*time.Millisecond, time.Second) })
+
+	streaming := make(chan struct{}, 3)
+
+	for range 3 {
+		workers.Go(func() {
+			request, err := http.NewRequest(http.MethodPost,
+				"http://"+bound[0].listener.Addr().String()+"/v1/chat/completions",
+				strings.NewReader(`{"model":"test","stream":true,"max_tokens":8}`))
+			if err != nil {
+				t.Error("create inference request", err)
+				return
+			}
+
+			request.Header.Set("Authorization", "Bearer "+secret)
+			request.Header.Set("Content-Type", "application/json")
+
+			client := &http.Client{Timeout: 5 * time.Second}
+
+			response, err := client.Do(request)
+			if err != nil {
+				t.Error("start inference request")
+				return
+			}
+			defer response.Body.Close()
+
+			reader := bufio.NewReader(response.Body)
+
+			line, err := reader.ReadString('\n')
+			if err != nil || !strings.HasPrefix(line, "data:") {
+				t.Error("request did not start streaming")
+				return
+			}
+
+			streaming <- struct{}{}
+
+			_, _ = io.Copy(io.Discard, reader)
+		})
+	}
+
+	for range 3 {
+		select {
+		case <-streaming:
+		case <-time.After(5 * time.Second):
+			t.Fatal("three inference requests did not become active")
+		}
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatal("forced shutdown lost its deadline failure", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("forced shutdown did not finish")
+	}
+
+	var recorded int
+	if err := pool.QueryRow(t.Context(), `SELECT count(*) FROM usage
+	    WHERE key_id=$1 AND status='canceled' AND streaming
+	    AND prompt_tokens IS NULL AND completion_tokens IS NULL`, key.ID).Scan(&recorded); err != nil {
+		t.Fatal(err)
+	}
+
+	if recorded != 3 {
+		t.Fatal("shutdown returned before all canceled inference records were written", recorded)
+	}
+
+	for range 3 {
+		select {
+		case <-backendCanceled:
+		case <-time.After(time.Second):
+			t.Fatal("backend request did not receive cancellation")
+		}
+	}
 }

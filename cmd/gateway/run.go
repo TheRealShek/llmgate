@@ -162,5 +162,5 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	return runServers(ctx, bound, cfg.shutdownTimeout)
+	return runServers(ctx, bound, cfg.shutdownTimeout, cfg.shutdownCleanupTimeout)
 }

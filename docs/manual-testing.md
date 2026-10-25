@@ -120,9 +120,12 @@ Stop without removing persistent data:
 docker compose --env-file deploy/.env -f deploy/docker-compose.yml down
 ```
 
-Gateway stop grace defaults to 20 seconds, covering its 10-second shutdown
-window and bounded accounting. If those application deadlines increase, also
-increase `GATEWAY_STOP_GRACE_PERIOD`. Health failures do not automatically
+Gateway stop grace defaults to 35 seconds, covering its 10-second drain window,
+3-second request-cleanup window, and dependency teardown. The pinned pgx driver
+can spend up to 15 seconds closing failed connections when Postgres is frozen. If drain, cleanup, or
+accounting deadlines increase, also increase `GATEWAY_STOP_GRACE_PERIOD`.
+Cleanup runs after forced cancellation while Postgres and Redis remain open;
+its budget should cover Redis settlement followed by the usage write. Health failures do not automatically
 restart a running container. Container logs rotate at 10 MiB with three files
 per service. Preserve Postgres and Redis volumes, and the host
 model, across restarts. No volume deletion is needed for routine startup.
@@ -143,12 +146,32 @@ recheck used a 10s header deadline so all three requests were still active when
 the 3s shutdown deadline expired. These shorten the checks; they do not change
 deployment defaults.
 
-Two durability limits remain: Postgres outages can lose final usage rows while
-cached-key inference succeeds, and forced shutdown can exit before every final
-row is written. The forced-shutdown recheck persisted none of the three active requests' rows.
-These follow the agreed best-effort accounting policy; successful inference
-is not a guarantee of a durable usage row. The [benchmark](benchmarks.md)
-records the authenticated baseline separately.
+The pre-fix verification lost all three final usage rows at forced shutdown.
+The lifecycle fix adds a bounded cleanup window before dependency teardown;
+the follow-up persisted all three canceled rows before shutdown returned.
+[Follow-up evidence](../bench/results/2026-10-25-shutdown-accounting.json) also
+covers normal draining and a frozen database. The latter logs bounded write
+failures, then allows the driver's separate failed-connection cleanup to finish.
+Postgres outages, crashes, or cleanup-budget exhaustion can still lose final
+usage rows. Successful inference is not a guarantee of durable usage. The
+[durability follow-up](PROJECT_INTENT.md#deferred-durability-follow-up) remains
+planned separately. The [benchmark](benchmarks.md) records the earlier baseline.
+
+Run the lifecycle race and cleanup-budget checks without external services:
+
+```sh
+go test -race -count=1 ./cmd/gateway \
+  -run 'TestForcedShutdownWaitsForAccounting|TestRequestDrain|TestRequestCleanupDeadline'
+```
+
+With the test database URL and `PGPASSWORD` configured, exercise actual final
+inserts during forced cancellation:
+
+```sh
+LLMGATE_TEST_DATABASE_URL="$GATEWAY_DATABASE_URL" \
+  go test -race -count=1 ./cmd/gateway -run '^TestForcedShutdownPersistsUsage$'
+```
+
 
 For host development, use three terminals for backend logs, gateway logs, and
 client output. The host backend listens on localhost port 8081 and the gateway
@@ -1124,6 +1147,7 @@ are not part of this initial exporter deployment.
 | `GATEWAY_READ_TIMEOUT` | `10s` | Incoming headers and body read deadline |
 | `GATEWAY_READ_HEADER_TIMEOUT` | `5s` | Incoming header read deadline |
 | `GATEWAY_IDLE_TIMEOUT` | `60s` | Wait for the next request on an idle client connection |
+| `GATEWAY_SHUTDOWN_CLEANUP_TIMEOUT` | `3s` | Additional wait for complete handlers and accounting after forced cancellation |
 | `GATEWAY_SHUTDOWN_TIMEOUT` | `10s` | Graceful shutdown deadline |
 
 Oversized chat bodies return `413`, invalid JSON returns `400`, and unsupported

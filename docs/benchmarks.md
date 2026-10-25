@@ -69,6 +69,13 @@ records the operational checks. One prefill cancellation used an 868-token
 uncached prompt and released the backend slot about 0.44 seconds after client
 disconnection. That is one observation, not a cancellation-latency distribution.
 
+The baseline above predates the controlled-shutdown fix. The
+[shutdown follow-up](../bench/results/2026-10-25-shutdown-accounting.json)
+records the later lifecycle checks: all three canceled rows persisted with
+healthy storage, while a frozen Postgres caused logged write failures and the
+pinned driver's separate connection-cleanup delay. Reproduce the accounting
+regression with the [manual test commands](manual-testing.md#compose-deployment).
+
 ## Local CPU and GPU check on October 16, 2026
 
 The RTX 3060 Laptop GPU can run this model with full layer offload. We used

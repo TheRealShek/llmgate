@@ -422,7 +422,8 @@ Both enabled listeners must bind before either serves. A bind failure closes
 previous listeners. An unexpected server exit stops its peer. Drain both servers
 concurrently under one shutdown deadline, force-close overdue connections, and
 join serving and shutdown goroutines before releasing the shared database pool.
-The number of lifecycle goroutines is bounded by the number of enabled servers.
+The [accounting cleanup window](#controlled-shutdown-accounting) also applies to
+both listeners. The number of lifecycle goroutines is bounded by enabled servers.
 
 In host development, remote operators use SSH forwarding to host loopback;
 local processes still need the token. Loopback does not protect against a
@@ -505,8 +506,8 @@ durable record before serving. The insert runs synchronously after proxy copying
 ends, independent of client cancellation, with no retries or background queue.
 This keeps cached-key availability during Postgres outages and preserves the
 inference response on write failure. It can delay handler or response completion
-until its timeout, and an outage, process exit, or forced shutdown can lose a
-record. A guaranteed ledger would require a separate durable handoff and
+until its timeout, and an outage, crash, or exhausted shutdown-cleanup window
+can lose a record. A guaranteed ledger would require a separate durable handoff and
 recovery design before admitting requests.
 
 Abhishek chose unknown token counts plus observed SSE chunk counts over charging
@@ -645,3 +646,30 @@ The [deployment guide](manual-testing.md#compose-deployment) owns host
 prerequisites, setup commands, and the current verification limits. A GPU
 visibility smoke check does not establish inference in the pinned backend image
 or successful full-stack startup.
+
+
+## Controlled shutdown accounting
+
+A forced connection close cancels inference but does not wait for HTTP handlers
+or their deferred accounting. Joining only serving/shutdown goroutines allowed
+process exit to race Redis settlement and Postgres inserts.
+
+Track complete handlers across the public and admin listeners. Close admission
+atomically with registration, drain normally, force-close overdue connections,
+then wait under a separate cleanup deadline before releasing dependencies. Use
+a shared counter and completion channel so a timed-out wait leaves no waiting
+goroutine behind. Preserve abort panics and the existing drain-deadline error.
+Report cleanup timeout with the remaining handler count.
+
+Keep the normal drain window intact. Extending that window alone would only
+postpone the race; reserving cleanup inside it would shorten graceful request
+completion. A separate cleanup budget permits a longer but bounded stop. Its
+default covers the sequential Redis-settlement and usage-write deadlines with
+some margin. The pinned pgx driver can separately wait up to fifteen seconds
+for failed-connection cleanup, so Docker's stop grace also allows that teardown
+instead of killing the process while the driver is closing sockets. Missing
+storage or an exhausted cleanup budget still prevents a durability guarantee.
+
+Durable request recording and recovery remain a
+[deferred follow-up](PROJECT_INTENT.md#deferred-durability-follow-up), not part
+of this lifecycle fix.

@@ -228,7 +228,7 @@ synchronous and may delay handler or response completion up to that bound.
 No connection is held for the duration of inference; the insert acquires one
 from the existing pool. Failure logs a fixed error and does not rewrite the
 response. There is no retry, background queue, or crash-recovery ledger. Process
-exit or forced shutdown can lose a final write. The
+exit, storage failure, or cleanup-budget exhaustion can lose a final write. The
 [decision](decisions.md#inference-usage-recording) records this availability tradeoff.
 
 ## Prometheus measurement boundaries
@@ -272,13 +272,25 @@ either serves. A partial bind failure closes listeners already opened. The
 one-off key-creation command uses Postgres without starting either HTTP server.
 
 On a termination signal, or an unexpected server exit,
-[`runServers`](../cmd/gateway/server.go) stops both enabled listeners and drains
-them concurrently under one deadline. Active requests can finish during that
-window. Deadline expiry force-closes remaining connections, which cancels their
-HTTP request contexts. Shutdown joins serving and shutdown goroutines before
-returning to `run`, which closes idle upstream connections and releases Redis
-and Postgres. The process signal starts draining; it does not immediately
-cancel every active stream.
+[`runServers`](../cmd/gateway/server.go) closes request admission and drains both
+listeners concurrently under one deadline. A shared lifecycle tracker surrounds
+each complete handler, including logging and deferred accounting. Its mutex
+coordinates admission with shutdown; late requests receive the shared `503`
+error instead of entering application handlers.
+
+Deadline expiry force-closes connections and cancels their HTTP request contexts.
+A separate cleanup deadline then bounds waiting for registered handlers to finish
+quota settlement and usage writes. This wait uses a completion channel, with no
+extra goroutine per request or abandoned wait goroutine on timeout. Both listeners
+share the window. A cleanup timeout reports the remaining handler count.
+
+Only after serving workers, shutdown workers, and bounded request cleanup does
+`run` close idle upstream connections and release Redis and Postgres. Postgres
+pool teardown can separately wait for the pinned driver's failed-connection
+cleanup deadline; the container stop grace includes that allowance. The process
+signal starts draining; it does not immediately cancel every active stream.
+Crashes, external `SIGKILL`, storage errors, or cleanup-budget exhaustion can
+still lose accounting; controlled shutdown is not durable crash recovery.
 
 
 ## Container boundaries

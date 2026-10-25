@@ -22,6 +22,7 @@ services:
       GATEWAY_READ_HEADER_TIMEOUT: ${GATEWAY_READ_HEADER_TIMEOUT:-}
       GATEWAY_IDLE_TIMEOUT: ${GATEWAY_IDLE_TIMEOUT:-}
       GATEWAY_SHUTDOWN_TIMEOUT: ${GATEWAY_SHUTDOWN_TIMEOUT:-}
+      GATEWAY_SHUTDOWN_CLEANUP_TIMEOUT: ${GATEWAY_SHUTDOWN_CLEANUP_TIMEOUT:-}
 
       # Chat request limits.
       GATEWAY_MAX_TOKENS: ${GATEWAY_MAX_TOKENS:-}
@@ -95,7 +96,7 @@ services:
       retries: 6
       start_period: 10s
 
-    stop_grace_period: ${GATEWAY_STOP_GRACE_PERIOD:-20s}
+    stop_grace_period: ${GATEWAY_STOP_GRACE_PERIOD:-35s}
     restart: unless-stopped
 
     read_only: true

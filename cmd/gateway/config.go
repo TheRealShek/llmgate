@@ -12,11 +12,12 @@ import (
 
 type config struct {
 	// Public HTTP server.
-	addr              string
-	readHeaderTimeout time.Duration
-	readTimeout       time.Duration // Includes reading the request body, not generating the response.
-	idleTimeout       time.Duration // Between client keep-alive requests.
-	shutdownTimeout   time.Duration
+	addr                   string
+	readHeaderTimeout      time.Duration
+	readTimeout            time.Duration // Includes reading the request body, not generating the response.
+	idleTimeout            time.Duration // Between client keep-alive requests.
+	shutdownTimeout        time.Duration
+	shutdownCleanupTimeout time.Duration // Accounting window after forced cancellation.
 
 	// Chat request limits.
 	maxBodyBytes int64
@@ -100,6 +101,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		readHeaderTimeout:      5 * time.Second,
 		idleTimeout:            60 * time.Second,
 		shutdownTimeout:        10 * time.Second,
+		shutdownCleanupTimeout: 3 * time.Second,
 		readTimeout:            10 * time.Second,
 		maxBodyBytes:           1 << 20, // 1 MiB
 		maxTokens:              1024,
@@ -384,6 +386,11 @@ func loadConfig(getenv func(string) string) (config, error) {
 	}
 
 	cfg.shutdownTimeout, err = envDuration(getenv, "GATEWAY_SHUTDOWN_TIMEOUT", cfg.shutdownTimeout)
+	if err != nil {
+		return config{}, err
+	}
+
+	cfg.shutdownCleanupTimeout, err = envDuration(getenv, "GATEWAY_SHUTDOWN_CLEANUP_TIMEOUT", cfg.shutdownCleanupTimeout)
 	if err != nil {
 		return config{}, err
 	}

@@ -129,6 +129,7 @@ func TestLoadConfig(t *testing.T) {
 				readHeaderTimeout:      5 * time.Second,
 				idleTimeout:            60 * time.Second,
 				shutdownTimeout:        10 * time.Second,
+				shutdownCleanupTimeout: 3 * time.Second,
 			},
 		},
 		{
@@ -146,6 +147,7 @@ func TestLoadConfig(t *testing.T) {
 				"GATEWAY_READ_HEADER_TIMEOUT":      "2s",
 				"GATEWAY_IDLE_TIMEOUT":             "30s",
 				"GATEWAY_SHUTDOWN_TIMEOUT":         "15s",
+				"GATEWAY_SHUTDOWN_CLEANUP_TIMEOUT": "4s",
 			},
 			want: config{
 				metricsKeyCapacity: 0, metricsMaxScrapes: 2, metricsScrapeTimeout: 2 * time.Second,
@@ -180,6 +182,7 @@ func TestLoadConfig(t *testing.T) {
 				readHeaderTimeout:      2 * time.Second,
 				idleTimeout:            30 * time.Second,
 				shutdownTimeout:        15 * time.Second,
+				shutdownCleanupTimeout: 4 * time.Second,
 			},
 		},
 		{
@@ -924,5 +927,25 @@ func TestMetricsConfiguration(t *testing.T) {
 	})
 	if err != nil || cfg.metricsKeyCapacity != 10 || cfg.metricsMaxScrapes != 3 || cfg.metricsScrapeTimeout != time.Second {
 		t.Fatal("metrics overrides lost", err)
+	}
+}
+
+// TestShutdownCleanupConfiguration checks the cleanup budget rejects invalid or unbounded values.
+func TestShutdownCleanupConfiguration(t *testing.T) {
+	for _, value := range []string{"invalid", "0s", "-1s", "999999999999h"} {
+		_, err := loadConfig(func(key string) string {
+			if key == "GATEWAY_DATABASE_URL" {
+				return "postgres://localhost/llmgate"
+			}
+
+			if key == "GATEWAY_SHUTDOWN_CLEANUP_TIMEOUT" {
+				return value
+			}
+
+			return ""
+		})
+		if err == nil || !strings.Contains(err.Error(), "GATEWAY_SHUTDOWN_CLEANUP_TIMEOUT") {
+			t.Fatal("invalid cleanup timeout accepted or misidentified", value, err)
+		}
 	}
 }

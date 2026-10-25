@@ -1,5 +1,19 @@
 package main
 
+import "fmt"
+
+// requestCleanupError reports handlers that outlived the bounded cleanup window.
+type requestCleanupError struct {
+	active int
+	cause  error
+}
+
+func (e *requestCleanupError) Error() string {
+	return fmt.Sprintf("request cleanup timed out with %d active handlers", e.active)
+}
+
+func (e *requestCleanupError) Unwrap() error { return e.cause }
+
 // keyCreateError retains a command failure cause without printing private diagnostics.
 type keyCreateError struct {
 	cause error

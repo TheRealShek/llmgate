@@ -117,8 +117,9 @@ returns `429` with retry guidance, and Redis errors fail closed with `503`.
 Compose now defines the gateway, pinned CUDA backend, Postgres, Redis, and
 startup migrations with health checks and persistent storage. Container inference,
 CUDA model loading, persistence, dependency outages, cancellation, backend failures,
-and concurrent shutdown have been exercised. Forced shutdown can lose final usage
-rows; Postgres-outage row loss also follows the best-effort policy. Validated
+and concurrent shutdown have been exercised. Controlled shutdown now waits for
+bounded request accounting before dependency teardown. Storage outages, crashes,
+or an exhausted cleanup window can still lose best-effort usage rows. Validated
 inference attempts now produce bounded, best-effort Postgres usage records with
 timings, outcomes, backend token counts when present, and separate observed SSE
 chunk counts. Daily input/output quotas now use exact prompt counting on the
@@ -126,8 +127,9 @@ pinned text backend, atomic Redis reservations, and a capped backend response.
 Grace defaults to zero. Missing or interrupted usage retains the allowance
 without inventing token counts. Initial request-count, duration, TTFT, and active-stream
 metrics are exposed at `/v1/metrics`. The authenticated GPU baseline and operational
-evidence are recorded. Review forced-shutdown accounting loss before closing
-Phase 1; later-phase routing and overload protection have not started.
+evidence are recorded. The forced-shutdown accounting regression is fixed and
+covered by real-storage and GPU checks. Durable recovery remains the deferred
+follow-up below; later-phase routing and overload protection have not started.
 See [decisions](decisions.md) for authentication and revocation boundaries.
 
 **Learn**
@@ -210,6 +212,24 @@ Target: weeks 5 to 8.
 - Someone can clone the repo and run `docker compose up` and `make bench` without asking me anything.
 
 ---
+
+## Deferred durability follow-up
+
+Revisit durable accounting after the current correctness fixes. It is not part
+of the controlled-shutdown fix, and its implementation phase is not assigned.
+
+- Durably record request identity and quota reservation before inference starts,
+  then retain the final outcome until delivery is acknowledged.
+- Recover unfinished requests after a crash. Mark interrupted attempts and
+  unknown token counts honestly; do not reconstruct model tokens from chunks.
+- Retry usage delivery and quota settlement idempotently using request and
+  reservation identities, always settling against the original UTC day.
+- Before implementation, choose storage and sync guarantees, bound disk/backlog
+  and retries, and decide admission behavior when durable storage is unavailable
+  or full. Guaranteed recording requires rejecting work that cannot be recorded.
+
+For now, Postgres writes remain best effort and uncertain Redis consumption
+remains conservatively charged. Fix and verify known lifecycle bugs first.
 
 ## Metrics to export
 

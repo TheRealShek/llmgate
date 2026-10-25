@@ -1,0 +1,117 @@
+{
+  "source_parent_revision": "6a066a3f04271a8ecf594d564cbe71ff640cfa7e",
+  "working_tree_sources_sha256": {
+    "cmd/gateway/server.go": "ab243e988aaa469e24aaed708223ea27743be5a902d41d925a88d597b3ff8ce3",
+    "cmd/gateway/run.go": "10e455456a6392eccd1736e47e97232643552b7671bc319375600afa9708f604",
+    "cmd/gateway/config.go": "45a2511cad75177d007d8ea4fc680818d742c40266fb9aac8be3fb94be04d879",
+    "cmd/gateway/error.go": "33a5c9d7a50b9c2ce0a139e1f23ad9c6f32c603ec4ee00da6554eed48203d973"
+  },
+  "gateway_image_id": "sha256:d1fb771103033dacdd728ba13c12b15fc3894499db2cc61de24b5a480f8bf917",
+  "test_limits": {
+    "drain_s": 3,
+    "cleanup_s": 3,
+    "header_s": 10,
+    "usage_write_s": 0.5
+  },
+  "results": [
+    {
+      "name": "forced_shutdown_with_healthy_storage",
+      "result": "passed",
+      "seconds": 3.867,
+      "force": true,
+      "exit_code": "1",
+      "elapsed_s": 3.108429117999549,
+      "clients": [
+        {
+          "error": "IncompleteRead"
+        },
+        {
+          "error": "RemoteDisconnected"
+        },
+        {
+          "error": "RemoteDisconnected"
+        }
+      ],
+      "usage_rows": 3,
+      "usage_statuses": [
+        "canceled",
+        "canceled",
+        "canceled"
+      ],
+      "expected_usage_rows": 3
+    },
+    {
+      "name": "graceful_shutdown_with_three_requests",
+      "result": "passed",
+      "seconds": 2.928,
+      "force": false,
+      "exit_code": "0",
+      "elapsed_s": 2.1588864459990873,
+      "clients": [
+        {
+          "code": 200,
+          "done": true
+        },
+        {
+          "code": 200,
+          "done": true
+        },
+        {
+          "code": 200,
+          "done": true
+        }
+      ],
+      "usage_rows": 3,
+      "usage_statuses": [
+        "completed",
+        "completed",
+        "completed"
+      ]
+    },
+    {
+      "name": "forced_shutdown_with_unavailable_postgres",
+      "result": "passed",
+      "seconds": 19.517,
+      "elapsed_s": 18.623120128000664,
+      "usage_write_failures_logged": 3,
+      "exit_code": "1",
+      "cleanup_deadline_exhausted": false,
+      "clients": [
+        {
+          "error": "RemoteDisconnected"
+        },
+        {
+          "error": "IncompleteRead"
+        },
+        {
+          "error": "RemoteDisconnected"
+        }
+      ]
+    },
+    {
+      "name": "default_compose_stop",
+      "result": "passed",
+      "default_drain_s": 10,
+      "default_cleanup_s": 3,
+      "docker_stop_grace_s": 35,
+      "elapsed_s": 10.253735082998901,
+      "usage_rows": 3,
+      "usage_statuses": [
+        "canceled",
+        "canceled",
+        "canceled"
+      ],
+      "clients": [
+        {
+          "error": "IncompleteRead"
+        },
+        {
+          "error": "RemoteDisconnected"
+        },
+        {
+          "error": "RemoteDisconnected"
+        }
+      ]
+    }
+  ]
+}

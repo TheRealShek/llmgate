@@ -30,6 +30,9 @@ type config struct {
 	upstreamTimeout        time.Duration // Total JSON request deadline.
 	streamIdleTimeout      time.Duration // Maximum gap between backend reads.
 	readinessTimeout       time.Duration
+	backendHealthInterval  time.Duration
+	backendHealthFailures  int
+	backendHealthSuccesses int
 
 	// Postgres: API keys and usage records.
 	databaseURL            string
@@ -125,6 +128,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 		upstreamHeaderTimeout:   30 * time.Second,
 		streamIdleTimeout:       30 * time.Second,
 		readinessTimeout:        2 * time.Second,
+		backendHealthInterval:   5 * time.Second,
+		backendHealthFailures:   3,
+		backendHealthSuccesses:  2,
 	}
 
 	if val := getenv("GATEWAY_ADMIN_ENABLED"); val != "" {
@@ -379,6 +385,26 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.usageMaxBytes, err = strconv.Atoi(value)
 		if err != nil || cfg.usageMaxBytes <= 0 {
 			return config{}, fmt.Errorf("validate GATEWAY_USAGE_MAX_BYTES: requires a positive integer")
+		}
+	}
+
+	cfg.backendHealthInterval, err = envDuration(getenv, "GATEWAY_BACKEND_HEALTH_INTERVAL", cfg.backendHealthInterval)
+	if err != nil {
+		return config{}, err
+	}
+
+	for _, setting := range []struct {
+		name  string
+		value *int
+	}{
+		{name: "GATEWAY_BACKEND_HEALTH_FAILURES", value: &cfg.backendHealthFailures},
+		{name: "GATEWAY_BACKEND_HEALTH_SUCCESSES", value: &cfg.backendHealthSuccesses},
+	} {
+		if value := getenv(setting.name); value != "" {
+			*setting.value, err = strconv.Atoi(value)
+			if err != nil || *setting.value <= 0 {
+				return config{}, fmt.Errorf("validate %s: requires a positive integer", setting.name)
+			}
 		}
 	}
 

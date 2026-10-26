@@ -319,16 +319,24 @@ curl -i http://127.0.0.1:8080/v1/readyz
 curl -sS http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $API_KEY"
 ```
 
-Health and readiness should return HTTP 200. Health checks the gateway process;
-readiness checks the backend's `/health` endpoint.
+Health returns HTTP 200 while the process is running. Readiness initially returns
+503 until the background registry observes two consecutive successful probes.
+With default settings, probes start immediately and repeat every 5 seconds; each
+has a 2-second deadline. Three consecutive failures mark a healthy backend unready;
+two consecutive successes restore it. Opposite results reset the streak.
 
-Readiness requires the backend's [llama.cpp-compatible health endpoint](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md#api-endpoints)
-to return `200`. Backend base paths are preserved, so a base URL ending in
+The backend’s `/health` endpoint must return 200. Base paths are preserved, so
 `/api` probes `/api/health`. Loading responses, redirects, connection failures,
-and timeouts return a fixed JSON `503`. Backend response bodies and headers
-stay private; the probe closes the body after receiving headers without waiting
-for its contents. Client disconnects cancel the probe. Readiness does not gate
-chat traffic or reserve backend capacity.
+and timeouts count as failures. Probes do not follow redirects or forward caller
+credentials. Bodies close after headers without waiting for content. Readiness
+serves only a snapshot, so caller disconnects do not cancel shared probes.
+It does not gate chat traffic or reserve backend capacity yet.
+
+To check transitions, stop the configured backend and poll readiness until it
+returns 503. Restart it and poll until 200. Look for `backend health changed`
+logs naming `primary`. Allow the configured interval, probe deadline, and result
+thresholds before expecting a transition. This check has unit-test coverage;
+it has not yet been verified against the deployed GPU backend for Phase 2.
 
 Without `GATEWAY_UPSTREAM_URL`, the gateway still starts if Postgres and Redis
 are reachable. Liveness returns `200`; readiness and authenticated model and
@@ -1237,7 +1245,10 @@ are not part of this initial exporter deployment.
 | `GATEWAY_UPSTREAM_CONNECT_TIMEOUT` | `5s` | TCP connect and TLS handshake deadlines |
 | `GATEWAY_UPSTREAM_HEADER_TIMEOUT` | `30s` | Backend response-header wait |
 | `GATEWAY_STREAM_IDLE_TIMEOUT` | `30s` | Each upstream stream-body read wait |
-| `GATEWAY_READINESS_TIMEOUT` | `2s` | Backend readiness-probe deadline |
+| `GATEWAY_READINESS_TIMEOUT` | `2s` | Each background backend health-probe deadline |
+| `GATEWAY_BACKEND_HEALTH_INTERVAL` | `5s` | Probe interval per backend; probes never overlap for the same backend |
+| `GATEWAY_BACKEND_HEALTH_FAILURES` | `3` | Consecutive failures before marking unhealthy; positive integer |
+| `GATEWAY_BACKEND_HEALTH_SUCCESSES` | `2` | Consecutive successes before marking healthy, including startup; positive integer |
 | `GATEWAY_MAX_BODY_BYTES` | `1048576` | Chat request body limit |
 | `GATEWAY_MAX_TOKENS` | `1024` | Output-token limit and omitted-value default |
 | `GATEWAY_READ_TIMEOUT` | `10s` | Incoming headers and body read deadline |

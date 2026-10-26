@@ -126,6 +126,7 @@ func TestLoadConfig(t *testing.T) {
 				upstreamHeaderTimeout:  30 * time.Second,
 				streamIdleTimeout:      30 * time.Second,
 				readinessTimeout:       2 * time.Second,
+				backendHealthInterval:  5 * time.Second, backendHealthFailures: 3, backendHealthSuccesses: 2,
 				upstreamTimeout:        30 * time.Second,
 				readHeaderTimeout:      5 * time.Second,
 				idleTimeout:            60 * time.Second,
@@ -180,6 +181,7 @@ func TestLoadConfig(t *testing.T) {
 				upstreamHeaderTimeout:  3 * time.Second,
 				streamIdleTimeout:      4 * time.Second,
 				readinessTimeout:       500 * time.Millisecond,
+				backendHealthInterval:  5 * time.Second, backendHealthFailures: 3, backendHealthSuccesses: 2,
 				upstreamTimeout:        20 * time.Second,
 				readHeaderTimeout:      2 * time.Second,
 				idleTimeout:            30 * time.Second,
@@ -987,5 +989,47 @@ func TestAccountingConfig(t *testing.T) {
 				t.Fatal("custom accounting settings ignored")
 			}
 		})
+	}
+}
+
+// TestBackendHealthConfig checks custom health settings and rejects invalid bounds.
+func TestBackendHealthConfig(t *testing.T) {
+	env := map[string]string{
+		"GATEWAY_DATABASE_URL":             "postgres://localhost/llmgate",
+		"GATEWAY_BACKEND_HEALTH_INTERVAL":  "250ms",
+		"GATEWAY_BACKEND_HEALTH_FAILURES":  "4",
+		"GATEWAY_BACKEND_HEALTH_SUCCESSES": "3",
+	}
+
+	cfg, err := loadConfig(func(key string) string { return env[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cfg.backendHealthInterval != 250*time.Millisecond || cfg.backendHealthFailures != 4 || cfg.backendHealthSuccesses != 3 {
+		t.Fatalf("unexpected health configuration: %v, %d, %d", cfg.backendHealthInterval, cfg.backendHealthFailures, cfg.backendHealthSuccesses)
+	}
+
+	for _, key := range []string{
+		"GATEWAY_BACKEND_HEALTH_INTERVAL", "GATEWAY_BACKEND_HEALTH_FAILURES", "GATEWAY_BACKEND_HEALTH_SUCCESSES",
+	} {
+		for _, value := range []string{"0", "-1", "invalid", "99999999999999999999999999999"} {
+			t.Run(key+"/"+value, func(t *testing.T) {
+				_, err := loadConfig(func(name string) string {
+					if name == "GATEWAY_DATABASE_URL" {
+						return "postgres://localhost/llmgate"
+					}
+
+					if name == key {
+						return value
+					}
+
+					return ""
+				})
+				if err == nil || !strings.Contains(err.Error(), key) {
+					t.Fatalf("invalid health setting error = %v", err)
+				}
+			})
+		}
 	}
 }

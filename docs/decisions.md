@@ -228,29 +228,30 @@ the streaming handler and idle-read wrappers. `forward.go` owns reverse-proxy
 setup and error logging shared by both modes. Group code by its responsibility
 instead of grouping all types that implement `http.Handler` into one package.
 
-## Single-backend readiness
+## Backend readiness and periodic health
 
-`GET /v1/readyz` probes the configured backend's `/health` endpoint on demand,
-preserving the backend base path. Use llama.cpp's documented health endpoint
-instead of model listing because a server can be reachable while its model is
-still loading. See the [backend documentation](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md#api-endpoints).
+The Phase 2 registry supersedes Phase 1’s probe-per-readiness-request design.
+Probe each configured backend’s `/health` endpoint periodically, preserving its
+base path. Use the model server’s health endpoint rather than model listing:
+a reachable server may still be loading its model.
 
-Only backend HTTP `200` means ready. Return plain `ok` with gateway status `200`
-on success, and a fixed OpenAI-compatible `503` on any other backend status or
-transport failure. Do not follow redirects, pass through backend responses, or
-forward caller credentials, bodies, or query parameters. Forward the generated
-request ID for tracing. An unset backend returns `503`; liveness remains `200`.
+Start each backend unhealthy. Require consecutive successes to mark healthy and
+consecutive failures to mark unhealthy, resetting the opposite streak on each
+result. This avoids changing readiness after every transient failure, at the cost
+of delayed detection and recovery. Durations and thresholds are configurable;
+[manual testing](manual-testing.md#configuration) owns their defaults.
 
-`GATEWAY_READINESS_TIMEOUT`, default `2s`, bounds each probe independently of
-chat timeouts. The probe inherits client cancellation and owns its deadline's
-cancel function. Close the backend body immediately after receiving headers.
-This avoids waiting on a stalled body or buffering arbitrary content, at the
-cost of potentially giving up connection reuse when response bytes remain unread.
+Only HTTP 200 is successful. Do not follow redirects, forward caller data, or
+expose backend responses. Close bodies after headers without buffering. Each
+probe has an independent deadline. One worker per backend bounds concurrency and
+keeps a slow backend from delaying another. Startup owns cancellation and joins
+workers before releasing the transport.
 
-Probe each time instead of keeping cached health or a background worker. This
-keeps the first readiness behavior small, but probe traffic reaches the backend
-directly. Readiness does not reserve capacity or block chat forwarding. Phase 2
-will add periodic checks and use backend health in routing.
+`GET /v1/readyz` reads shared health and returns plain `ok` with 200 when any
+backend is healthy, otherwise a fixed OpenAI-compatible 503. It creates no
+upstream work and does not inherit a caller’s cancellation into shared probes.
+An unset backend remains unready; liveness stays independent. Current chat
+forwarding does not yet use health to gate or select inference backends.
 
 ## Route authentication
 

@@ -33,7 +33,7 @@ type HandlerOptions struct {
 	NonStreaming http.Handler
 	// Streaming forwards SSE chat responses.
 	Streaming http.Handler
-	// Readiness probes backend health; nil returns 503.
+	// Readiness reports backend health; nil returns 503.
 	Readiness http.Handler
 	// Authentication protects models and chat; nil fails closed.
 	Authentication *auth.Authenticator

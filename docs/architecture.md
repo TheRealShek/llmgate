@@ -1,6 +1,7 @@
 # Architecture
 
-This page explains the implemented, single-backend gateway in Phase 1. Start
+This page explains the implemented single-backend gateway, including the first
+Phase 2 health-monitoring slice. Start
 with the [system map](../README.md#architecture), then use this page to
 trace a request and find the package responsible for each step. The
 [project intent](PROJECT_INTENT.md) describes planned work. Backend admission queues and multi-backend routing remain later-phase work.
@@ -60,10 +61,29 @@ This cleanup also runs on disconnect or proxy abort without swallowing the panic
 There are no prompt/response bodies or credentials in accounting records.
 
 Other routes take shorter paths. Models authenticate and consume a credit but
-skip chat validation. Liveness checks only the process. Readiness makes a fresh
-backend health probe, bypassing authentication and Redis; it neither reserves
-capacity nor gates chat traffic. If no backend is configured, models and chat
+skip chat validation. Liveness checks only the process. Readiness reads the backend registry’s health snapshot, bypassing authentication
+and Redis; it neither reserves capacity nor gates chat traffic. If no backend is configured, models and chat
 return `503` after authentication and admission, before chat validation.
+
+## Backend health ownership
+
+Startup registers the existing `primary` backend. Each registered backend starts
+unhealthy and has one worker that probes `/health` immediately, then periodically.
+Only HTTP 200 is successful; redirects are not followed and response bodies are
+closed without buffering. Consecutive successes restore health; consecutive
+failures remove it. An opposite result resets the streak. State changes are logged
+with the backend name, without upstream URLs or transport diagnostics.
+
+The registry mutex protects health and streaks; callers receive independent
+snapshots. Readiness returns 200 when any backend is healthy and 503 otherwise.
+It performs no network work. This smooths transient failures at the cost of delayed
+failure detection and recovery. Current inference still forwards to `primary`
+regardless of this state. Routing and capacity admission remain planned work.
+
+Startup owns the monitor context separately from request contexts. Each probe
+has its own deadline; stopping the monitor cancels in-flight probes and joins
+all workers, then clears health. Monitoring survives HTTP drain and stops before
+the shared transport closes its idle connections.
 
 ## Package responsibilities
 
@@ -78,7 +98,7 @@ below connects the handlers for one streaming request.
 | [`internal/ratelimit`](../internal/ratelimit/handler.go) | Redis-backed atomic request admission and its deadline. | Request credits count HTTP requests, not generated tokens. |
 | [`internal/quota`](../internal/quota/limiter.go) | Exact backend prompt counting, atomic daily reservations, output caps, and settlement. | Backend enforces generation limits; Redis owns shared budget state. |
 | [`internal/proxy`](../internal/proxy/forward.go) | Upstream HTTP forwarding, credential removal, JSON deadlines, and streaming flushes and idle cancellation. | `gateway` selects response mode; backend generates tokens. |
-| [`internal/backend`](../internal/backend/readiness.go) | On-demand backend readiness probes. | No periodic health registry or backend selection yet. |
+| [`internal/backend`](../internal/backend/registry.go) | Periodic health monitoring and snapshot-based readiness. | No backend selection yet. |
 | [`internal/usage`](../internal/usage/recorder.go) | Bounded JSON/SSE observation and durable admission/final handoffs. | Returns the observed outcome and writes usage when called; `gateway` owns metrics and quota finalization. |
 | [`internal/accounting`](../internal/accounting/queue.go) | Shared durable Redis slots, owner fencing, recovery, settlement replay, and retention. | Postgres and quota settlement finish before Redis acknowledgment; no inference body is retained. |
 | [`internal/store`](../internal/store/usage.go) | Postgres pool setup, key lifecycle, and atomic accounting batches. | Callers own pool lifetime and operation deadlines. |

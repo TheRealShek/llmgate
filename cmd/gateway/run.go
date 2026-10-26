@@ -133,7 +133,35 @@ func run(ctx context.Context) error {
 	if cfg.upstreamURL != nil {
 		nonStreaming = proxy.NewNonStreamingHandler(cfg.upstreamURL, transport, cfg.upstreamTimeout)
 		streaming = proxy.NewStreamingHandler(cfg.upstreamURL, transport, cfg.streamIdleTimeout)
-		readiness = backend.NewReadinessHandler(cfg.upstreamURL, transport, cfg.readinessTimeout)
+
+		registry, err := backend.NewRegistry(
+			[]backend.Target{{Name: "primary", URL: cfg.upstreamURL}},
+			transport,
+			backend.HealthOptions{
+				Interval: cfg.backendHealthInterval, Timeout: cfg.readinessTimeout,
+				Failures: cfg.backendHealthFailures, Successes: cfg.backendHealthSuccesses,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("initialize backend registry: %w", err)
+		}
+
+		// Health monitoring survives HTTP drain, then stops before transport cleanup.
+		healthCtx, stopHealth := context.WithCancel(context.Background())
+
+		healthDone := make(chan struct{})
+		go func() {
+			defer close(healthDone)
+
+			registry.Run(healthCtx)
+		}()
+
+		defer func() {
+			stopHealth()
+			<-healthDone
+		}()
+
+		readiness = backend.NewReadinessHandler(registry)
 	}
 
 	gatewayMetrics := metrics.New(metrics.Options{

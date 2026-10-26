@@ -166,6 +166,16 @@ Target: weeks 3 to 5.
 
 **Goal.** The gateway stays predictable when load rises or a backend dies.
 
+**Current checkpoint**
+
+Phase 2 has started with a named backend registry, periodic health probes,
+configurable consecutive-result thresholds, and snapshot-based readiness.
+Startup registers the existing single backend and owns monitor cleanup.
+Inference still uses that backend directly. Multiple-backend configuration,
+bounded inference queues, routing, failover, circuit breakers, and the expanded
+metrics/dashboard remain to be implemented.
+
+
 **Build**
 
 - Run 2 to 3 llama.cpp instances in Compose.

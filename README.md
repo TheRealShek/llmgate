@@ -16,6 +16,10 @@ record the evidence. Compose defines the gateway, pinned CUDA backend, Postgres,
 > **Not production-ready.** This is a project under active development.
 > Do not use it in production.
 
+Phase 2 has started with periodic backend health monitoring and snapshot-based
+readiness. Inference still uses one backend. Multi-backend routing and overload
+protection are next; see the [phase 2 scope](docs/PROJECT_INTENT.md#phase-2-multiple-backends-and-overload-protection).
+
 ## Quick start
 
 Follow the [Compose setup](docs/manual-testing.md#compose-deployment) for the

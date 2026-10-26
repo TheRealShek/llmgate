@@ -116,6 +116,7 @@ func TestDurableAccountingBatches(t *testing.T) {
 		_, _ = io.WriteString(w, `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`)
 	})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
+		Admission:    testInferenceQueue(),
 		NonStreaming: backend, RequestLimits: testRequestLimits(), Quota: testTokenQuota(),
 		Authentication: auth.NewAuthenticator(keys, auth.Options{
 			LookupTimeout: time.Second, CacheTTL: time.Minute, CacheCapacity: 32,
@@ -248,6 +249,7 @@ func TestInferenceUsageRecords(t *testing.T) {
 		LookupTimeout: time.Second, CacheTTL: time.Minute, CacheCapacity: 32,
 	})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
+		Admission:      testInferenceQueue(),
 		NonStreaming:   proxy.NewNonStreamingHandler(target, transport, time.Second),
 		Streaming:      proxy.NewStreamingHandler(target, transport, time.Second),
 		Authentication: authentication, RequestLimits: testRequestLimits(),
@@ -398,6 +400,7 @@ func TestAdmissionSurvivesDeliveryFailure(t *testing.T) {
 		_, _ = io.WriteString(w, `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`)
 	})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
+		Admission:    testInferenceQueue(),
 		NonStreaming: backend, Authentication: authentication, RequestLimits: testRequestLimits(),
 		Quota: testTokenQuota(), Limits: gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 128},
 		Usage: usage.NewRecorder(usage.Options{
@@ -497,6 +500,7 @@ func TestForcedShutdownPersistsUsage(t *testing.T) {
 	}
 
 	routes := gateway.NewHandler(gateway.HandlerOptions{
+		Admission:    testInferenceQueue(),
 		Streaming:    proxy.NewStreamingHandler(target, transport, time.Second),
 		NonStreaming: proxy.NewNonStreamingHandler(target, transport, time.Second),
 		Authentication: auth.NewAuthenticator(keys, auth.Options{

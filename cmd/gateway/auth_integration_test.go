@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
-	"github.com/therealshek/llmgate/internal/quota"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +19,8 @@ import (
 	"github.com/therealshek/llmgate/internal/auth"
 	"github.com/therealshek/llmgate/internal/gateway"
 	"github.com/therealshek/llmgate/internal/proxy"
+	"github.com/therealshek/llmgate/internal/queue"
+	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/ratelimit"
 	"github.com/therealshek/llmgate/internal/store"
 )
@@ -84,6 +85,7 @@ func TestKeyCreationAndAuthentication(t *testing.T) {
 	keys := store.NewKeyStore(pool)
 	authentication := auth.NewAuthenticator(keys, auth.Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
+		Admission:      testInferenceQueue(),
 		NonStreaming:   proxy.NewNonStreamingHandler(target, transport, time.Second),
 		Streaming:      proxy.NewStreamingHandler(target, transport, time.Second),
 		Authentication: authentication,
@@ -177,6 +179,7 @@ func TestAuthenticationCacheDatabaseOutage(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
+		Admission:    testInferenceQueue(),
 		NonStreaming: backend, Authentication: authentication,
 		RequestLimits: testRequestLimits(),
 		Quota:         testTokenQuota(),
@@ -295,3 +298,12 @@ func (allowTokenQuota) Admit(_ context.Context, _ store.Key, body []byte) (quota
 }
 
 func testTokenQuota() allowTokenQuota { return allowTokenQuota{} }
+
+func testInferenceQueue() *queue.Queue {
+	admission, err := queue.New(queue.Options{Slots: 100, Capacity: 0, WaitTimeout: time.Second})
+	if err != nil {
+		panic(err)
+	}
+
+	return admission
+}

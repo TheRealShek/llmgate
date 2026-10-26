@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -127,6 +128,7 @@ func TestLoadConfig(t *testing.T) {
 				streamIdleTimeout:      30 * time.Second,
 				readinessTimeout:       2 * time.Second,
 				backendHealthInterval:  5 * time.Second, backendHealthFailures: 3, backendHealthSuccesses: 2,
+				backendSlots: 1, backendQueueCapacity: 4, backendQueueTimeout: 5 * time.Second,
 				upstreamTimeout:        30 * time.Second,
 				readHeaderTimeout:      5 * time.Second,
 				idleTimeout:            60 * time.Second,
@@ -182,6 +184,7 @@ func TestLoadConfig(t *testing.T) {
 				streamIdleTimeout:      4 * time.Second,
 				readinessTimeout:       500 * time.Millisecond,
 				backendHealthInterval:  5 * time.Second, backendHealthFailures: 3, backendHealthSuccesses: 2,
+				backendSlots: 1, backendQueueCapacity: 4, backendQueueTimeout: 5 * time.Second,
 				upstreamTimeout:        20 * time.Second,
 				readHeaderTimeout:      2 * time.Second,
 				idleTimeout:            30 * time.Second,
@@ -1028,6 +1031,59 @@ func TestBackendHealthConfig(t *testing.T) {
 				})
 				if err == nil || !strings.Contains(err.Error(), key) {
 					t.Fatalf("invalid health setting error = %v", err)
+				}
+			})
+		}
+	}
+}
+
+// TestInferenceQueueConfig checks custom and zero-waiting capacity, and rejects invalid limits.
+func TestInferenceQueueConfig(t *testing.T) {
+	for _, capacity := range []string{"0", "8"} {
+		cfg, err := loadConfig(func(name string) string {
+			switch name {
+			case "GATEWAY_DATABASE_URL":
+				return "postgres://localhost/llmgate"
+			case "GATEWAY_BACKEND_SLOTS":
+				return "3"
+			case "GATEWAY_BACKEND_QUEUE_CAPACITY":
+				return capacity
+			case "GATEWAY_BACKEND_QUEUE_TIMEOUT":
+				return "250ms"
+			default:
+				return ""
+			}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if cfg.backendSlots != 3 || strconv.Itoa(cfg.backendQueueCapacity) != capacity || cfg.backendQueueTimeout != 250*time.Millisecond {
+			t.Fatal("queue overrides were not applied")
+		}
+	}
+
+	for _, name := range []string{"GATEWAY_BACKEND_SLOTS", "GATEWAY_BACKEND_QUEUE_CAPACITY", "GATEWAY_BACKEND_QUEUE_TIMEOUT"} {
+		values := []string{"-1", "invalid", "99999999999999999999999999999"}
+		if name != "GATEWAY_BACKEND_QUEUE_CAPACITY" {
+			values = append(values, "0")
+		}
+
+		for _, value := range values {
+			t.Run(name+"/"+value, func(t *testing.T) {
+				_, err := loadConfig(func(key string) string {
+					if key == "GATEWAY_DATABASE_URL" {
+						return "postgres://localhost/llmgate"
+					}
+
+					if key == name {
+						return value
+					}
+
+					return ""
+				})
+				if err == nil || !strings.Contains(err.Error(), name) {
+					t.Fatalf("invalid queue configuration error = %v", err)
 				}
 			})
 		}

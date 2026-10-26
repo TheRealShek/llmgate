@@ -33,6 +33,9 @@ type config struct {
 	backendHealthInterval  time.Duration
 	backendHealthFailures  int
 	backendHealthSuccesses int
+	backendSlots           int
+	backendQueueCapacity   int
+	backendQueueTimeout    time.Duration
 
 	// Postgres: API keys and usage records.
 	databaseURL            string
@@ -131,6 +134,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 		backendHealthInterval:   5 * time.Second,
 		backendHealthFailures:   3,
 		backendHealthSuccesses:  2,
+		backendSlots:            1,
+		backendQueueCapacity:    4,
+		backendQueueTimeout:     5 * time.Second,
 	}
 
 	if val := getenv("GATEWAY_ADMIN_ENABLED"); val != "" {
@@ -385,6 +391,25 @@ func loadConfig(getenv func(string) string) (config, error) {
 		cfg.usageMaxBytes, err = strconv.Atoi(value)
 		if err != nil || cfg.usageMaxBytes <= 0 {
 			return config{}, fmt.Errorf("validate GATEWAY_USAGE_MAX_BYTES: requires a positive integer")
+		}
+	}
+
+	cfg.backendQueueTimeout, err = envDuration(getenv, "GATEWAY_BACKEND_QUEUE_TIMEOUT", cfg.backendQueueTimeout)
+	if err != nil {
+		return config{}, err
+	}
+
+	if value := getenv("GATEWAY_BACKEND_SLOTS"); value != "" {
+		cfg.backendSlots, err = strconv.Atoi(value)
+		if err != nil || cfg.backendSlots <= 0 {
+			return config{}, fmt.Errorf("validate GATEWAY_BACKEND_SLOTS: requires a positive integer")
+		}
+	}
+
+	if value := getenv("GATEWAY_BACKEND_QUEUE_CAPACITY"); value != "" {
+		cfg.backendQueueCapacity, err = strconv.Atoi(value)
+		if err != nil || cfg.backendQueueCapacity < 0 {
+			return config{}, fmt.Errorf("validate GATEWAY_BACKEND_QUEUE_CAPACITY: requires a nonnegative integer")
 		}
 	}
 

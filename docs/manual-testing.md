@@ -1203,6 +1203,40 @@ go test -race -count=1 ./cmd/gateway -run TestLlamaMetrics
 The GPU check skips without its backend URL. Prometheus and Grafana containers
 are not part of this initial exporter deployment.
 
+## Bounded inference admission
+
+The single backend accepts at most `GATEWAY_BACKEND_SLOTS` chat requests into
+preparation and inference, plus `GATEWAY_BACKEND_QUEUE_CAPACITY` waiting requests.
+JSON and SSE share these limits. Compose derives active slots from `LLAMA_PARALLEL`;
+when running the gateway directly, set slots to the backend’s parallel capacity.
+These limits apply per gateway process. They do not coordinate multiple replicas.
+
+Run the focused checks without external services:
+
+```sh
+go test -race ./internal/queue ./internal/gateway -run 'TestQueue|TestAdmission'
+go test ./cmd/gateway -run TestInferenceQueueConfig
+```
+
+Tests cover FIFO handoff, zero waiting capacity, full queues, wait expiry,
+cancellation racing grants, JSON/SSE waiting, and slot release on preparation
+failure, cancellation, and proxy abort. Final accounting runs after slot release.
+
+For a deployed check, use a key whose request and daily token limits will not
+reject the test traffic first. Start one long chat request per backend slot,
+then enough concurrent chats to fill the waiting queue. Additional valid chats
+should return JSON HTTP 429 with `error.code: queue_full` and `Retry-After: 1`.
+Keep the active requests running past the queue timeout: waiting chats should
+return HTTP 503 with `error.code: queue_timeout` without starting generation.
+Stop a waiting client and verify a replacement can enter the queue. Finish or
+cancel active chats and verify queued requests can proceed. Health, readiness,
+and model listing bypass inference admission.
+
+Rejected and canceled waiters create no token reservation or inference usage
+record, though their request-rate credit is already consumed. A crash drops
+waiting requests; only requests that reach durable admission have recovery
+records. The deployed overload check has not yet been run for this slice.
+
 ## Configuration
 
 | Environment variable | Default | Controls |
@@ -1246,6 +1280,9 @@ are not part of this initial exporter deployment.
 | `GATEWAY_UPSTREAM_HEADER_TIMEOUT` | `30s` | Backend response-header wait |
 | `GATEWAY_STREAM_IDLE_TIMEOUT` | `30s` | Each upstream stream-body read wait |
 | `GATEWAY_READINESS_TIMEOUT` | `2s` | Each background backend health-probe deadline |
+| `GATEWAY_BACKEND_SLOTS` | `1` | Local active inference slots, including preparation; match backend `--parallel`. Compose sets this from `LLAMA_PARALLEL` |
+| `GATEWAY_BACKEND_QUEUE_CAPACITY` | `4` | Maximum waiting chat requests; zero rejects immediately when slots are busy |
+| `GATEWAY_BACKEND_QUEUE_TIMEOUT` | `5s` | Maximum queue wait; expires with HTTP 503 before quota or inference |
 | `GATEWAY_BACKEND_HEALTH_INTERVAL` | `5s` | Probe interval per backend; probes never overlap for the same backend |
 | `GATEWAY_BACKEND_HEALTH_FAILURES` | `3` | Consecutive failures before marking unhealthy; positive integer |
 | `GATEWAY_BACKEND_HEALTH_SUCCESSES` | `2` | Consecutive successes before marking healthy, including startup; positive integer |

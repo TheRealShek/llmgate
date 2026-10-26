@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"github.com/therealshek/llmgate/internal/quota"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +11,8 @@ import (
 
 	"github.com/therealshek/llmgate/internal/auth"
 	"github.com/therealshek/llmgate/internal/metrics"
+	"github.com/therealshek/llmgate/internal/queue"
+	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/ratelimit"
 	"github.com/therealshek/llmgate/internal/store"
 )
@@ -20,6 +21,7 @@ import (
 // unrelated paths cannot silently pass health checks.
 func TestHandler(t *testing.T) {
 	handler := NewHandler(HandlerOptions{
+		Admission:      testInferenceQueue(),
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
 		Quota:          testTokenQuota(),
@@ -138,6 +140,7 @@ func TestHandlerModels(t *testing.T) {
 		_, _ = w.Write([]byte("models"))
 	})
 	handler := NewHandler(HandlerOptions{
+		Admission:      testInferenceQueue(),
 		NonStreaming:   upstream,
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
@@ -162,6 +165,7 @@ func TestProtectedRoutes(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	handler := NewHandler(HandlerOptions{
+		Admission:      testInferenceQueue(),
 		NonStreaming:   upstream,
 		Streaming:      upstream,
 		Readiness:      upstream,
@@ -309,6 +313,7 @@ func TestRateLimitRouteOrder(t *testing.T) {
 				w.WriteHeader(http.StatusNoContent)
 			})
 			handler := NewHandler(HandlerOptions{
+				Admission:      testInferenceQueue(),
 				Authentication: testAuthenticator(), RequestLimits: ratelimit.NewLimiter(buckets, time.Second),
 				Quota:        testTokenQuota(),
 				Usage:        testUsageRecorder(),
@@ -336,7 +341,7 @@ func TestRateLimitRouteOrder(t *testing.T) {
 // TestMissingRateLimiter checks gateway construction cannot silently disable request admission.
 func TestMissingRateLimiter(t *testing.T) {
 	backend := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("missing limiter admitted inference") })
-	handler := NewHandler(HandlerOptions{Authentication: testAuthenticator(), NonStreaming: backend})
+	handler := NewHandler(HandlerOptions{Admission: testInferenceQueue(), Authentication: testAuthenticator(), NonStreaming: backend})
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, authenticatedRequest(http.MethodGet, "/v1/models", nil))
 
@@ -367,7 +372,7 @@ func testTokenQuota() allowTokenQuota { return allowTokenQuota{} }
 // TestMetricsRoute checks scrapes bypass authentication and unavailable inference dependencies.
 func TestMetricsRoute(t *testing.T) {
 	m := metrics.New(metrics.Options{KeyCapacity: 2, MaxScrapes: 2, ScrapeTimeout: time.Second})
-	handler := m.Observe(NewHandler(HandlerOptions{Metrics: m}))
+	handler := m.Observe(NewHandler(HandlerOptions{Admission: testInferenceQueue(), Metrics: m}))
 
 	for _, method := range []string{http.MethodGet, http.MethodHead} {
 		w := httptest.NewRecorder()
@@ -384,4 +389,13 @@ func TestMetricsRoute(t *testing.T) {
 	if w.Code != http.StatusMethodNotAllowed {
 		t.Fatal(w.Code)
 	}
+}
+
+func testInferenceQueue() *queue.Queue {
+	admission, err := queue.New(queue.Options{Slots: 100, Capacity: 0, WaitTimeout: time.Second})
+	if err != nil {
+		panic(err)
+	}
+
+	return admission
 }

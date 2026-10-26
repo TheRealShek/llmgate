@@ -47,11 +47,12 @@ gateway /v1/metrics -> Prometheus -> Grafana
 Request path, in order:
 
 1. Authenticate the API key (hash lookup in Postgres, cached in memory).
-2. Check the per-key rate limit and token quota (Redis).
-3. Enter the bounded queue for the chosen backend. If it is full, return `429` with `Retry-After`.
-4. Pick a backend (health, load, and prefix).
-5. Proxy the request and stream tokens back as SSE.
-6. Record usage and metrics when the stream ends.
+2. Check the per-key request rate limit (Redis) and validate the chat request.
+3. Choose a backend (currently fixed; health/load routing in Phase 2, prefix routing in Phase 3).
+4. Enter its bounded inference queue. If full, return `429` with `Retry-After`; if the wait expires, return `503`.
+5. Count prompt tokens, reserve the daily token allowance, and durably record admission before generation.
+6. Proxy the request and stream tokens back as SSE, then release inference capacity.
+7. Record final usage, settle quota, and finish request metrics.
 
 ## API surface
 
@@ -170,10 +171,12 @@ Target: weeks 3 to 5.
 
 Phase 2 has started with a named backend registry, periodic health probes,
 configurable consecutive-result thresholds, and snapshot-based readiness.
-Startup registers the existing single backend and owns monitor cleanup.
-Inference still uses that backend directly. Multiple-backend configuration,
-bounded inference queues, routing, failover, circuit breakers, and the expanded
-metrics/dashboard remain to be implemented.
+The existing single backend now has local bounded FIFO inference admission,
+fixed active slots, queue-full rejection, and a queue wait deadline. Canceled
+waiters leave the queue; proxy completion or abort releases capacity before final
+accounting. Compose aligns gateway slots with llama.cpp parallel slots.
+Multiple-backend configuration, routing, failover, circuit breakers, and the
+expanded metrics/dashboard remain to be implemented.
 
 
 **Build**

@@ -298,6 +298,7 @@ func quotaTestGateway(t *testing.T, address string, grace int64) (*httptest.Serv
 	tokenQuota := quota.NewLimiter(quota.NewCounter(target, transport, 8<<20), quota.NewRedisStore(client), quota.Options{CountTimeout: time.Second, RedisTimeout: time.Second, GracePercent: grace})
 	m := metrics.New(metrics.Options{KeyCapacity: 10, MaxScrapes: 2, ScrapeTimeout: time.Second})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
+		Admission:      testInferenceQueue(),
 		Metrics:        m,
 		NonStreaming:   proxy.NewNonStreamingHandler(target, transport, time.Second),
 		Streaming:      proxy.NewStreamingHandler(target, transport, time.Second),

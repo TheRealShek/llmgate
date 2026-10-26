@@ -7,6 +7,7 @@ import (
 	"github.com/therealshek/llmgate/internal/api"
 	"github.com/therealshek/llmgate/internal/auth"
 	"github.com/therealshek/llmgate/internal/metrics"
+	"github.com/therealshek/llmgate/internal/queue"
 	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/ratelimit"
 	"github.com/therealshek/llmgate/internal/store"
@@ -39,6 +40,8 @@ type HandlerOptions struct {
 	Authentication *auth.Authenticator
 	// RequestLimits admits authenticated models and chat; nil fails closed.
 	RequestLimits *ratelimit.Limiter
+	// Admission bounds active and waiting inference for the backend; nil fails closed.
+	Admission *queue.Queue
 	// Quota reserves daily tokens before inference; nil fails closed.
 	Quota TokenQuota
 	// Usage commits admission before inference and writes final usage afterward; nil fails closed.
@@ -62,6 +65,7 @@ func NewHandler(options HandlerOptions) http.Handler {
 			maxTokens:    options.Limits.MaxTokens,
 			usage:        options.Usage,
 			quota:        options.Quota,
+			admission:    options.Admission,
 		}
 	}
 

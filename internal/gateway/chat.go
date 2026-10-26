@@ -14,6 +14,7 @@ import (
 	"github.com/therealshek/llmgate/internal/api"
 	"github.com/therealshek/llmgate/internal/auth"
 	"github.com/therealshek/llmgate/internal/metrics"
+	"github.com/therealshek/llmgate/internal/queue"
 	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/requestlog"
 	"github.com/therealshek/llmgate/internal/usage"
@@ -28,6 +29,7 @@ type chatHandler struct {
 	maxTokens    int64
 	usage        *usage.Recorder
 	quota        TokenQuota
+	admission    *queue.Queue
 }
 
 func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -108,6 +110,22 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validated chat waits for backend capacity before counting or reserving tokens.
+	// Queue rejection creates neither a quota reservation nor a durable admission.
+	releaseSlot, err := h.admission.Acquire(r.Context())
+	if err != nil {
+		if r.Context().Err() == nil {
+			writeAdmissionError(w, err)
+		}
+
+		return
+	}
+	defer releaseSlot()
+
+	if r.Context().Err() != nil {
+		return
+	}
+
 	// Validated chat obtains an input count and a shared output allowance before proxying.
 	key, ok := auth.Identity(r.Context())
 	if !ok || h.quota == nil {
@@ -174,6 +192,7 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Proxy work ends before the durable final handoff and Redis settlement.
 	defer func() {
 		finishInference()
+		releaseSlot()
 
 		record := observation.Finish(request.Context(), returned)
 		if err := h.usage.Write(request.Context(), record); err == nil {
@@ -293,4 +312,25 @@ func writeQuotaError(w http.ResponseWriter, err error) {
 	_ = api.WriteError(w, http.StatusServiceUnavailable, api.Error{
 		Message: "token quota unavailable", Type: "server_error", Code: "token_quota_unavailable",
 	})
+}
+
+func writeAdmissionError(w http.ResponseWriter, err error) {
+	w.Header().Set("Cache-Control", "no-store")
+
+	status := http.StatusServiceUnavailable
+	response := api.Error{
+		Message: "inference admission unavailable", Type: "server_error", Code: "admission_unavailable",
+	}
+
+	switch {
+	case errors.Is(err, queue.ErrFull):
+		status = http.StatusTooManyRequests
+		response = api.Error{Message: "inference queue is full", Type: "rate_limit_error", Code: "queue_full"}
+
+		w.Header().Set("Retry-After", "1")
+	case errors.Is(err, queue.ErrTimeout):
+		response = api.Error{Message: "inference queue wait expired", Type: "server_error", Code: "queue_timeout"}
+	}
+
+	_ = api.WriteError(w, status, response)
 }

@@ -228,6 +228,37 @@ the streaming handler and idle-read wrappers. `forward.go` owns reverse-proxy
 setup and error logging shared by both modes. Group code by its responsibility
 instead of grouping all types that implement `http.Handler` into one package.
 
+## Bounded inference admission
+
+Use one in-memory FIFO queue per backend in each gateway process. Bound active
+slots and waiting capacity separately. Compose derives the gateway’s slots from
+`LLAMA_PARALLEL` so it does not intentionally send more concurrent inference
+than the backend can execute. Other deployments must keep those values aligned.
+Multiple gateway replicas would multiply these local limits; shared capacity
+coordination is not implemented.
+
+Acquire after authentication, request-rate limiting, and basic chat validation,
+but before prompt counting, token reservation, or durable admission. This avoids
+quota holds and backend counting work for overloaded requests. Holding the slot
+during preparation is conservative: slow Redis or token counting can leave an
+inference slot idle, but does not allow unbounded preparation behind the backend.
+Model listing and health checks bypass inference admission.
+
+Use a small configurable waiting capacity and wait deadline. Defaults are starting
+bounds for the single-slot development backend, not measured optimal settings.
+Allow zero waiting capacity for immediate load shedding. Full queues return 429
+with a one-second `Retry-After` hint; expired waits return 503. The hint is not a
+capacity reservation or guarantee. Canceled waiters consume no inference capacity.
+[Manual testing](manual-testing.md#configuration) owns the numeric defaults.
+
+Release the slot when proxying ends, including aborts, before final accounting.
+Slow final writes must not retain backend execution capacity. Quota settlement
+can still be pending when the next request starts preparation; its existing
+reservation remains charged until settlement completes. Use idempotent release
+and atomic waiter handoff so cancellation or expiry racing a grant cannot leak
+a slot. Waiting is not durable: a process crash drops the waiting HTTP requests
+without creating inference records or token reservations.
+
 ## Backend readiness and periodic health
 
 The Phase 2 registry supersedes Phase 1’s probe-per-readiness-request design.

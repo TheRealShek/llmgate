@@ -47,6 +47,7 @@ func TestStreamingChatFlush(t *testing.T) {
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, 10*time.Millisecond)
 	streaming := proxy.NewStreamingHandler(target, transport, time.Second)
 	handler := NewHandler(HandlerOptions{
+		Admission:      testInferenceQueue(),
 		NonStreaming:   nonStreaming,
 		Streaming:      streaming,
 		Authentication: testAuthenticator(),
@@ -293,6 +294,7 @@ func newStreamingTestGateway(
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, 10*time.Millisecond)
 	streaming := proxy.NewStreamingHandler(target, transport, idleTimeout)
 	gateway := httptest.NewServer(NewHandler(HandlerOptions{
+		Admission:      testInferenceQueue(),
 		NonStreaming:   nonStreaming,
 		Streaming:      streaming,
 		Authentication: testAuthenticator(),

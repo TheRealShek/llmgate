@@ -1,15 +1,16 @@
 # Architecture
 
-This page explains the implemented single-backend gateway, including the first
-Phase 2 health-monitoring slice. Start
+This page explains the implemented single-backend gateway, including Phase 2
+health monitoring and bounded inference admission. Start
 with the [system map](../README.md#architecture), then use this page to
 trace a request and find the package responsible for each step. The
-[project intent](PROJECT_INTENT.md) describes planned work. Backend admission queues and multi-backend routing remain later-phase work.
+[project intent](PROJECT_INTENT.md) describes planned work. Multi-backend routing remains planned work.
 
 ## One chat request
 
-What happens to `POST /v1/chat/completions`? The sequence shows admission,
-generation, response streaming, and durable accounting. The logging wrapper
+What happens to `POST /v1/chat/completions`? The Phase 1 sequence shows
+generation, response streaming, and durable accounting. The local inference
+queue now runs between validation and quota preparation, as described below. The logging wrapper
 assigns a request ID before metrics and routing, then logs completion after the
 inner handlers return.
 
@@ -34,6 +35,21 @@ These rejections stop before validation or inference. Admission has its own
 deadline, which does not limit the subsequent inference request. Once admitted,
 a request keeps its charge even if validation, forwarding, or delivery fails.
 
+Validated chat acquires capacity from the backend’s local FIFO inference queue
+before quota preparation or durable accounting. Each backend slot bounds one
+request across preparation and proxying, including prefill and either response
+mode. A full waiting queue returns `429` with `Retry-After: 1`; an expired wait
+returns `503`. Cancellation removes the waiter. These requests consume their
+request-rate credit but create no token reservation or durable inference record.
+
+The queue mutex makes grants, cancellation, and slot transfers atomic. One timer
+bounds each wait; the queue creates no worker goroutines and stores no bodies or
+contexts. A grant racing cancellation or expiry returns its slot before rejecting.
+Release transfers capacity to the oldest waiter and is idempotent, so deferred
+cleanup can safely cover both early failures and proxy aborts. State is local to
+one gateway process, independent of the durable Redis accounting queue. Multiple
+gateway replicas do not share inference capacity.
+
 Chat validation bounds the body, checks the JSON object and response mode, and
 validates or supplies `max_tokens`. It preserves backend-specific fields. The
 backend checks the model, messages, and generation options. Quota preparation
@@ -55,8 +71,8 @@ reservation ID, original UTC day, and allowance. `usage.Recorder.Observe` uses a
 client-cancelable deadline. Queue failure returns `503` and attempts to refund the
 unused allowance. Successful disk acknowledgment prepares response observation.
 Its writer observes only bytes accepted by the client-facing writer and preserves
-flushes. The chat handler ends proxy metrics, classifies the outcome, durably
-hands off final usage, then settles quota. Failed final handoff retains the charge.
+flushes. The chat handler ends proxy metrics and releases its inference slot, then
+classifies the outcome, durably hands off final usage, and settles quota. Failed final handoff retains the charge.
 This cleanup also runs on disconnect or proxy abort without swallowing the panic.
 There are no prompt/response bodies or credentials in accounting records.
 
@@ -98,6 +114,7 @@ below connects the handlers for one streaming request.
 | [`internal/ratelimit`](../internal/ratelimit/handler.go) | Redis-backed atomic request admission and its deadline. | Request credits count HTTP requests, not generated tokens. |
 | [`internal/quota`](../internal/quota/limiter.go) | Exact backend prompt counting, atomic daily reservations, output caps, and settlement. | Backend enforces generation limits; Redis owns shared budget state. |
 | [`internal/proxy`](../internal/proxy/forward.go) | Upstream HTTP forwarding, credential removal, JSON deadlines, and streaming flushes and idle cancellation. | `gateway` selects response mode; backend generates tokens. |
+| [`internal/queue`](../internal/queue/queue.go) | Local FIFO inference capacity and bounded waiting. | Chat owns slot release; no quota or durable accounting state. |
 | [`internal/backend`](../internal/backend/registry.go) | Periodic health monitoring and snapshot-based readiness. | No backend selection yet. |
 | [`internal/usage`](../internal/usage/recorder.go) | Bounded JSON/SSE observation and durable admission/final handoffs. | Returns the observed outcome and writes usage when called; `gateway` owns metrics and quota finalization. |
 | [`internal/accounting`](../internal/accounting/queue.go) | Shared durable Redis slots, owner fencing, recovery, settlement replay, and retention. | Postgres and quota settlement finish before Redis acknowledgment; no inference body is retained. |
@@ -122,7 +139,8 @@ For `POST /v1/chat/completions` with `stream: true`, follow these entry points:
    through [`RedisStore.Take`](../internal/ratelimit/store.go) and
    [`bucket.lua`](../internal/ratelimit/bucket.lua).
 5. [`chatHandler.ServeHTTP`](../internal/gateway/chat.go) validates the body and
-   selects the response mode. [`Limiter.Admit`](../internal/quota/limiter.go) counts
+   selects the response mode, then waits through
+   [`Queue.Acquire`](../internal/queue/queue.go). [`Limiter.Admit`](../internal/quota/limiter.go) counts
    input and reserves output. [`Recorder.Observe`](../internal/usage/recorder.go)
    hands admission to [`accounting.Queue`](../internal/accounting/queue.go)
    before preparing the response observer. The handler supplies the first-data
@@ -133,7 +151,7 @@ For `POST /v1/chat/completions` with `stream: true`, follow these entry points:
    [observer](../internal/usage/observe.go). JSON delivery instead uses
    [`NewNonStreamingHandler`](../internal/proxy/nonstream.go) and a total deadline.
 7. On normal return or panic unwinding, the chat handler releases the active-stream
-   gauge and gets the outcome from [`Observation.Finish`](../internal/usage/recorder.go).
+   gauge and inference slot, then gets the outcome from [`Observation.Finish`](../internal/usage/recorder.go).
    It calls [`Recorder.Write`](../internal/usage/recorder.go) for the bounded
    durable final handoff, then settles the permit through
    [`Permit.Finish`](../internal/quota/limiter.go) only when handoff succeeds.
@@ -359,6 +377,12 @@ listeners concurrently under one deadline. A shared lifecycle tracker surrounds
 each complete handler, including logging and deferred accounting. Its mutex
 coordinates admission with shutdown; late requests receive the shared `503`
 error instead of entering application handlers.
+
+Already queued requests participate in HTTP draining. They may acquire a slot
+within their queue deadline while the gateway rejects new handlers. Forced
+connection closure cancels queued request contexts, removes waiters, and cancels
+active proxying. Preparation failures and proxy cleanup release occupied slots.
+The queue has no separate worker to stop or join.
 
 Deadline expiry force-closes connections and cancels their HTTP request contexts.
 A separate cleanup deadline then bounds waiting for registered handlers to finish

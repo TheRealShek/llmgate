@@ -15,6 +15,7 @@ import (
 	"github.com/therealshek/llmgate/internal/gateway"
 	"github.com/therealshek/llmgate/internal/metrics"
 	"github.com/therealshek/llmgate/internal/proxy"
+	"github.com/therealshek/llmgate/internal/queue"
 	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/ratelimit"
 	"github.com/therealshek/llmgate/internal/requestlog"
@@ -164,6 +165,13 @@ func run(ctx context.Context) error {
 		readiness = backend.NewReadinessHandler(registry)
 	}
 
+	inferenceQueue, err := queue.New(queue.Options{
+		Slots: cfg.backendSlots, Capacity: cfg.backendQueueCapacity, WaitTimeout: cfg.backendQueueTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("initialize inference admission: %w", err)
+	}
+
 	gatewayMetrics := metrics.New(metrics.Options{
 		KeyCapacity: cfg.metricsKeyCapacity, MaxScrapes: cfg.metricsMaxScrapes, ScrapeTimeout: cfg.metricsScrapeTimeout,
 	})
@@ -175,6 +183,7 @@ func run(ctx context.Context) error {
 		RequestLimits:  requestLimits,
 		Usage:          usageRecorder,
 		Quota:          tokenQuotas,
+		Admission:      inferenceQueue,
 		Metrics:        gatewayMetrics,
 		Limits: gateway.ChatLimits{
 			MaxBodyBytes: cfg.maxBodyBytes,

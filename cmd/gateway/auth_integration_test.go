@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/therealshek/llmgate/internal/auth"
+	backendstate "github.com/therealshek/llmgate/internal/backend"
 	"github.com/therealshek/llmgate/internal/gateway"
 	"github.com/therealshek/llmgate/internal/proxy"
 	"github.com/therealshek/llmgate/internal/queue"
@@ -85,14 +86,19 @@ func TestKeyCreationAndAuthentication(t *testing.T) {
 	keys := store.NewKeyStore(pool)
 	authentication := auth.NewAuthenticator(keys, auth.Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
-		Admission:      testInferenceQueue(),
-		NonStreaming:   proxy.NewNonStreamingHandler(target, transport, time.Second),
-		Streaming:      proxy.NewStreamingHandler(target, transport, time.Second),
+		Backends: []gateway.Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: proxy.NewNonStreamingHandler(target, transport, time.Second),
+			Streaming:    proxy.NewStreamingHandler(target, transport, time.Second),
+			Quota:        testTokenQuota(),
+			Usage:        testUsageRecorder()}},
+		Health: testBackendHealth{},
+
 		Authentication: authentication,
 		RequestLimits:  testRequestLimits(),
-		Quota:          testTokenQuota(),
-		Usage:          testUsageRecorder(),
-		Limits:         gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+
+		Limits: gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
 
 	for _, tt := range []struct {
@@ -179,11 +185,16 @@ func TestAuthenticationCacheDatabaseOutage(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
-		Admission:    testInferenceQueue(),
-		NonStreaming: backend, Authentication: authentication,
-		RequestLimits: testRequestLimits(),
-		Quota:         testTokenQuota(),
-		Usage:         testUsageRecorder(),
+		Backends: []gateway.Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: backend,
+			Quota:        testTokenQuota(),
+			Usage:        testUsageRecorder()}},
+		Health: testBackendHealth{},
+
+		Authentication: authentication,
+		RequestLimits:  testRequestLimits(),
 	})
 	checkStatus := func(secret string, want int) {
 		t.Helper()
@@ -306,4 +317,11 @@ func testInferenceQueue() *queue.Queue {
 	}
 
 	return admission
+}
+
+// testBackendHealth makes single-backend fixtures healthy without probe workers.
+type testBackendHealth struct{}
+
+func (testBackendHealth) States() []backendstate.State {
+	return []backendstate.State{{Name: "primary", Healthy: true}}
 }

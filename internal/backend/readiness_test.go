@@ -8,8 +8,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/therealshek/llmgate/internal/gateway"
 )
 
 // TestReadinessSnapshot checks initial failure, any-healthy semantics, and concurrent reads without probes.
@@ -22,7 +20,7 @@ func TestReadinessSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	handler := gateway.NewHandler(gateway.HandlerOptions{Readiness: NewReadinessHandler(registry)})
+	handler := NewReadinessHandler(registry)
 	for _, ready := range []bool{false, true, false} {
 		registry.record(1, ready)
 

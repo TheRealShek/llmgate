@@ -47,14 +47,19 @@ func TestStreamingChatFlush(t *testing.T) {
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, 10*time.Millisecond)
 	streaming := proxy.NewStreamingHandler(target, transport, time.Second)
 	handler := NewHandler(HandlerOptions{
-		Admission:      testInferenceQueue(),
-		NonStreaming:   nonStreaming,
-		Streaming:      streaming,
+		Backends: []Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: nonStreaming,
+			Streaming:    streaming,
+			Quota:        testTokenQuota(),
+			Usage:        testUsageRecorder()}},
+		Health: testBackendHealth{},
+
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
-		Quota:          testTokenQuota(),
-		Usage:          testUsageRecorder(),
-		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+
+		Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
 	gateway := httptest.NewServer(requestlog.NewHandler(
 		handler,
@@ -294,14 +299,19 @@ func newStreamingTestGateway(
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, 10*time.Millisecond)
 	streaming := proxy.NewStreamingHandler(target, transport, idleTimeout)
 	gateway := httptest.NewServer(NewHandler(HandlerOptions{
-		Admission:      testInferenceQueue(),
-		NonStreaming:   nonStreaming,
-		Streaming:      streaming,
+		Backends: []Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: nonStreaming,
+			Streaming:    streaming,
+			Quota:        testTokenQuota(),
+			Usage:        testUsageRecorder()}},
+		Health: testBackendHealth{},
+
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
-		Quota:          testTokenQuota(),
-		Usage:          testUsageRecorder(),
-		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+
+		Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	}))
 	t.Cleanup(gateway.Close)
 	gateway.Client().Timeout = 5 * time.Second

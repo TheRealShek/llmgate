@@ -166,6 +166,7 @@ func TestQueueUnavailable(t *testing.T) {
 // TestQueueConfiguration checks unsupported capacity and timeout values fail construction.
 func TestQueueConfiguration(t *testing.T) {
 	for _, options := range []Options{
+		{Slots: int(^uint(0) >> 1), Capacity: 1, WaitTimeout: time.Second},
 		{Slots: 0, Capacity: 1, WaitTimeout: time.Second},
 		{Slots: -1, Capacity: 1, WaitTimeout: time.Second},
 		{Slots: 1, Capacity: -1, WaitTimeout: time.Second},

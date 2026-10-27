@@ -330,7 +330,9 @@ The backend’s `/health` endpoint must return 200. Base paths are preserved, so
 and timeouts count as failures. Probes do not follow redirects or forward caller
 credentials. Bodies close after headers without waiting for content. Readiness
 serves only a snapshot, so caller disconnects do not cancel shared probes.
-It does not gate chat traffic or reserve backend capacity yet.
+Models and chat use the same health snapshot for selection. Until a backend is
+healthy, valid authenticated chat and model-list requests return `503` with
+`error.code: no_backend`. Readiness itself reserves no inference capacity.
 
 To check transitions, stop the configured backend and poll readiness until it
 returns 503. Restart it and poll until 200. Look for `backend health changed`
@@ -338,7 +340,7 @@ logs naming `primary`. Allow the configured interval, probe deadline, and result
 thresholds before expecting a transition. This check has unit-test coverage;
 it has not yet been verified against the deployed GPU backend for Phase 2.
 
-Without `GATEWAY_UPSTREAM_URL`, the gateway still starts if Postgres and Redis
+Without either `GATEWAY_UPSTREAM_URL` or `GATEWAY_BACKENDS`, the gateway still starts if Postgres and Redis
 are reachable. Liveness returns `200`; readiness and authenticated model and
 chat requests return `503`. Database configuration remains required and
 migrations run separately. See [configuration](#configuration) for timeout and
@@ -1162,10 +1164,11 @@ curl -fsS http://127.0.0.1:8080/v1/metrics
 ```
 
 Expect `gateway_requests_total`, `gateway_request_duration_seconds`,
-`gateway_ttft_seconds`, and `gateway_active_streams`. Histograms expose their
+`gateway_ttft_seconds`, `gateway_active_streams`, `gateway_queue_depth`,
+`gateway_queue_wait_seconds`, and `gateway_rejected_total`. Histograms expose their
 `_bucket`, `_sum`, and `_count` series. Counters include public probes, models,
-chat, and rejections. Backend `primary` identifies selected inference/model
-proxy work; `none` identifies work that did not select it. Scrapes and admin
+chat, and rejections. Backend labels use configured names (`primary` for the
+legacy single URL); `none` identifies requests without a successful selection. Scrapes and admin
 requests are excluded. These metrics are in process memory and reset on restart.
 
 By default, authenticated requests share `key="other"`. A positive
@@ -1180,6 +1183,12 @@ active-stream gauge to rise, then return to zero after proxying ends. TTFT
 histogram count increases once per stream that emits a nonterminal SSE data
 event. Streams with no event and JSON responses add no TTFT sample. Request
 duration includes quota settlement and usage recording; active streams do not.
+Queue depth counts waiting chats, excluding occupied slots. Queue wait records
+each completed capacity acquisition for a selected backend, including immediate
+grants, timeouts, cancellations, and unavailable admission. Routing rejections
+without a selected target add no wait sample. Rejection counters cover
+`reason="queue_full"`, `reason="queue_timeout"`, and `reason="no_backend"`;
+cancellations do not increment these counters. The queue metrics cover both JSON and SSE chat.
 See [measurement boundaries](architecture.md#prometheus-measurement-boundaries)
 for the full timing definition.
 
@@ -1203,10 +1212,53 @@ go test -race -count=1 ./cmd/gateway -run TestLlamaMetrics
 The GPU check skips without its backend URL. Prometheus and Grafana containers
 are not part of this initial exporter deployment.
 
+## Multiple backends
+
+Configure existing, reachable llama.cpp instances with the same model alias and
+quota-compatible tokenizer endpoints. Database, Redis, migrations, and API-key
+setup are unchanged. The current Compose file still starts one backend; this
+configuration check does not require adding GPU containers.
+
+For a directly started gateway, replace the single URL with a JSON array:
+
+```sh
+GATEWAY_UPSTREAM_URL= \
+GATEWAY_BACKENDS='[{"name":"a","url":"http://127.0.0.1:8081","slots":1,"queue_capacity":4},{"name":"b","url":"http://127.0.0.1:8083","slots":2,"queue_capacity":4}]' \
+go run ./cmd/gateway
+```
+
+Names must be unique, 1 to 64 ASCII letters, digits, underscores, or hyphens.
+`none` is reserved. The list is limited to 64 KiB and unknown fields are rejected.
+URLs follow the single-URL validation rules. Omitted `slots` and `queue_capacity`
+use the global defaults; explicit zero queue capacity disables waiting for that
+backend. Slots must be positive. Set them to the server's parallel capacity.
+The queue-wait timeout and health thresholds are shared settings.
+
+Wait for readiness, then send overlapping authenticated JSON or SSE chats.
+Requests select healthy targets by local assigned request count, rotating ties.
+Scrape metrics and inspect usage to see the selected backend names. Stop one
+server and wait for its health failure threshold: new selections should use the
+remaining healthy server. Existing assignments stay on their original target.
+An inference failure is not retried in this slice. Stop both and wait for the
+threshold: readiness, model listing, and valid authenticated chat should return
+`503`. Full capacity on all healthy targets returns `429` with `Retry-After: 1`.
+
+Run deterministic configuration, routing, and two-server HTTP checks without
+external storage or a GPU:
+
+```sh
+go test -race ./internal/router ./internal/gateway -run 'TestRouting|TestRoutedChatFlow'
+go test ./cmd/gateway -run 'TestLoadBackends|TestBackendConfigIntegration'
+```
+
+These tests establish request behavior, not multi-GPU throughput, backend death
+under load, or the Phase 2 latency target.
+
 ## Bounded inference admission
 
-The single backend accepts at most `GATEWAY_BACKEND_SLOTS` chat requests into
-preparation and inference, plus `GATEWAY_BACKEND_QUEUE_CAPACITY` waiting requests.
+Each backend accepts its configured slots into preparation and inference, plus
+its configured queue capacity in waiting requests. The single-URL defaults come
+from `GATEWAY_BACKEND_SLOTS` and `GATEWAY_BACKEND_QUEUE_CAPACITY`.
 JSON and SSE share these limits. Compose derives active slots from `LLAMA_PARALLEL`;
 when running the gateway directly, set slots to the backend’s parallel capacity.
 These limits apply per gateway process. They do not coordinate multiple replicas.
@@ -1231,6 +1283,16 @@ return HTTP 503 with `error.code: queue_timeout` without starting generation.
 Stop a waiting client and verify a replacement can enter the queue. Finish or
 cancel active chats and verify queued requests can proceed. Health, readiness,
 and model listing bypass inference admission.
+
+Scrape `/v1/metrics` while these requests run. `gateway_queue_depth{backend="primary"}`
+should match the waiting clients and return to zero after they leave. Each
+completed capacity acquisition on a selected backend adds one
+`gateway_queue_wait_seconds_count` sample. A routing rejection when every backend
+is full adds no per-backend wait sample. Queue-full and timeout responses increment the matching
+`gateway_rejected_total{reason="queue_full"}` or `{reason="queue_timeout"}`
+counter. Canceling a waiter clears its depth and adds its elapsed wait without
+incrementing either overload counter. These checks do not establish the Phase 2
+overload latency target; that requires a measured load test.
 
 Rejected and canceled waiters create no token reservation or inference usage
 record, though their request-rate credit is already consumed. A crash drops
@@ -1274,7 +1336,8 @@ records. The deployed overload check has not yet been run for this slice.
 | `GATEWAY_ADMIN_CREATE_TIMEOUT` | `2s` | Admin database insertion deadline |
 | `GATEWAY_ADMIN_REVOKE_TIMEOUT` | `2s` | Admin database revocation deadline |
 | `GATEWAY_ADDR` | `:8080` | Listen address |
-| `GATEWAY_UPSTREAM_URL` | Unset | Backend base URL |
+| `GATEWAY_UPSTREAM_URL` | Unset | Single backend base URL, named `primary`; mutually exclusive with `GATEWAY_BACKENDS` |
+| `GATEWAY_BACKENDS` | Unset | JSON array of 1 to 16 named backends; see [multiple backends](#multiple-backends) |
 | `GATEWAY_UPSTREAM_TIMEOUT` | `30s` | Total deadline for model lists and JSON chat |
 | `GATEWAY_UPSTREAM_CONNECT_TIMEOUT` | `5s` | TCP connect and TLS handshake deadlines |
 | `GATEWAY_UPSTREAM_HEADER_TIMEOUT` | `30s` | Backend response-header wait |

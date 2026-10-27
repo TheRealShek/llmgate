@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -59,7 +60,7 @@ func TestLoadConfigUpstreamURL(t *testing.T) {
 					t.Fatalf("error must identify the setting without exposing credentials: %v", err)
 				}
 
-				if cfg != (config{}) {
+				if !reflect.DeepEqual(cfg, config{}) {
 					t.Fatalf("invalid URL returned partial config: %+v", cfg)
 				}
 
@@ -71,15 +72,15 @@ func TestLoadConfigUpstreamURL(t *testing.T) {
 			}
 
 			if tt.value == "" {
-				if cfg.upstreamURL != nil {
+				if len(cfg.backends) != 0 {
 					t.Fatal("unset URL must remain nil")
 				}
 
 				return
 			}
 
-			if cfg.upstreamURL == nil || cfg.upstreamURL.String() != tt.value {
-				t.Fatalf("upstream URL = %v, want %q", cfg.upstreamURL, tt.value)
+			if len(cfg.backends) != 1 || cfg.backends[0].url.String() != tt.value {
+				t.Fatalf("upstream URL = %v, want %q", cfg.backends, tt.value)
 			}
 		})
 	}
@@ -341,7 +342,7 @@ func TestLoadConfig(t *testing.T) {
 				t.Fatalf("loadConfig() unexpected error: %v", err)
 			}
 
-			if cfg != tt.want {
+			if !reflect.DeepEqual(cfg, tt.want) {
 				t.Fatalf("loadConfig() = %+v, want %+v", cfg, tt.want)
 			}
 		})

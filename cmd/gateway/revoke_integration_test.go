@@ -77,22 +77,31 @@ func TestAdminRevocationAndStreams(t *testing.T) {
 
 	authentication := auth.NewAuthenticator(keys, auth.Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024})
 	public := httptest.NewServer(gateway.NewHandler(gateway.HandlerOptions{
-		Admission:      testInferenceQueue(),
-		NonStreaming:   proxy.NewNonStreamingHandler(target, transport, time.Second),
-		Streaming:      proxy.NewStreamingHandler(target, transport, time.Second),
+		Backends: []gateway.Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: proxy.NewNonStreamingHandler(target, transport, time.Second),
+			Streaming:    proxy.NewStreamingHandler(target, transport, time.Second),
+			Quota:        testTokenQuota(),
+			Usage:        testUsageRecorder()}},
+		Health: testBackendHealth{},
+
 		Authentication: authentication,
 		RequestLimits:  testRequestLimits(),
-		Quota:          testTokenQuota(),
-		Usage:          testUsageRecorder(),
-		Limits:         gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 128},
+
+		Limits: gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 128},
 	}))
 	t.Cleanup(public.Close)
 	client := public.Client()
 	client.Timeout = 5 * time.Second
 	token := strings.Repeat("a", 64)
 	private := httptest.NewServer(admin.NewHandler(admin.HandlerOptions{
-		Keys: keys, Revoker: authentication, Token: token,
-		MaxBodyBytes: 1024, CreateTimeout: time.Second, RevokeTimeout: time.Second,
+		Keys:          keys,
+		Revoker:       authentication,
+		Token:         token,
+		MaxBodyBytes:  1024,
+		CreateTimeout: time.Second,
+		RevokeTimeout: time.Second,
 	}))
 	t.Cleanup(private.Close)
 

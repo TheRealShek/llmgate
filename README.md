@@ -1,7 +1,7 @@
 # llmgate
 
 `llmgate` is an OpenAI-compatible LLM gateway written in Go. It sits in front of
-an inference server such as llama.cpp and handles API-key authentication,
+inference servers such as llama.cpp and handles API-key authentication,
 request-rate limits, daily token quotas, validation, streaming, cancellation,
 and deadlines. The inference server loads the model and generates tokens.
 
@@ -16,9 +16,11 @@ record the evidence. Compose defines the gateway, pinned CUDA backend, Postgres,
 > **Not production-ready.** This is a project under active development.
 > Do not use it in production.
 
-Phase 2 adds periodic backend health monitoring, snapshot-based readiness, and
-bounded inference admission with queue-full rejection and a wait timeout. Inference
-still uses one backend. Multi-backend routing and failover are next; see the [phase 2 scope](docs/PROJECT_INTENT.md#phase-2-multiple-backends-and-overload-protection).
+Phase 2 adds named backends, health-aware least-loaded routing, and a bounded
+inference queue per backend for JSON and SSE chat, with
+[queue metrics](docs/manual-testing.md#prometheus-metrics). Compose still deploys
+one backend. Retry/failover and circuit breakers remain planned; see the
+[Phase 2 scope](docs/PROJECT_INTENT.md#phase-2-multiple-backends-and-overload-protection).
 
 ## Quick start
 

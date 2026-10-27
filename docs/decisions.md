@@ -637,8 +637,10 @@ Raw keys, request paths, request IDs, and model names never become labels. Bound
 per-key labels to a configured capacity, default zero (all keys share `other`),
 with no eviction or counter reuse. Additional identities share `key="other"`; unauthenticated attempts use
 `key="none"`. This preserves aggregate counts with bounded memory even when
-operators create many keys. Backend labels are fixed to `primary` or `none` for
-this single-backend phase. Metrics reset on process restart, not at midnight.
+operators create many keys. The initial single-backend labels were `primary`
+and `none`; the [Phase 2 routing policy](#local-least-loaded-backend-routing)
+replaces this with configured names and `none`. Metrics reset on process restart,
+not at midnight.
 
 Scrapes are public on `/v1/metrics`, excluded from request metrics, and independent
 of authentication, Postgres, Redis, and backend health. Bound simultaneous
@@ -795,3 +797,37 @@ The batch writer uses the same conflict checks for admission and final usage.
 Queued records replay after restart, including fenced abandoned-attempt recovery
 and retryable quota settlement. Retention keeps both the admission and final row
 for the configured eligibility period.
+
+
+## Local least-loaded backend routing
+
+Choose among healthy backends using the fewest local assignments, including
+waiting, preparation, and inference. Rotate equal-load choices through configuration
+order. Select and increment under one mutex before entering the backend queue.
+Using a queue snapshot alone would let simultaneous requests all select the same
+idle server before any of them entered its queue. Bound assignments by that
+backend's slots plus waiting capacity and release them before final accounting.
+
+This is an absolute request count, not normalized capacity, prompt cost, or GPU
+utilization. It keeps this phase understandable, but differently sized servers or
+long prompts can have unequal work despite equal counts. Counts and queues are
+per gateway process; several gateways pointing at one server do not share this
+capacity limit.
+
+Keep counting, inference, and usage identity in the selected backend bundle.
+Shared Redis reservations still enforce one daily budget across all targets.
+All configured servers should expose the same model aliases. Model listing
+selects one healthy server without inference admission rather than merging
+catalogs. Prefix/model-aware routing and heterogeneous model pools are outside
+this slice.
+
+Health gates new selections using the existing probe thresholds. Already assigned
+requests, including waiters, stay on their original server. No healthy backend
+returns `503`; full capacity across healthy backends returns `429`. Requests are
+not retried on another backend yet. A retry will need to preserve the response
+commit boundary and account for uncertain consumption separately.
+
+Accept a bounded named JSON list through `GATEWAY_BACKENDS`, while translating the
+existing single URL to one `primary` target. Reject both settings together rather
+than silently choosing one. Backend names become fixed metric labels, with a
+maximum of 16 targets and `none` reserved for work without a selected backend.

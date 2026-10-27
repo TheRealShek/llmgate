@@ -17,19 +17,17 @@ import (
 	"github.com/therealshek/llmgate/internal/queue"
 	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/requestlog"
+	"github.com/therealshek/llmgate/internal/router"
 	"github.com/therealshek/llmgate/internal/usage"
 )
 
 // chatHandler validates chat completion requests and forwards valid payloads
 // to the configured streaming or non-streaming backend handler.
 type chatHandler struct {
-	nonStreaming http.Handler
-	streaming    http.Handler
+	backends     map[string]Backend
+	routing      *router.Router
 	maxBodyBytes int64
 	maxTokens    int64
-	usage        *usage.Recorder
-	quota        TokenQuota
-	admission    *queue.Queue
 }
 
 func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -80,22 +78,6 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upstream := h.nonStreaming
-	if options.stream {
-		upstream = h.streaming
-	}
-
-	if upstream == nil {
-		// A configured JSON backend does not guarantee streaming is available.
-		_ = api.WriteError(w, http.StatusNotImplemented, api.Error{
-			Message: "streaming chat is not configured",
-			Type:    "server_error",
-			Code:    "streaming_not_supported",
-		})
-
-		return
-	}
-
 	// Validate the client's token count, or add the configured default when omitted,
 	// before the buffered request reaches the proxy.
 	body, err = limitChatTokens(body, options.fields, h.maxTokens)
@@ -112,7 +94,11 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Validated chat waits for backend capacity before counting or reserving tokens.
 	// Queue rejection creates neither a quota reservation nor a durable admission.
-	releaseSlot, err := h.admission.Acquire(r.Context())
+	waitStarted := time.Now()
+	name, releaseSlot, err := h.routing.Acquire(r.Context())
+
+	metrics.Admission(r.Context(), name, time.Since(waitStarted), err)
+
 	if err != nil {
 		if r.Context().Err() == nil {
 			writeAdmissionError(w, err)
@@ -120,7 +106,24 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+
 	defer releaseSlot()
+
+	target := h.backends[name]
+	metrics.SelectBackend(r.Context(), name)
+
+	upstream := target.NonStreaming
+	if options.stream {
+		upstream = target.Streaming
+	}
+
+	if upstream == nil {
+		_ = api.WriteError(w, http.StatusNotImplemented, api.Error{
+			Message: "streaming chat is not configured", Type: "server_error", Code: "streaming_not_supported",
+		})
+
+		return
+	}
 
 	if r.Context().Err() != nil {
 		return
@@ -128,12 +131,12 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Validated chat obtains an input count and a shared output allowance before proxying.
 	key, ok := auth.Identity(r.Context())
-	if !ok || h.quota == nil {
+	if !ok || target.Quota == nil {
 		writeQuotaError(w, quota.ErrUnavailable)
 		return
 	}
 
-	admission, err := h.quota.Admit(r.Context(), key, body)
+	admission, err := target.Quota.Admit(r.Context(), key, body)
 	if r.Context().Err() != nil {
 		admission.Permit.Release(r.Context())
 		return
@@ -169,7 +172,7 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	_ = json.Unmarshal(options.fields["model"], &model)
 
-	observation, err := h.usage.Observe(w, request, usage.Request{
+	observation, err := target.Usage.Observe(w, request, usage.Request{
 		Model: model, Streaming: options.stream,
 		Reservation: admission.Permit.Reservation(),
 		Cancel:      cancelRequest,
@@ -195,7 +198,7 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		releaseSlot()
 
 		record := observation.Finish(request.Context(), returned)
-		if err := h.usage.Write(request.Context(), record); err == nil {
+		if err := target.Usage.Write(request.Context(), record); err == nil {
 			admission.Permit.Finish(request.Context(), record)
 		}
 	}()
@@ -323,6 +326,8 @@ func writeAdmissionError(w http.ResponseWriter, err error) {
 	}
 
 	switch {
+	case errors.Is(err, router.ErrNoBackend):
+		response = api.Error{Message: "no healthy backend available", Type: "server_error", Code: "no_backend"}
 	case errors.Is(err, queue.ErrFull):
 		status = http.StatusTooManyRequests
 		response = api.Error{Message: "inference queue is full", Type: "rate_limit_error", Code: "queue_full"}

@@ -12,6 +12,10 @@ import (
 	"testing"
 	"time"
 
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
+	"github.com/therealshek/llmgate/internal/metrics"
 	"github.com/therealshek/llmgate/internal/queue"
 	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/store"
@@ -28,7 +32,12 @@ func TestAdmissionRejections(t *testing.T) {
 					capacity = 0
 				}
 
-				admission := integrationQueue(t, queue.Options{Slots: 1, Capacity: capacity, WaitTimeout: 30 * time.Millisecond})
+				waitTimeout := time.Second
+				if mode == "timeout" {
+					waitTimeout = 30 * time.Millisecond
+				}
+
+				admission := integrationQueue(t, queue.Options{Slots: 1, Capacity: capacity, WaitTimeout: waitTimeout})
 
 				release, err := admission.Acquire(t.Context())
 				if err != nil {
@@ -40,6 +49,8 @@ func TestAdmissionRejections(t *testing.T) {
 				if mode == "missing" {
 					configured = nil
 				}
+
+				m := metrics.New(metrics.Options{Backends: map[string]*queue.Queue{"primary": configured}, MaxScrapes: 2, ScrapeTimeout: time.Second})
 
 				backend := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("rejection reached inference") })
 				recorder := usage.NewRecorder(usage.Options{
@@ -56,16 +67,26 @@ func TestAdmissionRejections(t *testing.T) {
 						},
 					}, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
 				})
-				handler := NewHandler(HandlerOptions{
-					Admission: configured, NonStreaming: backend, Streaming: backend, Usage: recorder,
-					Authentication: testAuthenticator(), RequestLimits: testRequestLimits(),
-					Quota: tokenQuotaFunc(func(context.Context, store.Key, []byte) (quota.Admission, error) {
-						t.Error("rejection reached quota")
+				handler := m.Observe(NewHandler(HandlerOptions{
+					Backends: []Backend{{
+						Name:         "primary",
+						Admission:    configured,
+						NonStreaming: backend,
+						Streaming:    backend,
+						Usage:        recorder,
+						Quota: tokenQuotaFunc(func(context.Context, store.Key, []byte) (quota.Admission, error) {
+							t.Error("rejection reached quota")
 
-						return quota.Admission{}, quota.ErrUnavailable
-					}),
+							return quota.Admission{}, quota.ErrUnavailable
+						})}},
+					Health:  testBackendHealth{},
+					Metrics: m,
+
+					Authentication: testAuthenticator(),
+					RequestLimits:  testRequestLimits(),
+
 					Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
-				})
+				}))
 
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
@@ -87,6 +108,11 @@ func TestAdmissionRejections(t *testing.T) {
 
 				if mode == "canceled" {
 					waitAdmissionState(t, admission, queue.State{Active: 1, Waiting: 1})
+
+					if depth := scrapeAdmissionMetrics(t, handler)["gateway_queue_depth"].GetMetric()[0].GetGauge().GetValue(); depth != 1 {
+						t.Fatalf("waiting depth = %v, want 1", depth)
+					}
+
 					cancel()
 				}
 
@@ -94,6 +120,26 @@ func TestAdmissionRejections(t *testing.T) {
 				case <-done:
 				case <-time.After(2 * time.Second):
 					t.Fatal("rejected request did not finish")
+				}
+
+				data := scrapeAdmissionMetrics(t, handler)
+				if got := data["gateway_queue_wait_seconds"].GetMetric()[0].GetHistogram().GetSampleCount(); got != 1 {
+					t.Fatalf("acquisition samples = %d, want 1", got)
+				}
+
+				for _, sample := range data["gateway_rejected_total"].GetMetric() {
+					want := float64(0)
+					if sample.GetLabel()[0].GetValue() == "queue_"+mode {
+						want = 1
+					}
+
+					if sample.GetCounter().GetValue() != want {
+						t.Fatalf("wrong rejection count: %v", sample)
+					}
+				}
+
+				if configured != nil && data["gateway_queue_depth"].GetMetric()[0].GetGauge().GetValue() != 0 {
+					t.Fatal("rejected waiter retained queue depth")
 				}
 
 				code, status := "admission_unavailable", http.StatusServiceUnavailable
@@ -171,9 +217,18 @@ func TestAdmissionSlotCleanup(t *testing.T) {
 					}), Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
 				})
 				handler := NewHandler(HandlerOptions{
-					Admission: admission, NonStreaming: backend, Streaming: backend, Usage: recorder,
-					Authentication: testAuthenticator(), RequestLimits: testRequestLimits(), Quota: testTokenQuota(),
-					Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+					Backends: []Backend{{
+						Name:         "primary",
+						Admission:    admission,
+						NonStreaming: backend,
+						Streaming:    backend,
+						Usage:        recorder,
+						Quota:        testTokenQuota()}},
+					Health: testBackendHealth{},
+
+					Authentication: testAuthenticator(),
+					RequestLimits:  testRequestLimits(),
+					Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 				})
 
 				var recovered any
@@ -214,11 +269,19 @@ func TestAdmissionPreparationFailure(t *testing.T) {
 				}}, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
 			})
 			handler := NewHandler(HandlerOptions{
-				Admission: admission, NonStreaming: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-					t.Error("preparation failure reached inference")
-				}), Usage: recorder, Quota: tokenQuota,
-				Authentication: testAuthenticator(), RequestLimits: testRequestLimits(),
-				Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+				Backends: []Backend{{
+					Name:      "primary",
+					Admission: admission,
+					NonStreaming: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+						t.Error("preparation failure reached inference")
+					}),
+					Usage: recorder,
+					Quota: tokenQuota}},
+				Health: testBackendHealth{},
+
+				Authentication: testAuthenticator(),
+				RequestLimits:  testRequestLimits(),
+				Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 			})
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, admissionRequest(t.Context(), false))
@@ -267,12 +330,33 @@ func waitAdmissionState(t *testing.T, admission *queue.Queue, want queue.State) 
 	}
 }
 
+func scrapeAdmissionMetrics(t *testing.T, handler http.Handler) map[string]*dto.MetricFamily {
+	t.Helper()
+
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/metrics", nil))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("scrape = %d: %s", w.Code, w.Body.String())
+	}
+
+	parser := expfmt.NewTextParser(model.UTF8Validation)
+	data, err := parser.TextToMetricFamilies(strings.NewReader(w.Body.String()))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return data
+}
+
 // TestAdmissionWaitThenForward checks queued JSON and SSE requests start only after the active request exits.
 func TestAdmissionWaitThenForward(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		for _, canceled := range []bool{false, true} {
 			t.Run(fmt.Sprintf("stream=%t/cancel=%t", stream, canceled), func(t *testing.T) {
 				admission := integrationQueue(t, queue.Options{Slots: 1, Capacity: 1, WaitTimeout: time.Second})
+				m := metrics.New(metrics.Options{Backends: map[string]*queue.Queue{"primary": admission}, MaxScrapes: 2, ScrapeTimeout: time.Second})
 
 				var counts, admissions, calls atomic.Int32
 
@@ -307,16 +391,26 @@ func TestAdmissionWaitThenForward(t *testing.T) {
 						captureUsage: func(context.Context, store.Usage) error { return nil },
 					}, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
 				})
-				handler := NewHandler(HandlerOptions{
-					Admission: admission, NonStreaming: backend, Streaming: backend, Usage: recorder,
-					Authentication: testAuthenticator(), RequestLimits: testRequestLimits(),
-					Quota: tokenQuotaFunc(func(_ context.Context, _ store.Key, body []byte) (quota.Admission, error) {
-						counts.Add(1)
+				handler := m.Observe(NewHandler(HandlerOptions{
+					Backends: []Backend{{
+						Name:         "primary",
+						Admission:    admission,
+						NonStreaming: backend,
+						Streaming:    backend,
+						Usage:        recorder,
+						Quota: tokenQuotaFunc(func(_ context.Context, _ store.Key, body []byte) (quota.Admission, error) {
+							counts.Add(1)
 
-						return quota.Admission{Body: body}, nil
-					}),
+							return quota.Admission{Body: body}, nil
+						})}},
+					Health:  testBackendHealth{},
+					Metrics: m,
+
+					Authentication: testAuthenticator(),
+					RequestLimits:  testRequestLimits(),
+
 					Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
-				})
+				}))
 
 				ctx, cancel := context.WithCancel(t.Context())
 				defer cancel()
@@ -356,6 +450,12 @@ func TestAdmissionWaitThenForward(t *testing.T) {
 				}()
 
 				waitAdmissionState(t, admission, queue.State{Active: 1, Waiting: 1})
+				waitingMetrics := scrapeAdmissionMetrics(t, handler)
+
+				if waitingMetrics["gateway_queue_depth"].GetMetric()[0].GetGauge().GetValue() != 1 ||
+					waitingMetrics["gateway_queue_wait_seconds"].GetMetric()[0].GetHistogram().GetSampleCount() != 1 {
+					t.Fatal("waiting request was not visible or recorded before acquisition finished")
+				}
 
 				if counts.Load() != 1 || admissions.Load() != 1 || calls.Load() != 1 {
 					t.Fatal("waiting request started backend preparation")
@@ -380,6 +480,12 @@ func TestAdmissionWaitThenForward(t *testing.T) {
 				}
 
 				waitAdmissionState(t, admission, queue.State{})
+				finishedMetrics := scrapeAdmissionMetrics(t, handler)
+
+				if finishedMetrics["gateway_queue_depth"].GetMetric()[0].GetGauge().GetValue() != 0 ||
+					finishedMetrics["gateway_queue_wait_seconds"].GetMetric()[0].GetHistogram().GetSampleCount() != 2 {
+					t.Fatal("handoff did not clear depth and record both acquisition times")
+				}
 			})
 		}
 	}

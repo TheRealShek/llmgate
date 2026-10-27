@@ -3,6 +3,7 @@ package metrics_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -18,11 +19,12 @@ import (
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 	"github.com/therealshek/llmgate/internal/metrics"
+	"github.com/therealshek/llmgate/internal/queue"
 	"github.com/therealshek/llmgate/internal/requestlog"
 )
 
 func newMetrics() *metrics.Metrics {
-	return metrics.New(metrics.Options{KeyCapacity: 2, MaxScrapes: 2, ScrapeTimeout: time.Second})
+	return metrics.New(metrics.Options{Backends: map[string]*queue.Queue{"primary": nil}, KeyCapacity: 2, MaxScrapes: 2, ScrapeTimeout: time.Second})
 }
 
 func scrape(t *testing.T, m *metrics.Metrics) map[string]*dto.MetricFamily {
@@ -74,7 +76,8 @@ func TestRequestMetrics(t *testing.T) {
 		}
 
 		metrics.Authenticate(r.Context(), 7)
-		metrics.Proxy(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusTooManyRequests) })).ServeHTTP(w, r)
+		metrics.SelectBackend(r.Context(), "primary")
+		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/private-path?secret=query", nil))
 
@@ -131,7 +134,7 @@ func TestKeyLabelBound(t *testing.T) {
 
 // TestZeroKeyCapacity checks authenticated keys share one label while unauthenticated requests stay distinct.
 func TestZeroKeyCapacity(t *testing.T) {
-	m := metrics.New(metrics.Options{KeyCapacity: 0, MaxScrapes: 2, ScrapeTimeout: time.Second})
+	m := metrics.New(metrics.Options{Backends: map[string]*queue.Queue{"primary": nil}, KeyCapacity: 0, MaxScrapes: 2, ScrapeTimeout: time.Second})
 	handler := instrument(m, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id, _ := strconv.ParseInt(r.Header.Get("X-Test-ID"), 10, 64)
 		metrics.Authenticate(r.Context(), id)
@@ -158,6 +161,7 @@ func TestInferenceMeasurements(t *testing.T) {
 		handler := instrument(m, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(2 * time.Second)
 
+			metrics.SelectBackend(r.Context(), "primary")
 			finish := metrics.BeginInference(r.Context(), true)
 
 			if got := scrape(t, m)["gateway_active_streams"].GetMetric()[0].GetGauge().GetValue(); got != 1 {
@@ -191,12 +195,59 @@ func TestInferenceMeasurements(t *testing.T) {
 	})
 }
 
+// TestAdmissionMeasurements checks exact elapsed time and fixed rejection labels across outcomes.
+func TestAdmissionMeasurements(t *testing.T) {
+	m := newMetrics()
+	for _, err := range []error{nil, fmt.Errorf("acquire: %w", queue.ErrFull), queue.ErrTimeout,
+		context.Canceled, context.DeadlineExceeded, queue.ErrUnavailable} {
+		handler := instrument(m, http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			metrics.Admission(r.Context(), "primary", 2*time.Second, err)
+		}))
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", nil))
+	}
+
+	data := scrape(t, m)
+	wait := data["gateway_queue_wait_seconds"].GetMetric()[0].GetHistogram()
+
+	if wait.GetSampleCount() != 6 || wait.GetSampleSum() != 12 {
+		t.Fatal("incorrect acquisition timing", wait)
+	}
+
+	rejections := data["gateway_rejected_total"].GetMetric()
+	if len(rejections) != 3 {
+		t.Fatal("unexpected rejection labels", rejections)
+	}
+
+	for _, sample := range rejections {
+		want := float64(1)
+		if sample.GetLabel()[0].GetValue() == "no_backend" {
+			want = 0
+		}
+
+		if sample.GetCounter().GetValue() != want {
+			t.Fatal("cancellation or unavailable admission counted as overload", sample)
+		}
+	}
+
+	if data["gateway_queue_depth"] != nil {
+		t.Fatal("missing queue exported a depth gauge")
+	}
+
+	metrics.Admission(context.Background(), "primary", time.Second, queue.ErrFull)
+
+	if got := scrape(t, m)["gateway_queue_wait_seconds"].GetMetric()[0].GetHistogram().GetSampleCount(); got != 6 {
+		t.Fatal("uninstrumented request changed metrics", got)
+	}
+}
+
 // TestResponseControl checks flush, first final status, and abort panic propagation.
 func TestResponseControl(t *testing.T) {
 	for _, abort := range []bool{false, true} {
 		t.Run(strconv.FormatBool(abort), func(t *testing.T) {
 			m := newMetrics()
 			handler := instrument(m, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				metrics.SelectBackend(r.Context(), "primary")
+
 				finish := metrics.BeginInference(r.Context(), true)
 				defer finish()
 
@@ -311,5 +362,52 @@ func TestScrapeWriteDeadline(t *testing.T) {
 
 	if len(w.deadlines) != 2 || w.deadlines[0].IsZero() || !w.deadlines[1].IsZero() {
 		t.Fatal("scrape deadline not cleared", w.deadlines)
+	}
+}
+
+// TestBackendMetricIsolation checks configured labels stay separate and unknown selections cannot create series.
+func TestBackendMetricIsolation(t *testing.T) {
+	m := metrics.New(metrics.Options{
+		Backends: map[string]*queue.Queue{"a": nil, "b": nil}, MaxScrapes: 2, ScrapeTimeout: time.Second,
+	})
+	for _, name := range []string{"a", "b", "untrusted-name"} {
+		handler := instrument(m, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			metrics.SelectBackend(r.Context(), name)
+
+			finish := metrics.BeginInference(r.Context(), true)
+			defer finish()
+
+			metrics.FirstData(r.Context(), time.Now())
+			w.WriteHeader(http.StatusOK)
+		}))
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/", nil))
+	}
+
+	data := scrape(t, m)
+	for _, family := range []string{"gateway_active_streams", "gateway_ttft_seconds", "gateway_queue_wait_seconds"} {
+		samples := data[family].GetMetric()
+		if len(samples) != 2 {
+			t.Fatal("unexpected backend cardinality", family, samples)
+		}
+
+		for _, sample := range samples {
+			if label := sample.GetLabel()[0].GetValue(); label != "a" && label != "b" {
+				t.Fatal("unconfigured label", sample)
+			}
+
+			if family == "gateway_ttft_seconds" && sample.GetHistogram().GetSampleCount() != 1 {
+				t.Fatal("TTFT crossed backends", sample)
+			}
+
+			if family == "gateway_active_streams" && sample.GetGauge().GetValue() != 0 {
+				t.Fatal("stream gauge leaked", sample)
+			}
+		}
+	}
+
+	if count(data["gateway_requests_total"], "none", "a", "200") != 1 ||
+		count(data["gateway_requests_total"], "none", "b", "200") != 1 ||
+		count(data["gateway_requests_total"], "none", "none", "200") != 1 {
+		t.Fatal("request attribution crossed backends", data["gateway_requests_total"])
 	}
 }

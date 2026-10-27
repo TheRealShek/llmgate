@@ -116,14 +116,21 @@ func TestDurableAccountingBatches(t *testing.T) {
 		_, _ = io.WriteString(w, `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`)
 	})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
-		Admission:    testInferenceQueue(),
-		NonStreaming: backend, RequestLimits: testRequestLimits(), Quota: testTokenQuota(),
+		Backends: []gateway.Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: backend,
+			Quota:        testTokenQuota(),
+			Usage: usage.NewRecorder(usage.Options{
+				Store: queue, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
+			})}},
+		Health: testBackendHealth{},
+
+		RequestLimits: testRequestLimits(),
 		Authentication: auth.NewAuthenticator(keys, auth.Options{
 			LookupTimeout: time.Second, CacheTTL: time.Minute, CacheCapacity: 32,
 		}),
-		Usage: usage.NewRecorder(usage.Options{
-			Store: queue, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
-		}),
+
 		Limits: gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 128},
 	})
 	handler := requestlog.NewHandler(routes, slog.New(slog.NewJSONHandler(io.Discard, nil)))
@@ -249,14 +256,20 @@ func TestInferenceUsageRecords(t *testing.T) {
 		LookupTimeout: time.Second, CacheTTL: time.Minute, CacheCapacity: 32,
 	})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
-		Admission:      testInferenceQueue(),
-		NonStreaming:   proxy.NewNonStreamingHandler(target, transport, time.Second),
-		Streaming:      proxy.NewStreamingHandler(target, transport, time.Second),
-		Authentication: authentication, RequestLimits: testRequestLimits(),
-		Quota: testTokenQuota(),
-		Usage: usage.NewRecorder(usage.Options{
-			Store: directUsageStore{store.NewUsageStore(pool)}, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
-		}),
+		Backends: []gateway.Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: proxy.NewNonStreamingHandler(target, transport, time.Second),
+			Streaming:    proxy.NewStreamingHandler(target, transport, time.Second),
+			Quota:        testTokenQuota(),
+			Usage: usage.NewRecorder(usage.Options{
+				Store: directUsageStore{store.NewUsageStore(pool)}, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
+			})}},
+		Health: testBackendHealth{},
+
+		Authentication: authentication,
+		RequestLimits:  testRequestLimits(),
+
 		Limits: gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 128},
 	})
 	public := httptest.NewServer(requestlog.NewHandler(routes, slog.New(slog.NewJSONHandler(io.Discard, nil))))
@@ -400,12 +413,19 @@ func TestAdmissionSurvivesDeliveryFailure(t *testing.T) {
 		_, _ = io.WriteString(w, `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`)
 	})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
-		Admission:    testInferenceQueue(),
-		NonStreaming: backend, Authentication: authentication, RequestLimits: testRequestLimits(),
-		Quota: testTokenQuota(), Limits: gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 128},
-		Usage: usage.NewRecorder(usage.Options{
-			Store: directUsageStore{store.NewUsageStore(pool)}, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
-		}),
+		Backends: []gateway.Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: backend,
+			Quota:        testTokenQuota(),
+			Usage: usage.NewRecorder(usage.Options{
+				Store: directUsageStore{store.NewUsageStore(pool)}, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
+			})}},
+		Health: testBackendHealth{},
+
+		Authentication: authentication,
+		RequestLimits:  testRequestLimits(),
+		Limits:         gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 128},
 	})
 	handler := requestlog.NewHandler(routes, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 
@@ -500,16 +520,22 @@ func TestForcedShutdownPersistsUsage(t *testing.T) {
 	}
 
 	routes := gateway.NewHandler(gateway.HandlerOptions{
-		Admission:    testInferenceQueue(),
-		Streaming:    proxy.NewStreamingHandler(target, transport, time.Second),
-		NonStreaming: proxy.NewNonStreamingHandler(target, transport, time.Second),
+		Backends: []gateway.Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			Streaming:    proxy.NewStreamingHandler(target, transport, time.Second),
+			NonStreaming: proxy.NewNonStreamingHandler(target, transport, time.Second),
+			Quota:        testTokenQuota(),
+			Usage: usage.NewRecorder(usage.Options{
+				Store: directUsageStore{store.NewUsageStore(pool)}, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
+			})}},
+		Health: testBackendHealth{},
+
 		Authentication: auth.NewAuthenticator(keys, auth.Options{
 			LookupTimeout: time.Second, CacheTTL: time.Minute, CacheCapacity: 8,
 		}),
-		RequestLimits: testRequestLimits(), Quota: testTokenQuota(),
-		Usage: usage.NewRecorder(usage.Options{
-			Store: directUsageStore{store.NewUsageStore(pool)}, Backend: "primary", WriteTimeout: time.Second, MaxBytes: 1024,
-		}),
+		RequestLimits: testRequestLimits(),
+
 		Limits: gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
 	server := &http.Server{Addr: "127.0.0.1:0", Handler: routes}

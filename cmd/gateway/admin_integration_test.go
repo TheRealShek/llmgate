@@ -20,7 +20,10 @@ func TestAdminCreationAndAuthentication(t *testing.T) {
 	keys := store.NewKeyStore(pool)
 	token := strings.Repeat("a", 64)
 	routes := admin.NewHandler(admin.HandlerOptions{
-		Keys: keys, Token: token, MaxBodyBytes: 4096, CreateTimeout: time.Second,
+		Keys:          keys,
+		Token:         token,
+		MaxBodyBytes:  4096,
+		CreateTimeout: time.Second,
 	})
 	r := httptest.NewRequest(http.MethodPost, "/v1/admin/keys",
 		strings.NewReader(`{"name":"admin-created","requests_per_min":12,"tokens_per_day":300}`))
@@ -53,11 +56,16 @@ func TestAdminCreationAndAuthentication(t *testing.T) {
 
 	backend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	public := gateway.NewHandler(gateway.HandlerOptions{
-		Admission:    testInferenceQueue(),
-		NonStreaming: backend, Authentication: auth.NewAuthenticator(keys, auth.Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024}),
-		RequestLimits: testRequestLimits(),
-		Quota:         testTokenQuota(),
-		Usage:         testUsageRecorder(),
+		Backends: []gateway.Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: backend,
+			Quota:        testTokenQuota(),
+			Usage:        testUsageRecorder()}},
+		Health: testBackendHealth{},
+
+		Authentication: auth.NewAuthenticator(keys, auth.Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024}),
+		RequestLimits:  testRequestLimits(),
 	})
 	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	request.Header.Set("Authorization", "Bearer "+created.APIKey)

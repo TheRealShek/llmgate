@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/therealshek/llmgate/internal/auth"
+	backendstate "github.com/therealshek/llmgate/internal/backend"
 	"github.com/therealshek/llmgate/internal/metrics"
 	"github.com/therealshek/llmgate/internal/queue"
 	"github.com/therealshek/llmgate/internal/quota"
@@ -21,11 +22,15 @@ import (
 // unrelated paths cannot silently pass health checks.
 func TestHandler(t *testing.T) {
 	handler := NewHandler(HandlerOptions{
-		Admission:      testInferenceQueue(),
+		Backends: []Backend{{
+			Name:      "primary",
+			Admission: testInferenceQueue(),
+			Quota:     testTokenQuota(),
+			Usage:     testUsageRecorder()}},
+		Health: testBackendHealth{},
+
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
-		Quota:          testTokenQuota(),
-		Usage:          testUsageRecorder(),
 	})
 
 	tests := []struct {
@@ -140,13 +145,18 @@ func TestHandlerModels(t *testing.T) {
 		_, _ = w.Write([]byte("models"))
 	})
 	handler := NewHandler(HandlerOptions{
-		Admission:      testInferenceQueue(),
-		NonStreaming:   upstream,
+		Backends: []Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: upstream,
+			Quota:        testTokenQuota(),
+			Usage:        testUsageRecorder()}},
+		Health: testBackendHealth{},
+
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
-		Quota:          testTokenQuota(),
-		Usage:          testUsageRecorder(),
-		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+
+		Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, authenticatedRequest(http.MethodGet, "/v1/models", nil))
@@ -165,15 +175,20 @@ func TestProtectedRoutes(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	handler := NewHandler(HandlerOptions{
-		Admission:      testInferenceQueue(),
-		NonStreaming:   upstream,
-		Streaming:      upstream,
+		Backends: []Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: upstream,
+			Streaming:    upstream,
+			Quota:        testTokenQuota(),
+			Usage:        testUsageRecorder()}},
+		Health: testBackendHealth{},
+
 		Readiness:      upstream,
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
-		Quota:          testTokenQuota(),
-		Usage:          testUsageRecorder(),
-		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+
+		Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
 
 	for _, tt := range []struct {
@@ -313,12 +328,20 @@ func TestRateLimitRouteOrder(t *testing.T) {
 				w.WriteHeader(http.StatusNoContent)
 			})
 			handler := NewHandler(HandlerOptions{
-				Admission:      testInferenceQueue(),
-				Authentication: testAuthenticator(), RequestLimits: ratelimit.NewLimiter(buckets, time.Second),
-				Quota:        testTokenQuota(),
-				Usage:        testUsageRecorder(),
-				NonStreaming: backend, Streaming: backend, Readiness: readiness,
-				Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+				Backends: []Backend{{
+					Name:         "primary",
+					Admission:    testInferenceQueue(),
+					Quota:        testTokenQuota(),
+					Usage:        testUsageRecorder(),
+					NonStreaming: backend,
+					Streaming:    backend}},
+				Health: testBackendHealth{},
+
+				Authentication: testAuthenticator(),
+				RequestLimits:  ratelimit.NewLimiter(buckets, time.Second),
+
+				Readiness: readiness,
+				Limits:    ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 			})
 
 			r := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
@@ -341,7 +364,13 @@ func TestRateLimitRouteOrder(t *testing.T) {
 // TestMissingRateLimiter checks gateway construction cannot silently disable request admission.
 func TestMissingRateLimiter(t *testing.T) {
 	backend := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("missing limiter admitted inference") })
-	handler := NewHandler(HandlerOptions{Admission: testInferenceQueue(), Authentication: testAuthenticator(), NonStreaming: backend})
+	handler := NewHandler(HandlerOptions{
+		Backends: []Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: backend}},
+		Health:         testBackendHealth{},
+		Authentication: testAuthenticator()})
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, authenticatedRequest(http.MethodGet, "/v1/models", nil))
 
@@ -371,8 +400,9 @@ func testTokenQuota() allowTokenQuota { return allowTokenQuota{} }
 
 // TestMetricsRoute checks scrapes bypass authentication and unavailable inference dependencies.
 func TestMetricsRoute(t *testing.T) {
-	m := metrics.New(metrics.Options{KeyCapacity: 2, MaxScrapes: 2, ScrapeTimeout: time.Second})
-	handler := m.Observe(NewHandler(HandlerOptions{Admission: testInferenceQueue(), Metrics: m}))
+	m := metrics.New(metrics.Options{Backends: map[string]*queue.Queue{"primary": nil}, KeyCapacity: 2, MaxScrapes: 2, ScrapeTimeout: time.Second})
+	handler := m.Observe(NewHandler(HandlerOptions{
+		Metrics: m}))
 
 	for _, method := range []string{http.MethodGet, http.MethodHead} {
 		w := httptest.NewRecorder()
@@ -398,4 +428,11 @@ func testInferenceQueue() *queue.Queue {
 	}
 
 	return admission
+}
+
+// testBackendHealth makes single-backend fixtures healthy without probe workers.
+type testBackendHealth struct{}
+
+func (testBackendHealth) States() []backendstate.State {
+	return []backendstate.State{{Name: "primary", Healthy: true}}
 }

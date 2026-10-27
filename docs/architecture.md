@@ -1,10 +1,10 @@
 # Architecture
 
-This page explains the implemented single-backend gateway, including Phase 2
-health monitoring and bounded inference admission. Start
+This page explains the implemented gateway, including Phase 2 health monitoring,
+least-loaded routing, and bounded inference admission. Start
 with the [system map](../README.md#architecture), then use this page to
 trace a request and find the package responsible for each step. The
-[project intent](PROJECT_INTENT.md) describes planned work. Multi-backend routing remains planned work.
+[project intent](PROJECT_INTENT.md) describes planned work. Retry/failover and circuit breakers remain planned work.
 
 ## One chat request
 
@@ -35,10 +35,10 @@ These rejections stop before validation or inference. Admission has its own
 deadline, which does not limit the subsequent inference request. Once admitted,
 a request keeps its charge even if validation, forwarding, or delivery fails.
 
-Validated chat acquires capacity from the backend’s local FIFO inference queue
+Validated chat selects a healthy backend and acquires its local FIFO inference capacity
 before quota preparation or durable accounting. Each backend slot bounds one
 request across preparation and proxying, including prefill and either response
-mode. A full waiting queue returns `429` with `Retry-After: 1`; an expired wait
+mode. When all healthy backends are full, routing returns `429` with `Retry-After: 1`; an expired wait
 returns `503`. Cancellation removes the waiter. These requests consume their
 request-rate credit but create no token reservation or durable inference record.
 
@@ -78,12 +78,13 @@ There are no prompt/response bodies or credentials in accounting records.
 
 Other routes take shorter paths. Models authenticate and consume a credit but
 skip chat validation. Liveness checks only the process. Readiness reads the backend registry’s health snapshot, bypassing authentication
-and Redis; it neither reserves capacity nor gates chat traffic. If no backend is configured, models and chat
+and Redis; it reserves no capacity. Models and chat use the same health source. If no backend is configured, they
 return `503` after authentication and admission, before chat validation.
 
 ## Backend health ownership
 
-Startup registers the existing `primary` backend. Each registered backend starts
+Startup registers every configured backend. The legacy single URL becomes `primary`.
+Each registered backend starts
 unhealthy and has one worker that probes `/health` immediately, then periodically.
 Only HTTP 200 is successful; redirects are not followed and response bodies are
 closed without buffering. Consecutive successes restore health; consecutive
@@ -93,13 +94,40 @@ with the backend name, without upstream URLs or transport diagnostics.
 The registry mutex protects health and streaks; callers receive independent
 snapshots. Readiness returns 200 when any backend is healthy and 503 otherwise.
 It performs no network work. This smooths transient failures at the cost of delayed
-failure detection and recovery. Current inference still forwards to `primary`
-regardless of this state. Routing and capacity admission remain planned work.
+failure detection and recovery. New selections exclude unhealthy backends. Until
+at least one passes its startup success threshold, models and validated chat
+return `503` with `no_backend`. Existing assignments, including waiters, keep their
+selected backend; health transitions do not cancel or migrate them.
 
 Startup owns the monitor context separately from request contexts. Each probe
 has its own deadline; stopping the monitor cancels in-flight probes and joins
 all workers, then clears health. Monitoring survives HTTP drain and stops before
 the shared transport closes its idle connections.
+
+## Routing and assignment ownership
+
+The router chooses the healthy backend with the fewest local assigned requests,
+skipping backends whose active-plus-waiting limit is reached. Assignments cover
+queue waiting, token counting, durable admission, and proxying. Equal-load choices
+rotate through configuration order. Model listing selects a healthy backend
+without reserving inference capacity and returns that server's model list.
+Configured targets should serve the same model aliases; there is no model-based
+routing or merged model catalog.
+
+One router mutex protects selection and assignment increments together. Requests
+waiting for a queue slot therefore count immediately, even before entering the
+queue. The mutex is released before waiting, counting tokens, or doing network
+work. Each queue separately protects its FIFO grants and cancellation. A failed
+acquisition clears its assignment. A successful acquisition returns an idempotent
+release function that clears both the queue slot and router assignment before
+final accounting, including during proxy aborts. The router adds no goroutines.
+
+The selected bundle owns that backend's prompt counter, JSON/SSE proxies, queue,
+and usage recorder identity. Redis quota state and durable accounting storage
+remain shared. A request never counts on one backend and generates on another.
+No healthy target returns `503`; no room across healthy targets returns `429`.
+Routing does not retry counting or inference on another target. Load is a request
+count, not token cost or GPU utilization, and applies only to this gateway process.
 
 ## Package responsibilities
 
@@ -114,8 +142,9 @@ below connects the handlers for one streaming request.
 | [`internal/ratelimit`](../internal/ratelimit/handler.go) | Redis-backed atomic request admission and its deadline. | Request credits count HTTP requests, not generated tokens. |
 | [`internal/quota`](../internal/quota/limiter.go) | Exact backend prompt counting, atomic daily reservations, output caps, and settlement. | Backend enforces generation limits; Redis owns shared budget state. |
 | [`internal/proxy`](../internal/proxy/forward.go) | Upstream HTTP forwarding, credential removal, JSON deadlines, and streaming flushes and idle cancellation. | `gateway` selects response mode; backend generates tokens. |
+| [`internal/router`](../internal/router/router.go) | Healthy least-loaded selection and local assignment lifetimes. | Does not retry or own health probes; caller releases inference assignments. |
 | [`internal/queue`](../internal/queue/queue.go) | Local FIFO inference capacity and bounded waiting. | Chat owns slot release; no quota or durable accounting state. |
-| [`internal/backend`](../internal/backend/registry.go) | Periodic health monitoring and snapshot-based readiness. | No backend selection yet. |
+| [`internal/backend`](../internal/backend/registry.go) | Periodic health monitoring and snapshot-based readiness. | Publishes snapshots shared by readiness and routing. |
 | [`internal/usage`](../internal/usage/recorder.go) | Bounded JSON/SSE observation and durable admission/final handoffs. | Returns the observed outcome and writes usage when called; `gateway` owns metrics and quota finalization. |
 | [`internal/accounting`](../internal/accounting/queue.go) | Shared durable Redis slots, owner fencing, recovery, settlement replay, and retention. | Postgres and quota settlement finish before Redis acknowledgment; no inference body is retained. |
 | [`internal/store`](../internal/store/usage.go) | Postgres pool setup, key lifecycle, and atomic accounting batches. | Callers own pool lifetime and operation deadlines. |
@@ -139,8 +168,9 @@ For `POST /v1/chat/completions` with `stream: true`, follow these entry points:
    through [`RedisStore.Take`](../internal/ratelimit/store.go) and
    [`bucket.lua`](../internal/ratelimit/bucket.lua).
 5. [`chatHandler.ServeHTTP`](../internal/gateway/chat.go) validates the body and
-   selects the response mode, then waits through
-   [`Queue.Acquire`](../internal/queue/queue.go). [`Limiter.Admit`](../internal/quota/limiter.go) counts
+   calls [`Router.Acquire`](../internal/router/router.go) to select a healthy backend
+   and wait through [`Queue.Acquire`](../internal/queue/queue.go), then selects its
+   response mode. [`Limiter.Admit`](../internal/quota/limiter.go) counts
    input and reserves output. [`Recorder.Observe`](../internal/usage/recorder.go)
    hands admission to [`accounting.Queue`](../internal/accounting/queue.go)
    before preparing the response observer. The handler supplies the first-data
@@ -331,7 +361,7 @@ The [decision](decisions.md#durable-accounting-admission-policy) owns the tradeo
 
 ## Prometheus measurement boundaries
 
-Each gateway process owns a private registry with four metric families. Public
+Each gateway process owns a private registry for request and admission metrics. Public
 request counters and duration histograms finish after the handler returns or
 unwinds, including quota settlement and usage writing. They include probes,
 validation/authentication failures, models, and chat. Scrapes and the separate
@@ -340,14 +370,26 @@ cancellation or a panic ends the request before headers. A 200 status does not
 establish successful stream completion.
 
 Authentication records the verified key ID on the request's shared observation
-state. Model proxying and validated inference mark the fixed `primary` backend;
-rejections and probes use `none`. Unknown paths, request IDs, model names, raw
+state. Model proxying and admitted chat mark their configured backend name;
+requests without a successful selection, including queue rejections, use `none`. Unknown paths, request IDs, model names, raw
 keys, and payloads never become labels. The registry admits a bounded number of
 key-ID labels for its lifetime and groups further identities under `other`.
 The default capacity is zero, so all authenticated keys share `other`; per-key
 labels require an explicit positive capacity.
 Metrics reset when the process restarts. See the
 [metrics decision](decisions.md#initial-prometheus-metrics) for the label policy.
+
+The queue-depth gauge reads the local queue's mutex-protected snapshot at scrape
+time and counts only waiting requests. It starts at zero and is omitted when no
+queue is supplied to metrics. The gauge callback adds no worker or upstream call.
+The chat handler records one queue-wait histogram sample when a selected
+backend's capacity acquisition returns, before quota preparation. This includes
+immediate grants, queue timeouts, cancellations, and unavailable admission for
+that target. Routing rejections without a selected backend add no wait sample.
+Pending waiters have no sample until they leave acquisition. Queue-full,
+queue-timeout, and no-healthy-backend results increment `gateway_rejected_total`;
+cancellation is not an overload rejection. Metrics cover JSON and SSE chat with
+fixed, configured backend labels. Rate-limit rejection reasons remain planned work.
 
 Streaming inference increments its gauge before proxying, including prefill,
 and decrements before accounting begins, even on cancellation or abort. The

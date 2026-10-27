@@ -18,6 +18,7 @@ import (
 
 	"github.com/therealshek/llmgate/internal/metrics"
 	"github.com/therealshek/llmgate/internal/proxy"
+	"github.com/therealshek/llmgate/internal/queue"
 	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/store"
 	"github.com/therealshek/llmgate/internal/usage"
@@ -44,13 +45,18 @@ func TestChatForwarding(t *testing.T) {
 
 		recorder := httptest.NewRecorder()
 		NewHandler(HandlerOptions{
-			Admission:      testInferenceQueue(),
-			NonStreaming:   upstream,
+			Backends: []Backend{{
+				Name:         "primary",
+				Admission:    testInferenceQueue(),
+				NonStreaming: upstream,
+				Quota:        testTokenQuota(),
+				Usage:        testUsageRecorder()}},
+			Health: testBackendHealth{},
+
 			Authentication: testAuthenticator(),
 			RequestLimits:  testRequestLimits(),
-			Quota:          testTokenQuota(),
-			Usage:          testUsageRecorder(),
-			Limits:         ChatLimits{MaxBodyBytes: 1024},
+
+			Limits: ChatLimits{MaxBodyBytes: 1024},
 		}).ServeHTTP(recorder, request)
 
 		if recorder.Code != http.StatusCreated || recorder.Body.String() != `{"choices":[]}` {
@@ -66,13 +72,18 @@ func TestChatReadTimeout(t *testing.T) {
 		t.Error("incomplete upload reached upstream")
 	})
 	server := httptest.NewUnstartedServer(NewHandler(HandlerOptions{
-		Admission:      testInferenceQueue(),
-		NonStreaming:   upstream,
+		Backends: []Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: upstream,
+			Quota:        testTokenQuota(),
+			Usage:        testUsageRecorder()}},
+		Health: testBackendHealth{},
+
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
-		Quota:          testTokenQuota(),
-		Usage:          testUsageRecorder(),
-		Limits:         ChatLimits{MaxBodyBytes: 1024},
+
+		Limits: ChatLimits{MaxBodyBytes: 1024},
 	}))
 	server.Config.ReadTimeout = 50 * time.Millisecond
 	server.Start()
@@ -157,13 +168,18 @@ func TestChatRejections(t *testing.T) {
 			request.ContentLength = -1
 			recorder := httptest.NewRecorder()
 			NewHandler(HandlerOptions{
-				Admission:      testInferenceQueue(),
-				NonStreaming:   upstream,
+				Backends: []Backend{{
+					Name:         "primary",
+					Admission:    testInferenceQueue(),
+					NonStreaming: upstream,
+					Quota:        testTokenQuota(),
+					Usage:        testUsageRecorder()}},
+				Health: testBackendHealth{},
+
 				Authentication: testAuthenticator(),
 				RequestLimits:  testRequestLimits(),
-				Quota:          testTokenQuota(),
-				Usage:          testUsageRecorder(),
-				Limits:         ChatLimits{MaxBodyBytes: 64},
+
+				Limits: ChatLimits{MaxBodyBytes: 64},
 			}).ServeHTTP(recorder, request)
 
 			if recorder.Code != tt.status {
@@ -193,13 +209,18 @@ func TestChatBodyBoundary(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	NewHandler(HandlerOptions{
-		Admission:      testInferenceQueue(),
-		NonStreaming:   upstream,
+		Backends: []Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: upstream,
+			Quota:        testTokenQuota(),
+			Usage:        testUsageRecorder()}},
+		Health: testBackendHealth{},
+
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
-		Quota:          testTokenQuota(),
-		Usage:          testUsageRecorder(),
-		Limits:         ChatLimits{MaxBodyBytes: 64},
+
+		Limits: ChatLimits{MaxBodyBytes: 64},
 	}).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusNoContent {
@@ -236,13 +257,18 @@ func TestChatProxyIntegration(t *testing.T) {
 
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, time.Second)
 	handler := NewHandler(HandlerOptions{
-		Admission:      testInferenceQueue(),
-		NonStreaming:   nonStreaming,
+		Backends: []Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: nonStreaming,
+			Quota:        testTokenQuota(),
+			Usage:        testUsageRecorder()}},
+		Health: testBackendHealth{},
+
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
-		Quota:          testTokenQuota(),
-		Usage:          testUsageRecorder(),
-		Limits:         ChatLimits{MaxBodyBytes: 1024},
+
+		Limits: ChatLimits{MaxBodyBytes: 1024},
 	})
 	recorder := httptest.NewRecorder()
 	request := authenticatedRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
@@ -276,13 +302,18 @@ func TestChatCancellation(t *testing.T) {
 	t.Cleanup(transport.CloseIdleConnections)
 	nonStreaming := proxy.NewNonStreamingHandler(target, transport, 5*time.Second)
 	handler := NewHandler(HandlerOptions{
-		Admission:      testInferenceQueue(),
-		NonStreaming:   nonStreaming,
+		Backends: []Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: nonStreaming,
+			Quota:        testTokenQuota(),
+			Usage:        testUsageRecorder()}},
+		Health: testBackendHealth{},
+
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
-		Quota:          testTokenQuota(),
-		Usage:          testUsageRecorder(),
-		Limits:         ChatLimits{MaxBodyBytes: 1024},
+
+		Limits: ChatLimits{MaxBodyBytes: 1024},
 	})
 	gateway := httptest.NewServer(handler)
 	t.Cleanup(gateway.Close)
@@ -368,13 +399,18 @@ func TestChatTokenLimit(t *testing.T) {
 				w.WriteHeader(http.StatusNoContent)
 			})
 			handler := NewHandler(HandlerOptions{
-				Admission:      testInferenceQueue(),
-				NonStreaming:   upstream,
+				Backends: []Backend{{
+					Name:         "primary",
+					Admission:    testInferenceQueue(),
+					NonStreaming: upstream,
+					Quota:        testTokenQuota(),
+					Usage:        testUsageRecorder()}},
+				Health: testBackendHealth{},
+
 				Authentication: testAuthenticator(),
 				RequestLimits:  testRequestLimits(),
-				Quota:          testTokenQuota(),
-				Usage:          testUsageRecorder(),
-				Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+
+				Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 			})
 			request := authenticatedRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 			request.Header.Set("Content-Type", "application/json")
@@ -420,13 +456,18 @@ func TestChatTokenLimitOmitted(t *testing.T) {
 				w.WriteHeader(http.StatusNoContent)
 			})
 			handler := NewHandler(HandlerOptions{
-				Admission:      testInferenceQueue(),
-				NonStreaming:   upstream,
+				Backends: []Backend{{
+					Name:         "primary",
+					Admission:    testInferenceQueue(),
+					NonStreaming: upstream,
+					Quota:        testTokenQuota(),
+					Usage:        testUsageRecorder()}},
+				Health: testBackendHealth{},
+
 				Authentication: testAuthenticator(),
 				RequestLimits:  testRequestLimits(),
-				Quota:          testTokenQuota(),
-				Usage:          testUsageRecorder(),
-				Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+
+				Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 			})
 			request := authenticatedRequest(
 				http.MethodPost,
@@ -518,12 +559,19 @@ func TestChatDurableAdmission(t *testing.T) {
 				_, _ = io.WriteString(w, `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`)
 			})
 			handler := NewHandler(HandlerOptions{
-				Admission:    testInferenceQueue(),
-				NonStreaming: backend, Usage: recorder, Authentication: testAuthenticator(),
-				RequestLimits: testRequestLimits(), Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
-				Quota: quota.NewLimiter(accountingCounter{}, reservations, quota.Options{
-					CountTimeout: time.Second, RedisTimeout: time.Second,
-				}),
+				Backends: []Backend{{
+					Name:         "primary",
+					Admission:    testInferenceQueue(),
+					NonStreaming: backend,
+					Usage:        recorder,
+					Quota: quota.NewLimiter(accountingCounter{}, reservations, quota.Options{
+						CountTimeout: time.Second, RedisTimeout: time.Second,
+					})}},
+				Health: testBackendHealth{},
+
+				Authentication: testAuthenticator(),
+				RequestLimits:  testRequestLimits(),
+				Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 			})
 			r := authenticatedRequest(http.MethodPost, "/v1/chat/completions",
 				strings.NewReader(`{"messages":[{"role":"user","content":"hello"}]}`))
@@ -577,9 +625,17 @@ func TestUsageScope(t *testing.T) {
 				_, _ = io.WriteString(w, `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`)
 			})
 			handler := NewHandler(HandlerOptions{
-				Admission:      testInferenceQueue(),
-				Authentication: testAuthenticator(), RequestLimits: testRequestLimits(),
-				NonStreaming: backend, Quota: testTokenQuota(), Usage: recorder, Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+				Backends: []Backend{{
+					Name:         "primary",
+					Admission:    testInferenceQueue(),
+					NonStreaming: backend,
+					Quota:        testTokenQuota(),
+					Usage:        recorder}},
+				Health: testBackendHealth{},
+
+				Authentication: testAuthenticator(),
+				RequestLimits:  testRequestLimits(),
+				Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 			})
 
 			method := http.MethodPost
@@ -604,9 +660,16 @@ func TestUsageScope(t *testing.T) {
 func TestMissingUsageRecorder(t *testing.T) {
 	backend := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("missing recorder admitted inference") })
 	handler := NewHandler(HandlerOptions{
-		Admission:      testInferenceQueue(),
-		Authentication: testAuthenticator(), RequestLimits: testRequestLimits(),
-		NonStreaming: backend, Quota: testTokenQuota(), Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+		Backends: []Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: backend,
+			Quota:        testTokenQuota()}},
+		Health: testBackendHealth{},
+
+		Authentication: testAuthenticator(),
+		RequestLimits:  testRequestLimits(),
+		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
 	r := authenticatedRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
 	r.Header.Set("Content-Type", "application/json")
@@ -656,10 +719,17 @@ func TestChatQuotaRejections(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("rejected quota reached backend") })
 			handler := NewHandler(HandlerOptions{
-				Admission:    testInferenceQueue(),
-				NonStreaming: backend, Authentication: testAuthenticator(), RequestLimits: testRequestLimits(),
-				Usage: testUsageRecorder(), Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
-				Quota: tokenQuotaFunc(func(context.Context, store.Key, []byte) (quota.Admission, error) { return quota.Admission{}, tt.err }),
+				Backends: []Backend{{
+					Name:         "primary",
+					Admission:    testInferenceQueue(),
+					NonStreaming: backend,
+					Usage:        testUsageRecorder(),
+					Quota:        tokenQuotaFunc(func(context.Context, store.Key, []byte) (quota.Admission, error) { return quota.Admission{}, tt.err })}},
+				Health: testBackendHealth{},
+
+				Authentication: testAuthenticator(),
+				RequestLimits:  testRequestLimits(),
+				Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 			})
 			request := authenticatedRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
 			request.Header.Set("Content-Type", "application/json")
@@ -683,7 +753,16 @@ func TestMissingTokenQuota(t *testing.T) {
 
 		w.WriteHeader(http.StatusNoContent)
 	})
-	handler := NewHandler(HandlerOptions{Admission: testInferenceQueue(), NonStreaming: backend, Authentication: testAuthenticator(), RequestLimits: testRequestLimits(), Usage: testUsageRecorder(), Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8}})
+	handler := NewHandler(HandlerOptions{
+		Backends: []Backend{{
+			Name:         "primary",
+			Admission:    testInferenceQueue(),
+			NonStreaming: backend,
+			Usage:        testUsageRecorder()}},
+		Health:         testBackendHealth{},
+		Authentication: testAuthenticator(),
+		RequestLimits:  testRequestLimits(),
+		Limits:         ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8}})
 
 	for _, path := range []string{"/v1/chat/completions", "/v1/models"} {
 		method := http.MethodPost
@@ -745,7 +824,7 @@ func TestChatAccountingLifecycle(t *testing.T) {
 		{name: "failed durable handoff", usageFailure: true, body: `{"usage":{"prompt_tokens":7,"completion_tokens":2}}`, status: store.UsageCompleted},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			m := metrics.New(metrics.Options{MaxScrapes: 2, ScrapeTimeout: time.Second})
+			m := metrics.New(metrics.Options{Backends: map[string]*queue.Queue{"primary": nil}, MaxScrapes: 2, ScrapeTimeout: time.Second})
 			scrape := func() string {
 				w := httptest.NewRecorder()
 				m.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/metrics", nil))
@@ -827,12 +906,21 @@ func TestChatAccountingLifecycle(t *testing.T) {
 				}
 			})
 			routes := NewHandler(HandlerOptions{
-				Admission:      testInferenceQueue(),
-				Authentication: testAuthenticator(), RequestLimits: testRequestLimits(),
-				NonStreaming: backend, Streaming: backend, Usage: recorder, Metrics: m,
-				Quota: quota.NewLimiter(accountingCounter{}, reservations, quota.Options{
-					CountTimeout: time.Second, RedisTimeout: time.Second,
-				}),
+				Backends: []Backend{{
+					Name:         "primary",
+					Admission:    testInferenceQueue(),
+					NonStreaming: backend,
+					Streaming:    backend,
+					Usage:        recorder,
+					Quota: quota.NewLimiter(accountingCounter{}, reservations, quota.Options{
+						CountTimeout: time.Second, RedisTimeout: time.Second,
+					})}},
+				Health: testBackendHealth{},
+
+				Authentication: testAuthenticator(),
+				RequestLimits:  testRequestLimits(),
+				Metrics:        m,
+
 				Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 			})
 			body := fmt.Sprintf(`{"model":"test","messages":[{"role":"user","content":"hello"}],"stream":%t}`, tt.stream)

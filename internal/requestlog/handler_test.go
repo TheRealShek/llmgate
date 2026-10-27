@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/therealshek/llmgate/internal/auth"
+	"github.com/therealshek/llmgate/internal/backend"
 	"github.com/therealshek/llmgate/internal/gateway"
 	"github.com/therealshek/llmgate/internal/proxy"
 	"github.com/therealshek/llmgate/internal/ratelimit"
@@ -40,11 +41,10 @@ func TestRequestIdentity(t *testing.T) {
 		time.Second,
 	)
 	routes := gateway.NewHandler(gateway.HandlerOptions{
-		NonStreaming:   forwarder,
+		Backends:       []gateway.Backend{{Name: "primary", NonStreaming: forwarder, Quota: testTokenQuota(), Usage: testUsageRecorder()}},
+		Health:         logBackendHealth{},
 		Authentication: auth.NewAuthenticator(logTestKeyLookup{}, auth.Options{LookupTimeout: time.Second, CacheTTL: 30 * time.Second, CacheCapacity: 1024}),
 		RequestLimits:  testRequestLimits(),
-		Quota:          testTokenQuota(),
-		Usage:          testUsageRecorder(),
 		Limits:         gateway.ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
 	})
 	handler := requestlog.NewHandler(routes, logger)
@@ -328,3 +328,9 @@ func (allowTokenQuota) Admit(_ context.Context, _ store.Key, body []byte) (quota
 }
 
 func testTokenQuota() allowTokenQuota { return allowTokenQuota{} }
+
+type logBackendHealth struct{}
+
+func (logBackendHealth) States() []backend.State {
+	return []backend.State{{Name: "primary", Healthy: true}}
+}

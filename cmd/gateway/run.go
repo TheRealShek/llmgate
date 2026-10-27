@@ -103,13 +103,6 @@ func run(ctx context.Context) error {
 		<-accountingDone
 	}()
 
-	usageRecorder := usage.NewRecorder(usage.Options{
-		Store:        accountingQueue,
-		Backend:      "primary",
-		WriteTimeout: cfg.usageWriteTimeout,
-		MaxBytes:     cfg.usageMaxBytes,
-	})
-
 	// DefaultTransport is declared as the http.RoundTripper interface.
 	// Assert its underlying type is *http.Transport and clone it so custom
 	// timeouts and idle connection cleanup do not mutate the process-wide transport.
@@ -120,75 +113,67 @@ func run(ctx context.Context) error {
 	transport.ResponseHeaderTimeout = cfg.upstreamHeaderTimeout
 	defer transport.CloseIdleConnections()
 
-	promptCounter := quota.NewCounter(cfg.upstreamURL, transport, cfg.quotaCountMaxBytes)
-	tokenQuotas := quota.NewLimiter(promptCounter, quota.NewRedisStore(redisClient), quota.Options{
-		CountTimeout: cfg.quotaCountTimeout, RedisTimeout: cfg.quotaRedisTimeout, GracePercent: cfg.quotaGracePercent,
-	})
+	// Each backend gets its own queue, counter, proxies, and accounting identity.
+	// Redis quota state and durable accounting storage remain shared across targets.
+	targets := make([]backend.Target, 0, len(cfg.backends))
+	backends := make([]gateway.Backend, 0, len(cfg.backends))
 
-	var (
-		nonStreaming http.Handler
-		streaming    http.Handler
-		readiness    http.Handler
-	)
-
-	if cfg.upstreamURL != nil {
-		nonStreaming = proxy.NewNonStreamingHandler(cfg.upstreamURL, transport, cfg.upstreamTimeout)
-		streaming = proxy.NewStreamingHandler(cfg.upstreamURL, transport, cfg.streamIdleTimeout)
-
-		registry, err := backend.NewRegistry(
-			[]backend.Target{{Name: "primary", URL: cfg.upstreamURL}},
-			transport,
-			backend.HealthOptions{
-				Interval: cfg.backendHealthInterval, Timeout: cfg.readinessTimeout,
-				Failures: cfg.backendHealthFailures, Successes: cfg.backendHealthSuccesses,
-			},
-		)
+	admissions := make(map[string]*queue.Queue, len(cfg.backends))
+	for _, target := range cfg.backends {
+		admission, err := queue.New(queue.Options{
+			Slots: target.slots, Capacity: target.queueCapacity, WaitTimeout: cfg.backendQueueTimeout,
+		})
 		if err != nil {
-			return fmt.Errorf("initialize backend registry: %w", err)
+			return fmt.Errorf("initialize backend %s admission: %w", target.name, err)
 		}
 
-		// Health monitoring survives HTTP drain, then stops before transport cleanup.
-		healthCtx, stopHealth := context.WithCancel(context.Background())
-
-		healthDone := make(chan struct{})
-		go func() {
-			defer close(healthDone)
-
-			registry.Run(healthCtx)
-		}()
-
-		defer func() {
-			stopHealth()
-			<-healthDone
-		}()
-
-		readiness = backend.NewReadinessHandler(registry)
+		counter := quota.NewCounter(target.url, transport, cfg.quotaCountMaxBytes)
+		tokenQuota := quota.NewLimiter(counter, quota.NewRedisStore(redisClient), quota.Options{
+			CountTimeout: cfg.quotaCountTimeout, RedisTimeout: cfg.quotaRedisTimeout, GracePercent: cfg.quotaGracePercent,
+		})
+		recorder := usage.NewRecorder(usage.Options{
+			Store: accountingQueue, Backend: target.name, WriteTimeout: cfg.usageWriteTimeout, MaxBytes: cfg.usageMaxBytes,
+		})
+		targets = append(targets, backend.Target{Name: target.name, URL: target.url})
+		admissions[target.name] = admission
+		backends = append(backends, gateway.Backend{
+			Name: target.name, Admission: admission, Quota: tokenQuota, Usage: recorder,
+			NonStreaming: proxy.NewNonStreamingHandler(target.url, transport, cfg.upstreamTimeout),
+			Streaming:    proxy.NewStreamingHandler(target.url, transport, cfg.streamIdleTimeout),
+		})
 	}
 
-	inferenceQueue, err := queue.New(queue.Options{
-		Slots: cfg.backendSlots, Capacity: cfg.backendQueueCapacity, WaitTimeout: cfg.backendQueueTimeout,
+	registry, err := backend.NewRegistry(targets, transport, backend.HealthOptions{
+		Interval: cfg.backendHealthInterval, Timeout: cfg.readinessTimeout,
+		Failures: cfg.backendHealthFailures, Successes: cfg.backendHealthSuccesses,
 	})
 	if err != nil {
-		return fmt.Errorf("initialize inference admission: %w", err)
+		return fmt.Errorf("initialize backend registry: %w", err)
 	}
+
+	// Health monitoring survives HTTP drain, then stops before transport cleanup.
+	healthCtx, stopHealth := context.WithCancel(context.Background())
+
+	healthDone := make(chan struct{})
+	go func() {
+		defer close(healthDone)
+
+		registry.Run(healthCtx)
+	}()
+
+	defer func() {
+		stopHealth()
+		<-healthDone
+	}()
 
 	gatewayMetrics := metrics.New(metrics.Options{
 		KeyCapacity: cfg.metricsKeyCapacity, MaxScrapes: cfg.metricsMaxScrapes, ScrapeTimeout: cfg.metricsScrapeTimeout,
+		Backends: admissions,
 	})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
-		NonStreaming:   nonStreaming,
-		Streaming:      streaming,
-		Readiness:      readiness,
-		Authentication: authentication,
-		RequestLimits:  requestLimits,
-		Usage:          usageRecorder,
-		Quota:          tokenQuotas,
-		Admission:      inferenceQueue,
-		Metrics:        gatewayMetrics,
-		Limits: gateway.ChatLimits{
-			MaxBodyBytes: cfg.maxBodyBytes,
-			MaxTokens:    cfg.maxTokens,
-		},
+		Backends: backends, Health: registry, Readiness: backend.NewReadinessHandler(registry),
+		Authentication: authentication, RequestLimits: requestLimits, Metrics: gatewayMetrics,
+		Limits: gateway.ChatLimits{MaxBodyBytes: cfg.maxBodyBytes, MaxTokens: cfg.maxTokens},
 	})
 	observedRoutes := gatewayMetrics.Observe(accountingQueue.Protect(routes))
 	loggedRoutes := requestlog.NewHandler(observedRoutes, slog.Default())

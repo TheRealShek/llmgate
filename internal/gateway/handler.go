@@ -10,6 +10,7 @@ import (
 	"github.com/therealshek/llmgate/internal/queue"
 	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/ratelimit"
+	"github.com/therealshek/llmgate/internal/router"
 	"github.com/therealshek/llmgate/internal/store"
 	"github.com/therealshek/llmgate/internal/usage"
 )
@@ -28,56 +29,70 @@ type TokenQuota interface {
 	Admit(context.Context, store.Key, []byte) (quota.Admission, error)
 }
 
-// HandlerOptions names the dependencies and limits used by the gateway routes.
-type HandlerOptions struct {
-	// NonStreaming forwards model lists and JSON chat responses.
+// Backend keeps counting, accounting, and proxying tied to one inference server.
+type Backend struct {
+	Name         string
 	NonStreaming http.Handler
-	// Streaming forwards SSE chat responses.
-	Streaming http.Handler
-	// Readiness reports backend health; nil returns 503.
-	Readiness http.Handler
-	// Authentication protects models and chat; nil fails closed.
+	Streaming    http.Handler
+	Admission    *queue.Queue
+	Quota        TokenQuota
+	Usage        *usage.Recorder
+}
+
+// HandlerOptions names the dependencies and limits used by the gateway routes.
+// Backend names must be nonempty and unique, validated by startup.
+type HandlerOptions struct {
+	Backends       []Backend
+	Health         router.Health
+	Readiness      http.Handler
 	Authentication *auth.Authenticator
-	// RequestLimits admits authenticated models and chat; nil fails closed.
-	RequestLimits *ratelimit.Limiter
-	// Admission bounds active and waiting inference for the backend; nil fails closed.
-	Admission *queue.Queue
-	// Quota reserves daily tokens before inference; nil fails closed.
-	Quota TokenQuota
-	// Usage commits admission before inference and writes final usage afterward; nil fails closed.
-	Usage *usage.Recorder
-	// Metrics exposes the private registry; nil leaves the route unavailable.
-	Metrics *metrics.Metrics
-	// Limits bounds chat bodies and output-token options.
-	Limits ChatLimits
+	RequestLimits  *ratelimit.Limiter
+	Metrics        *metrics.Metrics
+	Limits         ChatLimits
 }
 
 // NewHandler builds public health routes and authenticated model and chat routes.
 // Authentication and request limits run before chat validation or forwarding.
 // A missing backend returns 503 after authentication and request admission.
 func NewHandler(options HandlerOptions) http.Handler {
-	var chat http.Handler
-	if options.NonStreaming != nil {
+	targets := make([]router.Target, 0, len(options.Backends))
+	backends := make(map[string]Backend, len(options.Backends))
+	configured := false
+
+	for _, target := range options.Backends {
+		targets = append(targets, router.Target{Name: target.Name, Admission: target.Admission})
+		backends[target.Name] = target
+		configured = configured || target.NonStreaming != nil
+	}
+
+	routing := router.New(targets, options.Health)
+
+	var chat http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		metrics.NoBackend(r.Context())
+		noBackendHandler(w, r)
+	})
+	if configured {
 		chat = &chatHandler{
-			nonStreaming: options.NonStreaming,
-			streaming:    options.Streaming,
-			maxBodyBytes: options.Limits.MaxBodyBytes,
-			maxTokens:    options.Limits.MaxTokens,
-			usage:        options.Usage,
-			quota:        options.Quota,
-			admission:    options.Admission,
+			backends: backends, routing: routing,
+			maxBodyBytes: options.Limits.MaxBodyBytes, maxTokens: options.Limits.MaxTokens,
 		}
 	}
 
-	// Matched requests authenticate, consume a request credit, then enter the
-	// model proxy or chat validator. Both layers preserve the original writer.
-	modelsBackend := backendHandler(options.NonStreaming)
-	if options.NonStreaming != nil {
-		modelsBackend = metrics.Proxy(modelsBackend)
-	}
+	// Models select a healthy server but bypass inference queues and token quotas.
+	modelsBackend := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name, err := routing.Select()
+		if err != nil || backends[name].NonStreaming == nil {
+			metrics.NoBackend(r.Context())
+			noBackendHandler(w, r)
 
+			return
+		}
+
+		metrics.SelectBackend(r.Context(), name)
+		backends[name].NonStreaming.ServeHTTP(w, r)
+	})
 	models := options.RequestLimits.Protect(modelsBackend)
-	chat = options.RequestLimits.Protect(backendHandler(chat))
+	chat = options.RequestLimits.Protect(chat)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/healthz", healthHandler)
@@ -113,7 +128,7 @@ func backendHandler(upstream http.Handler) http.Handler {
 
 func noBackendHandler(w http.ResponseWriter, r *http.Request) {
 	_ = api.WriteError(w, http.StatusServiceUnavailable, api.Error{
-		Message: "no backend configured",
+		Message: "no healthy backend available",
 		Type:    "server_error",
 		Code:    "no_backend",
 	})

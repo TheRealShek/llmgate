@@ -24,7 +24,7 @@ type config struct {
 	maxTokens    int64 // Output-token ceiling and default when omitted.
 
 	// Inference backend.
-	upstreamURL            *url.URL
+	backends               []backendConfig
 	upstreamConnectTimeout time.Duration
 	upstreamHeaderTimeout  time.Duration
 	upstreamTimeout        time.Duration // Total JSON request deadline.
@@ -484,11 +484,9 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, err
 	}
 
-	if val := getenv("GATEWAY_UPSTREAM_URL"); val != "" {
-		cfg.upstreamURL, err = parseUpstreamURL(val)
-		if err != nil {
-			return config{}, err
-		}
+	cfg.backends, err = loadBackends(getenv, cfg.backendSlots, cfg.backendQueueCapacity)
+	if err != nil {
+		return config{}, err
 	}
 
 	cfg.upstreamTimeout, err = envDuration(getenv, "GATEWAY_UPSTREAM_TIMEOUT", cfg.upstreamTimeout)

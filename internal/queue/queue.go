@@ -38,11 +38,18 @@ type Queue struct {
 
 // New validates capacity and constructs an empty queue for one backend.
 func New(options Options) (*Queue, error) {
-	if options.Slots <= 0 || options.Capacity < 0 || options.WaitTimeout <= 0 {
+	if options.Slots <= 0 || options.Capacity < 0 || options.WaitTimeout <= 0 ||
+		options.Capacity > int(^uint(0)>>1)-options.Slots {
 		return nil, fmt.Errorf("configure inference queue: positive slots and timeout, and nonnegative capacity required")
 	}
 
 	return &Queue{options: options}, nil
+}
+
+// Limit returns the maximum number of active and waiting requests together.
+// Options are immutable after construction.
+func (q *Queue) Limit() int {
+	return q.options.Slots + q.options.Capacity
 }
 
 // State returns the current local load without exposing mutable queue state.

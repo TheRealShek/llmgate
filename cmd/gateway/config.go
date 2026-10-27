@@ -21,6 +21,7 @@ type config struct {
 
 	// Chat request limits.
 	maxBodyBytes int64
+	maxAttempts  int
 	maxTokens    int64 // Output-token ceiling and default when omitted.
 
 	// Inference backend.
@@ -127,6 +128,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 		readTimeout:             10 * time.Second,
 		maxBodyBytes:            1 << 20, // 1 MiB
 		maxTokens:               1024,
+		maxAttempts:             2,
 		upstreamConnectTimeout:  5 * time.Second,
 		upstreamHeaderTimeout:   30 * time.Second,
 		streamIdleTimeout:       30 * time.Second,
@@ -463,6 +465,13 @@ func loadConfig(getenv func(string) string) (config, error) {
 	)
 	if err != nil {
 		return config{}, err
+	}
+
+	if value := getenv("GATEWAY_MAX_ATTEMPTS"); value != "" {
+		cfg.maxAttempts, err = strconv.Atoi(value)
+		if err != nil || cfg.maxAttempts < 1 || cfg.maxAttempts > 2 {
+			return config{}, fmt.Errorf("validate GATEWAY_MAX_ATTEMPTS: requires 1 or 2")
+		}
 	}
 
 	if val := getenv("GATEWAY_MAX_TOKENS"); val != "" {

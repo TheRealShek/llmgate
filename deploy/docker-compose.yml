@@ -26,6 +26,7 @@ services:
 
       # Chat request limits.
       GATEWAY_MAX_TOKENS: ${GATEWAY_MAX_TOKENS:-}
+      GATEWAY_MAX_ATTEMPTS: ${GATEWAY_MAX_ATTEMPTS:-}
       GATEWAY_MAX_BODY_BYTES: ${GATEWAY_MAX_BODY_BYTES:-}
 
       # Inference backend.

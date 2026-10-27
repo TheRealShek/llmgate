@@ -59,7 +59,7 @@ func TestStreamingChatFlush(t *testing.T) {
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
 
-		Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+		Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8, StreamErrorTimeout: time.Second},
 	})
 	gateway := httptest.NewServer(requestlog.NewHandler(
 		handler,
@@ -123,6 +123,9 @@ func TestStreamingChatContinuousChunks(t *testing.T) {
 				return
 			}
 		}
+
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		w.(http.Flusher).Flush()
 	})
 	gateway := newStreamingTestGateway(t, backend, time.Second, 300*time.Millisecond)
 
@@ -137,7 +140,7 @@ func TestStreamingChatContinuousChunks(t *testing.T) {
 	defer response.Body.Close()
 
 	body, err := io.ReadAll(response.Body)
-	if err != nil || string(body) != strings.Repeat("data: x\n\n", 8) {
+	if err != nil || string(body) != strings.Repeat("data: x\n\n", 8)+"data: [DONE]\n\n" {
 		t.Fatalf("active stream hit a total idle deadline: %q %v", body, err)
 	}
 }
@@ -194,8 +197,11 @@ func TestStreamingChatFailures(t *testing.T) {
 
 				if mode == "client disconnect" {
 					_ = response.Body.Close()
-				} else if _, err := io.ReadAll(reader); err == nil {
-					t.Fatal("stalled stream ended without a truncated-response error")
+				} else {
+					rest, err := io.ReadAll(reader)
+					if err != nil || !strings.Contains(string(rest), "event: error") || !strings.Contains(string(rest), "upstream_error") {
+						t.Fatal("stalled stream did not deliver its terminal error", string(rest), err)
+					}
 				}
 			}
 
@@ -311,7 +317,7 @@ func newStreamingTestGateway(
 		Authentication: testAuthenticator(),
 		RequestLimits:  testRequestLimits(),
 
-		Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8},
+		Limits: ChatLimits{MaxBodyBytes: 1024, MaxTokens: 8, StreamErrorTimeout: time.Second},
 	}))
 	t.Cleanup(gateway.Close)
 	gateway.Client().Timeout = 5 * time.Second

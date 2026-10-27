@@ -1239,7 +1239,8 @@ Requests select healthy targets by local assigned request count, rotating ties.
 Scrape metrics and inspect usage to see the selected backend names. Stop one
 server and wait for its health failure threshold: new selections should use the
 remaining healthy server. Existing assignments stay on their original target.
-An inference failure is not retried in this slice. Stop both and wait for the
+Eligible failures can retry once before response commitment; see the
+[failover checks](#bounded-chat-failover). Stop both and wait for the
 threshold: readiness, model listing, and valid authenticated chat should return
 `503`. Full capacity on all healthy targets returns `429` with `Retry-After: 1`.
 
@@ -1253,6 +1254,37 @@ go test ./cmd/gateway -run 'TestLoadBackends|TestBackendConfigIntegration'
 
 These tests establish request behavior, not multi-GPU throughput, backend death
 under load, or the Phase 2 latency target.
+
+## Bounded chat failover
+
+`GATEWAY_MAX_ATTEMPTS` defaults to `2`; set `1` to disable chat retries. With two
+healthy targets, a pre-response transport failure or backend `502`, `503`, or
+`504` can select another backend. No target is tried twice. Normal responses
+stream immediately. Once response headers, informational headers, a body write,
+or a flush commits delivery, the gateway does not retry. JSON failures after
+commitment abort delivery. Interrupted SSE emits one terminal `event: error`
+when bounded delivery succeeds, with no success `[DONE]` marker. Client
+cancellation stops both generation and any fallback wait.
+
+A failed attempt can consume its full reserved allowance even when the client
+saw no output. The second attempt obtains a fresh allowance and can be rejected
+by the daily quota. Inspect delivered usage using the public request ID and its
+`:attempt-2` suffix to distinguish the attempts. The accounting and timing
+boundaries live in [architecture](architecture.md#retry-attempts-and-response-commitment).
+If the alternate is unavailable, full, or times out waiting, expect the original
+upstream error. Counting, quota, and durable-admission failures are not retried.
+The same upstream and queue deadlines apply independently to each attempt.
+
+Run the deterministic failure checks without external storage or GPUs:
+
+```sh
+go test -race ./internal/gateway -run 'TestChatFailover|TestChatAfterCommit|TestChatRetryUnavailable|TestChatFallbackWait|TestChatTerminalErrorDeadline'
+go test ./cmd/gateway -run TestAttemptConfiguration
+```
+
+The tests use controlled transports and an HTTP gateway to exercise unknown
+consumption, distinct records, commitment, and cleanup. They do not establish
+backend death under GPU load or the Phase 2 latency target.
 
 ## Bounded inference admission
 
@@ -1338,10 +1370,10 @@ records. The deployed overload check has not yet been run for this slice.
 | `GATEWAY_ADDR` | `:8080` | Listen address |
 | `GATEWAY_UPSTREAM_URL` | Unset | Single backend base URL, named `primary`; mutually exclusive with `GATEWAY_BACKENDS` |
 | `GATEWAY_BACKENDS` | Unset | JSON array of 1 to 16 named backends; see [multiple backends](#multiple-backends) |
-| `GATEWAY_UPSTREAM_TIMEOUT` | `30s` | Total deadline for model lists and JSON chat |
+| `GATEWAY_UPSTREAM_TIMEOUT` | `30s` | Total upstream deadline per model-list or JSON-chat attempt |
 | `GATEWAY_UPSTREAM_CONNECT_TIMEOUT` | `5s` | TCP connect and TLS handshake deadlines |
 | `GATEWAY_UPSTREAM_HEADER_TIMEOUT` | `30s` | Backend response-header wait |
-| `GATEWAY_STREAM_IDLE_TIMEOUT` | `30s` | Each upstream stream-body read wait |
+| `GATEWAY_STREAM_IDLE_TIMEOUT` | `30s` | Each upstream stream-body read wait; also bounds terminal SSE error delivery |
 | `GATEWAY_READINESS_TIMEOUT` | `2s` | Each background backend health-probe deadline |
 | `GATEWAY_BACKEND_SLOTS` | `1` | Local active inference slots, including preparation; match backend `--parallel`. Compose sets this from `LLAMA_PARALLEL` |
 | `GATEWAY_BACKEND_QUEUE_CAPACITY` | `4` | Maximum waiting chat requests; zero rejects immediately when slots are busy |
@@ -1351,6 +1383,7 @@ records. The deployed overload check has not yet been run for this slice.
 | `GATEWAY_BACKEND_HEALTH_SUCCESSES` | `2` | Consecutive successes before marking healthy, including startup; positive integer |
 | `GATEWAY_MAX_BODY_BYTES` | `1048576` | Chat request body limit |
 | `GATEWAY_MAX_TOKENS` | `1024` | Output-token limit and omitted-value default |
+| `GATEWAY_MAX_ATTEMPTS` | `2` | Total chat attempts, 1 or 2; a retry excludes the first backend |
 | `GATEWAY_READ_TIMEOUT` | `10s` | Incoming headers and body read deadline |
 | `GATEWAY_READ_HEADER_TIMEOUT` | `5s` | Incoming header read deadline |
 | `GATEWAY_IDLE_TIMEOUT` | `60s` | Wait for the next request on an idle client connection |

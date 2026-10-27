@@ -123,7 +123,7 @@ func TestLoadConfig(t *testing.T) {
 				addr:                   ":8080",
 				readTimeout:            10 * time.Second,
 				maxBodyBytes:           1 << 20, // 1 MiB
-				maxTokens:              1024,
+				maxTokens:              1024, maxAttempts: 2,
 				upstreamConnectTimeout: 5 * time.Second,
 				upstreamHeaderTimeout:  30 * time.Second,
 				streamIdleTimeout:      30 * time.Second,
@@ -179,7 +179,7 @@ func TestLoadConfig(t *testing.T) {
 				addr:                   "127.0.0.1:9090",
 				readTimeout:            3 * time.Second,
 				maxBodyBytes:           2048,
-				maxTokens:              512,
+				maxTokens:              512, maxAttempts: 2,
 				upstreamConnectTimeout: 2 * time.Second,
 				upstreamHeaderTimeout:  3 * time.Second,
 				streamIdleTimeout:      4 * time.Second,
@@ -1088,5 +1088,40 @@ func TestInferenceQueueConfig(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestAttemptConfiguration checks failover defaults, opt-out, and the hard two-attempt bound.
+func TestAttemptConfiguration(t *testing.T) {
+	for _, value := range []string{"", "1", "2", "0", "3", "-1", "many"} {
+		t.Run("value="+value, func(t *testing.T) {
+			cfg, err := loadConfig(func(name string) string {
+				if name == "GATEWAY_DATABASE_URL" {
+					return "postgres://localhost/test"
+				}
+
+				if name == "GATEWAY_MAX_ATTEMPTS" {
+					return value
+				}
+
+				return ""
+			})
+
+			valid := value == "" || value == "1" || value == "2"
+			if (err == nil) != valid {
+				t.Fatal(value, err)
+			}
+
+			if valid {
+				want := 2
+				if value == "1" {
+					want = 1
+				}
+
+				if cfg.maxAttempts != want {
+					t.Fatal(cfg.maxAttempts, want)
+				}
+			}
+		})
 	}
 }

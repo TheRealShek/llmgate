@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"net/http"
+	"time"
 
 	"github.com/therealshek/llmgate/internal/api"
 	"github.com/therealshek/llmgate/internal/auth"
@@ -22,6 +23,10 @@ type ChatLimits struct {
 	// MaxTokens bounds explicit output-token requests and supplies omitted values.
 	// Zero disables token validation and insertion.
 	MaxTokens int64
+	// MaxAttempts bounds backend attempts to one or two; zero uses one.
+	MaxAttempts int
+	// StreamErrorTimeout bounds terminal SSE error delivery; zero aborts instead.
+	StreamErrorTimeout time.Duration
 }
 
 // TokenQuota admits validated chat against its daily input and output budget.
@@ -75,6 +80,8 @@ func NewHandler(options HandlerOptions) http.Handler {
 		chat = &chatHandler{
 			backends: backends, routing: routing,
 			maxBodyBytes: options.Limits.MaxBodyBytes, maxTokens: options.Limits.MaxTokens,
+			maxAttempts:        max(1, min(2, options.Limits.MaxAttempts)),
+			streamErrorTimeout: options.Limits.StreamErrorTimeout,
 		}
 	}
 

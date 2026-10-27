@@ -41,7 +41,7 @@ func (r *Router) Select() (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	index, err := r.choose(false)
+	index, err := r.choose(false, "")
 	if err != nil {
 		return "", err
 	}
@@ -50,15 +50,16 @@ func (r *Router) Select() (string, error) {
 }
 
 // Acquire assigns a request before waiting on its queue, so concurrent selections
-// see the assignment immediately. Callers must defer the idempotent release.
-func (r *Router) Acquire(ctx context.Context) (string, func(), error) {
+// see the assignment immediately. Excluded is a previously failed backend name,
+// or empty on the first attempt. Callers must defer the idempotent release.
+func (r *Router) Acquire(ctx context.Context, excluded string) (string, func(), error) {
 	if err := ctx.Err(); err != nil {
 		return "", nil, err
 	}
 
 	r.mu.Lock()
 
-	index, err := r.choose(true)
+	index, err := r.choose(true, excluded)
 	if err != nil {
 		r.mu.Unlock()
 		return "", nil, err
@@ -92,7 +93,7 @@ func (r *Router) unassign(index int) {
 	r.assigned[index]--
 }
 
-func (r *Router) choose(bounded bool) (int, error) {
+func (r *Router) choose(bounded bool, excluded string) (int, error) {
 	if r.health == nil {
 		return -1, ErrNoBackend
 	}
@@ -103,7 +104,12 @@ func (r *Router) choose(bounded bool) (int, error) {
 
 	for offset := range r.targets {
 		index := (r.next + offset) % len(r.targets)
+
 		target := r.targets[index]
+		if target.Name == excluded {
+			continue
+		}
+
 		available := false
 
 		for _, state := range states {

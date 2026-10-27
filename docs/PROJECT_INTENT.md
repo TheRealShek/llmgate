@@ -175,11 +175,14 @@ routing. Each backend has its own bounded FIFO inference queue and active slots.
 JSON and SSE requests count tokens, generate, and record usage against the same
 selected backend. Cancellation removes waiters; proxy completion or abort releases
 capacity before final accounting. Metrics attribute request, stream, queue, and
-TTFT measurements to configured backend names.
+TTFT measurements to configured backend names. Chat can retry once on a
+different healthy backend before response commitment, with separate quota and
+durable accounting per attempt. Interrupted SSE sends a terminal error when
+bounded delivery succeeds; committed responses are never retried.
 
 The existing single-backend Compose deployment still aligns gateway slots with
-llama.cpp parallel slots. Multiple-instance Compose deployment, retry/failover,
-circuit breakers, chaos/load measurements, and the remaining metrics/dashboard
+llama.cpp parallel slots. Multiple-instance Compose deployment, circuit breakers,
+chaos/load measurements, and the remaining metrics/dashboard
 remain to be implemented.
 
 

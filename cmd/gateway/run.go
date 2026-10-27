@@ -173,7 +173,12 @@ func run(ctx context.Context) error {
 	routes := gateway.NewHandler(gateway.HandlerOptions{
 		Backends: backends, Health: registry, Readiness: backend.NewReadinessHandler(registry),
 		Authentication: authentication, RequestLimits: requestLimits, Metrics: gatewayMetrics,
-		Limits: gateway.ChatLimits{MaxBodyBytes: cfg.maxBodyBytes, MaxTokens: cfg.maxTokens},
+		Limits: gateway.ChatLimits{
+			MaxBodyBytes:       cfg.maxBodyBytes,
+			MaxTokens:          cfg.maxTokens,
+			MaxAttempts:        cfg.maxAttempts,
+			StreamErrorTimeout: cfg.streamIdleTimeout,
+		},
 	})
 	observedRoutes := gatewayMetrics.Observe(accountingQueue.Protect(routes))
 	loggedRoutes := requestlog.NewHandler(observedRoutes, slog.Default())

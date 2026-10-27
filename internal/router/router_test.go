@@ -56,7 +56,7 @@ func newTestRouter(t *testing.T, capacity int) (*Router, *testHealth) {
 func TestRoutingSelection(t *testing.T) {
 	r, health := newTestRouter(t, 0)
 	for _, want := range []string{"a", "b", "a", "b"} {
-		name, release, err := r.Acquire(t.Context())
+		name, release, err := r.Acquire(t.Context(), "")
 		if err != nil || name != want {
 			t.Fatalf("selection = %s, %v; want %s", name, err, want)
 		}
@@ -65,19 +65,19 @@ func TestRoutingSelection(t *testing.T) {
 		release()
 	}
 
-	name, releaseA, err := r.Acquire(t.Context())
+	name, releaseA, err := r.Acquire(t.Context(), "")
 	if err != nil || name != "a" {
 		t.Fatal(name, err)
 	}
 	defer releaseA()
 
-	name, releaseB, err := r.Acquire(t.Context())
+	name, releaseB, err := r.Acquire(t.Context(), "")
 	if err != nil || name != "b" {
 		t.Fatal(name, err)
 	}
 	defer releaseB()
 
-	if _, _, err := r.Acquire(t.Context()); !errors.Is(err, queue.ErrFull) {
+	if _, _, err := r.Acquire(t.Context(), ""); !errors.Is(err, queue.ErrFull) {
 		t.Fatal("saturation", err)
 	}
 
@@ -88,19 +88,19 @@ func TestRoutingSelection(t *testing.T) {
 	releaseA()
 	health.set("a", false)
 
-	if _, _, err := r.Acquire(t.Context()); !errors.Is(err, queue.ErrFull) {
+	if _, _, err := r.Acquire(t.Context(), ""); !errors.Is(err, queue.ErrFull) {
 		t.Fatal("unhealthy backend used", err)
 	}
 
 	health.set("b", false)
 
-	if _, _, err := r.Acquire(t.Context()); !errors.Is(err, ErrNoBackend) {
+	if _, _, err := r.Acquire(t.Context(), ""); !errors.Is(err, ErrNoBackend) {
 		t.Fatal("missing health", err)
 	}
 
 	health.set("a", true)
 
-	name, release, err := r.Acquire(t.Context())
+	name, release, err := r.Acquire(t.Context(), "")
 	if err != nil || name != "a" {
 		t.Fatal("recovery", name, err)
 	}
@@ -123,7 +123,7 @@ func TestRoutingWaitCleanup(t *testing.T) {
 
 					health.set(other, false)
 
-					name, release, err := r.Acquire(t.Context())
+					name, release, err := r.Acquire(t.Context(), "")
 					if err != nil || name != target {
 						t.Fatal(name, err)
 					}
@@ -135,7 +135,7 @@ func TestRoutingWaitCleanup(t *testing.T) {
 					done := make(chan error, 1)
 
 					go func() {
-						_, next, err := r.Acquire(ctx)
+						_, next, err := r.Acquire(ctx, "")
 						if err == nil {
 							next()
 						}
@@ -145,7 +145,7 @@ func TestRoutingWaitCleanup(t *testing.T) {
 
 					synctest.Wait()
 
-					if _, _, err := r.Acquire(t.Context()); !errors.Is(err, queue.ErrFull) {
+					if _, _, err := r.Acquire(t.Context(), ""); !errors.Is(err, queue.ErrFull) {
 						t.Fatal("waiting assignment unbounded", err)
 					}
 
@@ -186,7 +186,7 @@ func TestRoutingConcurrentBound(t *testing.T) {
 	var workers sync.WaitGroup
 	for range 40 {
 		workers.Go(func() {
-			name, release, err := r.Acquire(t.Context())
+			name, release, err := r.Acquire(t.Context(), "")
 			if err != nil {
 				if !errors.Is(err, queue.ErrFull) {
 					t.Error(err)
@@ -228,7 +228,7 @@ func TestRoutingUnavailable(t *testing.T) {
 	r, _ := newTestRouter(t, 0)
 
 	r.health = nil
-	if _, _, err := r.Acquire(t.Context()); !errors.Is(err, ErrNoBackend) {
+	if _, _, err := r.Acquire(t.Context(), ""); !errors.Is(err, ErrNoBackend) {
 		t.Fatal(err)
 	}
 
@@ -240,7 +240,24 @@ func TestRoutingUnavailable(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	if _, _, err := r.Acquire(ctx); !errors.Is(err, context.Canceled) {
+	if _, _, err := r.Acquire(ctx, ""); !errors.Is(err, context.Canceled) {
 		t.Fatal(err)
+	}
+}
+
+// TestRoutingExclusion checks a retry cannot return to its previously failed target.
+func TestRoutingExclusion(t *testing.T) {
+	r, health := newTestRouter(t, 0)
+
+	name, release, err := r.Acquire(t.Context(), "a")
+	if err != nil || name != "b" {
+		t.Fatal(name, err)
+	}
+
+	release()
+	health.set("b", false)
+
+	if _, _, err := r.Acquire(t.Context(), "a"); !errors.Is(err, ErrNoBackend) {
+		t.Fatal("excluded target reused", err)
 	}
 }

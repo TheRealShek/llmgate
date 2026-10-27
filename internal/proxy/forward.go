@@ -41,6 +41,13 @@ func newForwarder(target *url.URL, transport http.RoundTripper) *httputil.Revers
 				response.Header.Del("X-Request-ID")
 			}
 
+			if attempt, captured := response.Request.Context().Value(attemptKey{}).(*Attempt); captured && attempt.retryResponses {
+				switch response.StatusCode {
+				case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+					return &responseStatusError{status: response.StatusCode}
+				}
+			}
+
 			return nil
 		},
 		Transport:    transport,
@@ -51,7 +58,8 @@ func newForwarder(target *url.URL, transport http.RoundTripper) *httputil.Revers
 
 // handleUpstreamError maps transport and context failures into OpenAI-compatible HTTP error responses.
 func handleUpstreamError(w http.ResponseWriter, r *http.Request, err error) {
-	if errors.Is(err, context.Canceled) {
+	attempt, captured := r.Context().Value(attemptKey{}).(*Attempt)
+	if errors.Is(err, context.Canceled) && !captured {
 		return // Client disconnected early. Nothing to deliver.
 	}
 
@@ -61,8 +69,28 @@ func handleUpstreamError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timeoutError) && timeoutError.Timeout()) {
 		status = http.StatusGatewayTimeout
 	}
+
+	var responseError *responseStatusError
+	if errors.As(err, &responseError) {
+		status = responseError.status
+	}
+
+	if captured {
+		attempt.retryable = !errors.Is(err, context.Canceled)
+		if !attempt.retryable {
+			status = http.StatusServiceUnavailable
+		}
+
+		attempt.status = status
+	}
+
 	// Transport errors can contain raw URLs or credentials. Log only the status.
 	requestlog.Logger(r.Context()).WarnContext(r.Context(), "upstream request failed", "status", status)
+
+	if captured {
+		return
+	}
+
 	_ = api.WriteError(w, status, api.Error{
 		Message: "upstream request failed",
 		Type:    "server_error",

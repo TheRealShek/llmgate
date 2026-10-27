@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,22 +11,20 @@ import (
 	"time"
 
 	"github.com/therealshek/llmgate/internal/api"
-	"github.com/therealshek/llmgate/internal/auth"
-	"github.com/therealshek/llmgate/internal/metrics"
 	"github.com/therealshek/llmgate/internal/queue"
 	"github.com/therealshek/llmgate/internal/quota"
-	"github.com/therealshek/llmgate/internal/requestlog"
 	"github.com/therealshek/llmgate/internal/router"
-	"github.com/therealshek/llmgate/internal/usage"
 )
 
 // chatHandler validates chat completion requests and forwards valid payloads
 // to the configured streaming or non-streaming backend handler.
 type chatHandler struct {
-	backends     map[string]Backend
-	routing      *router.Router
-	maxBodyBytes int64
-	maxTokens    int64
+	backends           map[string]Backend
+	routing            *router.Router
+	maxBodyBytes       int64
+	maxTokens          int64
+	maxAttempts        int
+	streamErrorTimeout time.Duration
 }
 
 func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -92,120 +89,7 @@ func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validated chat waits for backend capacity before counting or reserving tokens.
-	// Queue rejection creates neither a quota reservation nor a durable admission.
-	waitStarted := time.Now()
-	name, releaseSlot, err := h.routing.Acquire(r.Context())
-
-	metrics.Admission(r.Context(), name, time.Since(waitStarted), err)
-
-	if err != nil {
-		if r.Context().Err() == nil {
-			writeAdmissionError(w, err)
-		}
-
-		return
-	}
-
-	defer releaseSlot()
-
-	target := h.backends[name]
-	metrics.SelectBackend(r.Context(), name)
-
-	upstream := target.NonStreaming
-	if options.stream {
-		upstream = target.Streaming
-	}
-
-	if upstream == nil {
-		_ = api.WriteError(w, http.StatusNotImplemented, api.Error{
-			Message: "streaming chat is not configured", Type: "server_error", Code: "streaming_not_supported",
-		})
-
-		return
-	}
-
-	if r.Context().Err() != nil {
-		return
-	}
-
-	// Validated chat obtains an input count and a shared output allowance before proxying.
-	key, ok := auth.Identity(r.Context())
-	if !ok || target.Quota == nil {
-		writeQuotaError(w, quota.ErrUnavailable)
-		return
-	}
-
-	admission, err := target.Quota.Admit(r.Context(), key, body)
-	if r.Context().Err() != nil {
-		admission.Permit.Release(r.Context())
-		return
-	}
-
-	if err != nil {
-		if !errors.Is(err, quota.ErrInvalidRequest) {
-			var exhausted *quota.Exhausted
-			if !errors.As(err, &exhausted) {
-				requestlog.Logger(r.Context()).WarnContext(r.Context(), "token quota admission failed", "key_id", key.ID)
-			}
-		}
-
-		writeQuotaError(w, err)
-
-		return
-	}
-
-	body = admission.Body
-
-	// Reading r.Body drained the stream. Clone the request and attach a new reader
-	// for the buffered bytes so the upstream proxy can read the body.
-	requestCtx, cancelRequest := context.WithCancel(r.Context())
-	defer cancelRequest()
-
-	request := r.Clone(requestCtx)
-	request.Body = io.NopCloser(bytes.NewReader(body))
-	request.ContentLength = int64(len(body))
-	request.TransferEncoding = nil // Use Content-Length instead of chunked transfer.
-	// Send the cloned request to the selected response mode. Its inherited context
-	// lets a client disconnect stop either the JSON response or the SSE stream.
-	var model string
-
-	_ = json.Unmarshal(options.fields["model"], &model)
-
-	observation, err := target.Usage.Observe(w, request, usage.Request{
-		Model: model, Streaming: options.stream,
-		Reservation: admission.Permit.Reservation(),
-		Cancel:      cancelRequest,
-		FirstData:   func(at time.Time) { metrics.FirstData(request.Context(), at) },
-	})
-	if err != nil {
-		admission.Permit.Release(request.Context())
-
-		_ = api.WriteError(w, http.StatusServiceUnavailable, api.Error{
-			Message: "usage recording unavailable", Type: "server_error", Code: "usage_unavailable",
-		})
-
-		return
-	}
-
-	finishInference := metrics.BeginInference(request.Context(), options.stream)
-	returned := false
-
-	// Finalize in this order on normal return, disconnect, or proxy abort.
-	// Proxy work ends before the durable final handoff and Redis settlement.
-	defer func() {
-		finishInference()
-		releaseSlot()
-
-		record := observation.Finish(request.Context(), returned)
-		if err := target.Usage.Write(request.Context(), record); err == nil {
-			admission.Permit.Finish(request.Context(), record)
-		}
-	}()
-
-	upstream.ServeHTTP(observation.Writer(), request)
-
-	returned = true
+	h.forward(w, r, body, options)
 }
 
 type chatRequest struct {

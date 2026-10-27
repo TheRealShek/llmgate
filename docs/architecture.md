@@ -4,7 +4,7 @@ This page explains the implemented gateway, including Phase 2 health monitoring,
 least-loaded routing, and bounded inference admission. Start
 with the [system map](../README.md#architecture), then use this page to
 trace a request and find the package responsible for each step. The
-[project intent](PROJECT_INTENT.md) describes planned work. Retry/failover and circuit breakers remain planned work.
+[project intent](PROJECT_INTENT.md) describes planned work. Circuit breakers remain planned work.
 
 ## One chat request
 
@@ -73,7 +73,8 @@ unused allowance. Successful disk acknowledgment prepares response observation.
 Its writer observes only bytes accepted by the client-facing writer and preserves
 flushes. The chat handler ends proxy metrics and releases its inference slot, then
 classifies the outcome, durably hands off final usage, and settles quota. Failed final handoff retains the charge.
-This cleanup also runs on disconnect or proxy abort without swallowing the panic.
+This cleanup also runs on disconnect or proxy abort. Interrupted SSE can end
+with a bounded terminal error event; other aborts keep their panic.
 There are no prompt/response bodies or credentials in accounting records.
 
 Other routes take shorter paths. Models authenticate and consume a credit but
@@ -126,8 +127,34 @@ The selected bundle owns that backend's prompt counter, JSON/SSE proxies, queue,
 and usage recorder identity. Redis quota state and durable accounting storage
 remain shared. A request never counts on one backend and generates on another.
 No healthy target returns `503`; no room across healthy targets returns `429`.
-Routing does not retry counting or inference on another target. Load is a request
-count, not token cost or GPU utilization, and applies only to this gateway process.
+Counting and admission failures do not trigger retries. Load is a request count,
+not token cost or GPU utilization, and applies only to this gateway process.
+
+### Retry attempts and response commitment
+
+Chat allows at most two attempts, each on a different backend. The gateway first
+captures transport failures and backend `502`, `503`, or `504` responses that
+would otherwise commit an error response. It does not buffer successful JSON or
+SSE responses. A final header, backend informational response, body write, or
+flush blocks retry. The last attempt passes backend HTTP errors through normally.
+Model listing, counting failures, quota errors, and durable-admission failures
+are not retried.
+
+Each attempt releases its inference assignment and saves final usage before the
+next can start. Failed final handoff stops retry. Unknown consumption keeps its
+quota charge. A retry recounts on its new backend, obtains a fresh reservation,
+and records a separate durable admission; it may receive `429` if the first
+attempt left insufficient budget. Client cancellation, revocation, or accounting
+ownership cancellation stops retry. If no alternate can enter its bounded queue,
+the client receives the original upstream failure rather than a new queue error.
+
+The public request ID stays unchanged. The first durable row uses that ID; the
+second appends `:attempt-2`. Reservations and cancellation callbacks belong to
+each attempt separately. The first usage interval starts at client arrival; the
+second starts before its own queue wait. Captured failures have HTTP status zero
+in their usage row because no attempt response was delivered. The final public
+HTTP status and full request duration still appear once in request metrics.
+Attempts use independent upstream deadlines, so retries can extend total latency.
 
 ## Package responsibilities
 
@@ -137,7 +164,7 @@ below connects the handlers for one streaming request.
 | Package | Owns | Boundary |
 | --- | --- | --- |
 | [`cmd/gateway`](../cmd/gateway/run.go) | Configuration, component assembly, shared resources, listeners, shutdown, and local key-creation command. | Connects packages into a running service; handlers own request behavior. |
-| [`internal/gateway`](../internal/gateway/handler.go) | Public routes, handler order, chat validation, and response-mode selection. | Backend validates generation-specific fields. |
+| [`internal/gateway`](../internal/gateway/handler.go) | Public routes, validation, chat attempts, response commitment, and finalization. | Backend validates generation-specific fields. |
 | [`internal/auth`](../internal/auth/handler.go) | Caller identity, bounded identity cache, active-request tracking, and revocation coordination. | `store` persists keys; cancellation tracking belongs to this process. |
 | [`internal/ratelimit`](../internal/ratelimit/handler.go) | Redis-backed atomic request admission and its deadline. | Request credits count HTTP requests, not generated tokens. |
 | [`internal/quota`](../internal/quota/limiter.go) | Exact backend prompt counting, atomic daily reservations, output caps, and settlement. | Backend enforces generation limits; Redis owns shared budget state. |
@@ -167,9 +194,10 @@ For `POST /v1/chat/completions` with `stream: true`, follow these entry points:
 4. [`ratelimit.handler.ServeHTTP`](../internal/ratelimit/handler.go) checks admission
    through [`RedisStore.Take`](../internal/ratelimit/store.go) and
    [`bucket.lua`](../internal/ratelimit/bucket.lua).
-5. [`chatHandler.ServeHTTP`](../internal/gateway/chat.go) validates the body and
-   calls [`Router.Acquire`](../internal/router/router.go) to select a healthy backend
-   and wait through [`Queue.Acquire`](../internal/queue/queue.go), then selects its
+5. [`chatHandler.ServeHTTP`](../internal/gateway/chat.go) validates the body.
+   [`forward` and `attempt`](../internal/gateway/attempt.go) own the retry loop and
+   call [`Router.Acquire`](../internal/router/router.go) to select a healthy backend
+   and wait through [`Queue.Acquire`](../internal/queue/queue.go), then select its
    response mode. [`Limiter.Admit`](../internal/quota/limiter.go) counts
    input and reserves output. [`Recorder.Observe`](../internal/usage/recorder.go)
    hands admission to [`accounting.Queue`](../internal/accounting/queue.go)
@@ -185,7 +213,8 @@ For `POST /v1/chat/completions` with `stream: true`, follow these entry points:
    It calls [`Recorder.Write`](../internal/usage/recorder.go) for the bounded
    durable final handoff, then settles the permit through
    [`Permit.Finish`](../internal/quota/limiter.go) only when handoff succeeds.
-   The original panic continues after cleanup.
+   JSON and undeliverable SSE aborts continue after cleanup; a delivered terminal
+   SSE error lets the response finish.
 
 Use the ownership sections below for revocation and shutdown. Setup and test
 commands live in the [manual testing guide](manual-testing.md).
@@ -232,11 +261,16 @@ the usage observer parses complete SSE data events while forwarding continues.
 Its line/event and JSON buffers have explicit bounds. Oversized payloads continue
 to the client; unavailable metadata stays unknown rather than failing inference.
 
-Before response headers are sent, upstream timeouts return `504` and connection
-failures return `502`. Backend HTTP error responses pass through. After the
-response starts, a copy failure ends an incomplete response. The gateway cannot
-replace its status or append a guaranteed structured error. It has no application
-retry or backend failover policy today.
+Before response commitment, a transport timeout can retry; its final gateway
+error is `504`. Other transport failures return `502` when failover cannot help.
+The [retry boundary](#retry-attempts-and-response-commitment) defines eligible
+HTTP errors. Other backend responses pass through. A committed JSON copy failure
+aborts the response. An SSE copy failure or EOF without a terminal marker appends
+one `event: error` when the attempt context remains live and bounded delivery works.
+It does not append `[DONE]` or restart generation. A backend's existing terminal
+error event is preserved. Terminal error delivery uses the configured stream-idle
+budget as a write deadline, then clears it before accounting. If a deadline cannot
+be installed or delivery fails, the original abort behavior closes the response.
 
 Client disconnects cancel upstream HTTP work through the inherited request
 context. An idle-body timeout cancels that stream's child context; local
@@ -273,8 +307,10 @@ inputs, and durability limits.
 
 ## Usage records and missing information
 
-`total_ms` measures gateway arrival through proxy completion or abort, excluding
-token settlement and the final database write. Streaming `ttft_ms` measures arrival through the first
+`total_ms` measures an attempt through proxy completion or abort, excluding
+its token settlement and final write. The initial attempt includes arrival-time
+work; a retry starts at its own queue selection. Streaming `ttft_ms` measures
+that attempt interval through the first
 complete, nonterminal SSE data event accepted by the response writer. This can
 be a role-only event; it is not a backend GPU timestamp or proof of client
 receipt. Comments and `[DONE]` do not count. JSON requests have no observed TTFT.
@@ -285,7 +321,8 @@ role-only, error, and usage-only events. It is not a model-token count. Token
 counts come only from a valid backend `usage` object with both nonnegative
 counts. Missing, partial, malformed, or oversized metadata leaves both counts
 NULL. Quota preparation requests final SSE usage; the recorder observes those
-events without rewriting the stream.
+events without treating chunks as token counts. Gateway-generated terminal errors
+bypass the backend observer, so they do not invent backend events or TTFT.
 The requested model is NULL when absent or unsuitable for bounded text storage.
 
 A normally returned 2xx JSON response or a 2xx SSE response ending in `[DONE]`
@@ -394,7 +431,9 @@ fixed, configured backend labels. Rate-limit rejection reasons remain planned wo
 Streaming inference increments its gauge before proxying, including prefill,
 and decrements before accounting begins, even on cancellation or abort. The
 existing SSE observer supplies one TTFT observation at its first complete data
-event. Its timing and framing definition matches usage TTFT above. No event
+event. Its framing matches usage TTFT above, but metric timing always starts
+at client arrival, including failed attempts and their cleanup. Retry usage
+TTFT starts at that attempt instead. No event
 means no TTFT sample, and JSON responses produce none. The metrics writer
 preserves flushes and response control through `Unwrap`; its status is atomic
 because reverse-proxy flushing may use another goroutine.

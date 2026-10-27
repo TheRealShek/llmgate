@@ -823,11 +823,43 @@ this slice.
 
 Health gates new selections using the existing probe thresholds. Already assigned
 requests, including waiters, stay on their original server. No healthy backend
-returns `503`; full capacity across healthy backends returns `429`. Requests are
-not retried on another backend yet. A retry will need to preserve the response
-commit boundary and account for uncertain consumption separately.
+returns `503`; full capacity across healthy backends returns `429`. The
+[bounded failover policy](#bounded-failover-with-separate-accounting) extends
+this with a new attempt after eligible pre-response failures.
 
 Accept a bounded named JSON list through `GATEWAY_BACKENDS`, while translating the
 existing single URL to one `primary` target. Reject both settings together rather
 than silently choosing one. Backend names become fixed metric labels, with a
 maximum of 16 targets and `none` reserved for work without a selected backend.
+
+
+## Bounded failover with separate accounting
+
+Allow at most one chat retry on a different healthy backend, configurable down
+to one total attempt. Retry transport failures and `502`/`503`/`504` before
+response commitment. Treat even informational headers and flushes as a boundary.
+Buffering an entire JSON response or delaying SSE headers could permit more
+retries, but would change latency and memory ownership. Keep successful responses
+flowing directly. Preserve the gateway request ID at final commitment because
+ReverseProxy clears response headers after forwarding informational responses.
+
+No response bytes does not prove zero model work. Keep the first allowance
+charged when consumption is uncertain. Recount and reserve afresh for the retry,
+with a separate durable record and reservation identity. Reusing the first
+reservation would omit possible consumption on one backend; automatically
+refunding it would weaken the daily quota. The second attempt may therefore
+return a quota error even after a failed first attempt. Save the first final
+outcome before starting the second; failed handoff stops failover.
+
+Keep the public request ID for correlation and suffix the second durable ID with
+`:attempt-2`, rather than adding another schema in this slice. Record retry usage
+from its own attempt start while public duration and TTFT retain the full client
+interval. Initial rate admission and public request counters run once. No retry
+is made for validation, counting, quota, admission, client cancellation, or lost
+accounting ownership.
+
+After commitment, JSON aborts remain aborts. Interrupted SSE can deliver a
+terminal error event under a write deadline using the existing stream-idle
+budget. If bounded delivery cannot be established or fails, abort the connection.
+A missing `[DONE]` on ordinary EOF is also interruption; an existing backend error
+event is already terminal. None of these cases starts a new generation.

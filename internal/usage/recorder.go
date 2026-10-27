@@ -40,6 +40,8 @@ func NewRecorder(options Options) *Recorder {
 
 // Request describes validated chat metadata without retaining the prompt body.
 type Request struct {
+	Attempt     int       // Zero or one is the initial attempt; two appends :attempt-2 to its ID.
+	StartedAt   time.Time // Optional attempt start; zero uses client arrival time.
 	Model       string
 	Streaming   bool
 	FirstData   func(time.Time) // Optional notification for the first complete SSE data event.
@@ -61,7 +63,11 @@ func (r *Recorder) Observe(w http.ResponseWriter, request *http.Request, metadat
 		return nil, ErrUnavailable
 	}
 
-	started := requestlog.Started(request.Context())
+	started := metadata.StartedAt
+	if started.IsZero() {
+		started = requestlog.Started(request.Context())
+	}
+
 	if started.IsZero() {
 		started = time.Now()
 	}
@@ -69,6 +75,14 @@ func (r *Recorder) Observe(w http.ResponseWriter, request *http.Request, metadat
 	id := requestlog.ID(request.Context())
 	if id == "" {
 		id = rand.Text()
+	}
+
+	if metadata.Attempt < 0 || metadata.Attempt > 2 {
+		return nil, ErrUnavailable
+	}
+
+	if metadata.Attempt == 2 {
+		id += ":attempt-2"
 	}
 
 	record := store.Usage{
@@ -112,6 +126,12 @@ func (r *Recorder) Observe(w http.ResponseWriter, request *http.Request, metadat
 // Writer forwards response bytes while observing only the bytes accepted by the client writer.
 func (o *Observation) Writer() http.ResponseWriter {
 	return o.writer
+}
+
+// StreamTerminated reports an observed [DONE] or error event. A plain upstream
+// EOF without either marker does not establish a complete SSE response.
+func (o *Observation) StreamTerminated() bool {
+	return o.writer.observer.done || o.writer.observer.failed
 }
 
 // Finish classifies the response after proxying returns or panics; it performs no external writes.

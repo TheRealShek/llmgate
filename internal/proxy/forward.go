@@ -41,10 +41,15 @@ func newForwarder(target *url.URL, transport http.RoundTripper) *httputil.Revers
 				response.Header.Del("X-Request-ID")
 			}
 
-			if attempt, captured := response.Request.Context().Value(attemptKey{}).(*Attempt); captured && attempt.retryResponses {
-				switch response.StatusCode {
-				case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-					return &responseStatusError{status: response.StatusCode}
+			if attempt, captured := response.Request.Context().Value(attemptKey{}).(*Attempt); captured {
+				attempt.upstreamStatus = response.StatusCode
+
+				response.Body = &attemptBody{ReadCloser: response.Body, attempt: attempt}
+				if attempt.retryResponses {
+					switch response.StatusCode {
+					case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+						return &responseStatusError{status: response.StatusCode}
+					}
 				}
 			}
 

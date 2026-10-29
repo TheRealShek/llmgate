@@ -17,6 +17,8 @@ import (
 	"github.com/therealshek/llmgate/internal/proxy"
 	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/requestlog"
+	"github.com/therealshek/llmgate/internal/router"
+	"github.com/therealshek/llmgate/internal/store"
 	"github.com/therealshek/llmgate/internal/usage"
 )
 
@@ -90,14 +92,14 @@ func (h *chatHandler) attempt(
 ) (result attemptResult) {
 	waitStarted := time.Now()
 
-	name, releaseSlot, err := h.routing.Acquire(r.Context(), options.excluded)
+	name, assignment, err := h.routing.Acquire(r.Context(), options.excluded)
 	metrics.Admission(r.Context(), name, time.Since(waitStarted), err)
 
 	if err != nil {
 		return attemptResult{admissionErr: err}
 	}
 
-	defer releaseSlot()
+	defer assignment.Release()
 
 	result.backend = name
 	target := h.backends[name]
@@ -197,6 +199,8 @@ func (h *chatHandler) attempt(
 		// SSE can carry a terminal error after response commitment. JSON must abort
 		// an incomplete body; writing a second JSON error would corrupt the response.
 		incomplete := recovered == nil && returned && chat.stream && !observation.StreamTerminated()
+
+		backendIncomplete := incomplete && !observation.DeliveryFailed()
 		if (recovered == http.ErrAbortHandler || incomplete) && chat.stream && w.final.Load() && request.Context().Err() == nil {
 			contentType, _, _ := mime.ParseMediaType(w.Header().Get("Content-Type"))
 			if contentType == "text/event-stream" {
@@ -219,10 +223,22 @@ func (h *chatHandler) attempt(
 			}
 		}
 
-		finishInference()
-		releaseSlot()
-
+		// Classify before releasing the slot so queued work sees an opened circuit.
 		record := observation.Finish(request.Context(), returned)
+		if request.Context().Err() == nil {
+			switch {
+			case outcome.BackendFailed() || record.HTTPStatus >= 500:
+				assignment.RecordOutcome(router.InferenceFailed)
+			case returned && record.Status == store.UsageCompleted:
+				assignment.RecordOutcome(router.InferenceSucceeded)
+			case (backendIncomplete || observation.StreamFailed()) && record.HTTPStatus >= 200 && record.HTTPStatus < 300:
+				assignment.RecordOutcome(router.InferenceFailed)
+			}
+		}
+
+		finishInference()
+		assignment.Release()
+
 		// Classify first, then stop the completed attempt independently of the client.
 		// Cancellation does not acknowledge that remote GPU work has already stopped.
 		cancelRequest()

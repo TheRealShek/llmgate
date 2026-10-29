@@ -93,6 +93,10 @@ func (s *failoverState) RecordAdmission(_ context.Context, record store.Admissio
 		return errors.New("invalid admission")
 	}
 
+	if s.mode == "admission unavailable" {
+		return errors.New("admission unavailable")
+	}
+
 	s.ownerCancel = cancel
 	s.admissions = append(s.admissions, record)
 
@@ -179,6 +183,7 @@ func failoverGateway(t *testing.T, mode string, attempts, targetCount int) (http
 		name := r.URL.Host
 
 		state.mu.Lock()
+		mode := state.mode
 		state.generation = append(state.generation, name)
 		state.sentLimits = append(state.sentLimits, payloadFields.MaxTokens)
 		state.mu.Unlock()
@@ -210,6 +215,8 @@ func failoverGateway(t *testing.T, mode string, attempts, targetCount int) (http
 
 		if failing {
 			switch mode {
+			case "500":
+				status = http.StatusInternalServerError
 			case "502", "both":
 				status = http.StatusBadGateway
 			case "503":

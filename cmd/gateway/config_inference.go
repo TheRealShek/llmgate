@@ -15,6 +15,12 @@ type inferenceConfig struct {
 	streamIdleTimeout     time.Duration // Upstream read gaps and terminal SSE error delivery.
 	health                backendHealthConfig
 	admission             inferenceAdmissionConfig
+	circuitBreaker        backendCircuitConfig
+}
+
+type backendCircuitConfig struct {
+	failureThreshold int
+	cooldown         time.Duration
 }
 
 type backendHealthConfig struct {
@@ -33,6 +39,7 @@ type inferenceAdmissionConfig struct {
 func loadInferenceConfig(getenv func(string) string) (inferenceConfig, error) {
 	cfg := inferenceConfig{
 		connectTimeout:        5 * time.Second,
+		circuitBreaker:        backendCircuitConfig{failureThreshold: 3, cooldown: 10 * time.Second},
 		responseHeaderTimeout: 30 * time.Second,
 		jsonResponseTimeout:   30 * time.Second,
 		streamIdleTimeout:     30 * time.Second,
@@ -81,6 +88,7 @@ func loadInferenceConfig(getenv func(string) string) (inferenceConfig, error) {
 		name  string
 		value *int
 	}{
+		{name: "GATEWAY_BACKEND_CIRCUIT_FAILURES", value: &cfg.circuitBreaker.failureThreshold},
 		{name: "GATEWAY_BACKEND_HEALTH_FAILURES", value: &cfg.health.failureThreshold},
 		{name: "GATEWAY_BACKEND_HEALTH_SUCCESSES", value: &cfg.health.successThreshold},
 	} {
@@ -90,6 +98,11 @@ func loadInferenceConfig(getenv func(string) string) (inferenceConfig, error) {
 				return inferenceConfig{}, fmt.Errorf("validate %s: requires a positive integer", setting.name)
 			}
 		}
+	}
+
+	cfg.circuitBreaker.cooldown, err = envDuration(getenv, "GATEWAY_BACKEND_CIRCUIT_COOLDOWN", cfg.circuitBreaker.cooldown)
+	if err != nil {
+		return inferenceConfig{}, err
 	}
 
 	cfg.health.probeTimeout, err = envDuration(getenv, "GATEWAY_READINESS_TIMEOUT", cfg.health.probeTimeout)

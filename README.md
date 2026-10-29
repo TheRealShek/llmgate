@@ -20,7 +20,8 @@ Phase 2 adds named backends, health-aware least-loaded routing, and a bounded
 inference queue per backend for JSON and SSE chat, with
 [queue metrics](docs/manual-testing.md#prometheus-metrics). Compose still deploys
 one backend. Chat can retry once on a different backend before response
-commitment; circuit breakers remain planned. See the
+commitment. Per-backend circuit breakers temporarily exclude repeated inference
+failures and allow one recovery trial after cooldown. See the
 [Phase 2 scope](docs/PROJECT_INTENT.md#phase-2-multiple-backends-and-overload-protection).
 
 ## Quick start

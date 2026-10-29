@@ -1,10 +1,10 @@
 # Architecture
 
 This page explains the implemented gateway, including Phase 2 health monitoring,
-least-loaded routing, and bounded inference admission. Start
+least-loaded routing, circuit breakers, and bounded inference admission. Start
 with the [system map](../README.md#architecture), then use this page to
 trace a request and find the package responsible for each step. The
-[project intent](PROJECT_INTENT.md) describes planned work. Circuit breakers remain planned work.
+[project intent](PROJECT_INTENT.md) describes planned work.
 
 ## One chat request
 
@@ -107,11 +107,13 @@ the shared transport closes its idle connections.
 
 ## Routing and assignment ownership
 
-The router chooses the healthy backend with the fewest local assigned requests,
+The router chooses an eligible healthy backend with the fewest local assigned requests,
 skipping backends whose active-plus-waiting limit is reached. Assignments cover
 queue waiting, token counting, durable admission, and proxying. Equal-load choices
 rotate through configuration order. Model listing selects a healthy backend
 without reserving inference capacity and returns that server's model list.
+Open circuits are excluded from model listing, including after cooldown until
+a chat trial succeeds.
 Configured targets should serve the same model aliases; there is no model-based
 routing or merged model catalog.
 
@@ -119,16 +121,44 @@ One router mutex protects selection and assignment increments together. Requests
 waiting for a queue slot therefore count immediately, even before entering the
 queue. The mutex is released before waiting, counting tokens, or doing network
 work. Each queue separately protects its FIFO grants and cancellation. A failed
-acquisition clears its assignment. A successful acquisition returns an idempotent
-release function that clears both the queue slot and router assignment before
+acquisition clears its assignment. A successful acquisition returns an assignment with idempotent
+`Release` that clears both the queue slot and router assignment before
 final accounting, including during proxy aborts. The router adds no goroutines.
 
 The selected bundle owns that backend's prompt counter, JSON/SSE proxies, queue,
 and usage recorder identity. Redis quota state and durable accounting storage
 remain shared. A request never counts on one backend and generates on another.
-No healthy target returns `503`; no room across healthy targets returns `429`.
+No eligible target returns `503`; no room across eligible targets returns `429`.
 Counting and admission failures do not trigger retries. Load is a request count,
 not token cost or GPU utilization, and applies only to this gateway process.
+
+### Circuit breakers
+
+Each backend has circuit state inside the router, protected by the same mutex as
+selection. Closed circuits count consecutive eligible generation failures.
+Transport errors, upstream HTTP 5xx responses, body-read errors, explicit SSE
+errors, and SSE EOF without a terminal marker count as failures. A completed 2xx
+response resets the streak. Client or ownership cancellation, failed client
+writes, HTTP 4xx responses, token-counting errors, quota failures, and accounting
+failures are neutral. Accounting failure after a completed generation does not
+undo that generation's circuit result.
+
+At the failure threshold, the circuit opens and new selections exclude it.
+After cooldown, selection may reserve one chat recovery trial, called half-open.
+Concurrent requests still skip it. A successful trial closes the circuit; a failed
+or neutral trial starts another cooldown. Health probes remain an independent
+gate and cannot close a circuit. Readiness still reports probe health, so it can
+return 200 while all circuits are open and chat returns 503.
+
+Assignments carry the circuit generation selected before queue waiting. Opening
+or completing a trial advances that generation, so late outcomes from older
+requests cannot change recovery state. Waiters recheck their generation after a
+queue grant and release stale assignments with `503` before counting or generation.
+Requests already past that check continue; opening a circuit does not cancel
+active work. Each generation reports its outcome before releasing capacity and
+before final accounting. Circuit transitions emit structured backend logs.
+There are no circuit workers or timers: selections check the cooldown deadline.
+State is local to this gateway and resets on restart.
 
 ### Retry attempts and response commitment
 

@@ -158,6 +158,7 @@ func TestLoadConfig(t *testing.T) {
 					maxBackendAttempts:  2,
 				},
 				inference: inferenceConfig{
+					circuitBreaker:        backendCircuitConfig{failureThreshold: 3, cooldown: 10 * time.Second},
 					connectTimeout:        5 * time.Second,
 					responseHeaderTimeout: 30 * time.Second,
 					streamIdleTimeout:     30 * time.Second,
@@ -253,6 +254,7 @@ func TestLoadConfig(t *testing.T) {
 					maxBackendAttempts:  2,
 				},
 				inference: inferenceConfig{
+					circuitBreaker:        backendCircuitConfig{failureThreshold: 3, cooldown: 10 * time.Second},
 					connectTimeout:        2 * time.Second,
 					responseHeaderTimeout: 3 * time.Second,
 					streamIdleTimeout:     4 * time.Second,

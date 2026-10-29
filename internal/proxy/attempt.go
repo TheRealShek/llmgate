@@ -1,6 +1,9 @@
 package proxy
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 type attemptKey struct{}
 
@@ -10,6 +13,8 @@ type Attempt struct {
 	retryResponses bool
 	status         int
 	retryable      bool
+	upstreamStatus int
+	readFailed     bool
 }
 
 // NewAttempt captures transport failures and retryable upstream statuses instead
@@ -25,4 +30,24 @@ func NewAttempt(ctx context.Context, retryResponses bool) (context.Context, *Att
 // Status zero means no pre-response failure was captured.
 func (a *Attempt) Failure() (int, bool) {
 	return a.status, a.retryable
+}
+
+// BackendFailed reports transport, upstream 5xx, or response-body read failures.
+// Client delivery errors are observed separately by the gateway, not this reader.
+func (a *Attempt) BackendFailed() bool {
+	return a.readFailed || a.upstreamStatus >= 500 || (a.status != 0 && a.retryable)
+}
+
+type attemptBody struct {
+	io.ReadCloser
+	attempt *Attempt
+}
+
+func (b *attemptBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil && err != io.EOF {
+		b.attempt.readFailed = true
+	}
+
+	return n, err
 }

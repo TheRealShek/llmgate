@@ -178,10 +178,12 @@ capacity before final accounting. Metrics attribute request, stream, queue, and
 TTFT measurements to configured backend names. Chat can retry once on a
 different healthy backend before response commitment, with separate quota and
 durable accounting per attempt. Interrupted SSE sends a terminal error when
-bounded delivery succeeds; committed responses are never retried.
+bounded delivery succeeds; committed responses are never retried. Per-backend
+circuit breakers track generation failures, exclude open circuits, and permit
+one recovery trial after a configurable cooldown.
 
 The existing single-backend Compose deployment still aligns gateway slots with
-llama.cpp parallel slots. Multiple-instance Compose deployment, circuit breakers,
+llama.cpp parallel slots. Multiple-instance Compose deployment,
 chaos/load measurements, and the remaining metrics/dashboard
 remain to be implemented.
 

@@ -134,6 +134,12 @@ func (o *Observation) StreamTerminated() bool {
 	return o.writer.observer.done || o.writer.observer.failed
 }
 
+// DeliveryFailed reports a client body-write error, which must not penalize the backend.
+func (o *Observation) DeliveryFailed() bool { return o.writer.writeErr != nil }
+
+// StreamFailed reports an explicit backend error event.
+func (o *Observation) StreamFailed() bool { return o.writer.observer.failed }
+
 // Finish classifies the response after proxying returns or panics; it performs no external writes.
 func (o *Observation) Finish(ctx context.Context, returned bool) store.Usage {
 	record := o.record

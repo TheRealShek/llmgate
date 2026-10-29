@@ -4,6 +4,7 @@ package router
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/therealshek/llmgate/internal/backend"
 	"github.com/therealshek/llmgate/internal/queue"
@@ -23,17 +24,31 @@ type Target struct {
 // Router protects assignment counts and tie rotation with one mutex.
 // Counts include preparation, inference, and waiting, but exclude final accounting.
 type Router struct {
-	mu       sync.Mutex
-	targets  []Target
-	health   Health
-	assigned []int
-	next     int
+	mu             sync.Mutex
+	targets        []Target
+	health         Health
+	assigned       []int
+	next           int
+	circuits       []circuitState
+	circuitOptions CircuitOptions
 }
 
 // New copies targets with validated, unique names. Health must be shared with readiness.
 // The router creates no workers. Only Acquire callers may use its target queues.
-func New(targets []Target, health Health) *Router {
-	return &Router{targets: append([]Target(nil), targets...), health: health, assigned: make([]int, len(targets))}
+func New(targets []Target, health Health, options CircuitOptions) *Router {
+	if options.FailureThreshold <= 0 {
+		options.FailureThreshold = 3
+	}
+
+	if options.Cooldown <= 0 {
+		options.Cooldown = 10 * time.Second
+	}
+
+	return &Router{
+		targets: append([]Target(nil), targets...), health: health,
+		assigned: make([]int, len(targets)), circuits: make([]circuitState, len(targets)),
+		circuitOptions: options,
+	}
 }
 
 // Select chooses a healthy backend for model listing without taking inference capacity.
@@ -51,8 +66,9 @@ func (r *Router) Select() (string, error) {
 
 // Acquire assigns a request before waiting on its queue, so concurrent selections
 // see the assignment immediately. Excluded is a previously failed backend name,
-// or empty on the first attempt. Callers must defer the idempotent release.
-func (r *Router) Acquire(ctx context.Context, excluded string) (string, func(), error) {
+// or empty on the first attempt. Callers must defer Assignment.Release and
+// report inference outcomes before release.
+func (r *Router) Acquire(ctx context.Context, excluded string) (string, *Assignment, error) {
 	if err := ctx.Err(); err != nil {
 		return "", nil, err
 	}
@@ -66,31 +82,30 @@ func (r *Router) Acquire(ctx context.Context, excluded string) (string, func(), 
 	}
 
 	r.assigned[index]++
+
+	assignment := &Assignment{router: r, index: index, generation: r.circuits[index].generation}
+	if !r.circuits[index].openedUntil.IsZero() {
+		r.circuits[index].trial = true
+	}
 	r.mu.Unlock()
 
 	release, err := r.targets[index].Admission.Acquire(ctx)
 	if err != nil {
-		r.unassign(index)
+		assignment.Release()
 		return r.targets[index].Name, nil, err
 	}
 
-	return r.targets[index].Name, sync.OnceFunc(func() {
-		// Keep the selection lock through both releases so a new assignment cannot
-		// observe a free router place while its queue still owns the old request.
-		r.mu.Lock()
-		defer r.mu.Unlock()
-
-		release()
-
-		r.assigned[index]--
-	}), nil
-}
-
-func (r *Router) unassign(index int) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	assignment.releaseSlot = release
+	stale := assignment.generation != r.circuits[index].generation
+	r.mu.Unlock()
 
-	r.assigned[index]--
+	if stale {
+		assignment.Release()
+		return r.targets[index].Name, nil, ErrNoBackend
+	}
+
+	return r.targets[index].Name, assignment, nil
 }
 
 func (r *Router) choose(bounded bool, excluded string) (int, error) {
@@ -119,7 +134,7 @@ func (r *Router) choose(bounded bool, excluded string) (int, error) {
 			}
 		}
 
-		if !available {
+		if !available || !r.circuits[index].available(time.Now(), bounded) {
 			continue
 		}
 

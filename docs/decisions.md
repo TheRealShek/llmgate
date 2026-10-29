@@ -281,8 +281,8 @@ workers before releasing the transport.
 `GET /v1/readyz` reads shared health and returns plain `ok` with 200 when any
 backend is healthy, otherwise a fixed OpenAI-compatible 503. It creates no
 upstream work and does not inherit a caller’s cancellation into shared probes.
-An unset backend remains unready; liveness stays independent. Current chat
-forwarding does not yet use health to gate or select inference backends.
+An unset backend remains unready; liveness stays independent. Chat and model
+selection use these health snapshots as described in the routing policy below.
 
 ## Route authentication
 
@@ -863,3 +863,24 @@ terminal error event under a write deadline using the existing stream-idle
 budget. If bounded delivery cannot be established or fails, abort the connection.
 A missing `[DONE]` on ordinary EOF is also interruption; an existing backend error
 event is already terminal. None of these cases starts a new generation.
+
+## Per-backend inference circuit breakers
+
+Use real generation outcomes to stop repeated requests to a backend whose
+`/health` still succeeds. Retries help one request; a circuit retains failure
+history across requests. Keep the state local alongside routing assignments,
+matching the existing local queue and load ownership.
+
+Require consecutive eligible failures before opening, then allow one chat trial
+after cooldown. A single failure would exclude backends on transient errors;
+unrestricted recovery traffic could overload a backend before recovery is known.
+Neutral trial outcomes restart cooldown without adding a failure. A successful
+probe cannot replace a successful generation trial. Model listing neither closes
+a circuit nor consumes its trial. Readiness keeps its existing probe-only contract.
+
+Record outcomes in completion order and ignore results from older circuit
+generations. Do not cancel active requests when a circuit opens. Recheck queued
+assignments after their slot grant so waiting work does not immediately restart
+traffic to an opened circuit. The [architecture](architecture.md#circuit-breakers)
+owns failure classification and cleanup; [configuration](manual-testing.md#configuration)
+owns thresholds and cooldown defaults. Deployed chaos measurements remain pending.

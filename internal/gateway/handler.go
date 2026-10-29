@@ -48,6 +48,7 @@ type Backend struct {
 // Backend names must be nonempty and unique, validated by startup.
 type HandlerOptions struct {
 	Backends       []Backend
+	CircuitBreaker router.CircuitOptions
 	Health         router.Health
 	Readiness      http.Handler
 	Authentication *auth.Authenticator
@@ -70,7 +71,7 @@ func NewHandler(options HandlerOptions) http.Handler {
 		configured = configured || target.NonStreaming != nil
 	}
 
-	routing := router.New(targets, options.Health)
+	routing := router.New(targets, options.Health, options.CircuitBreaker)
 
 	var chat http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		metrics.NoBackend(r.Context())

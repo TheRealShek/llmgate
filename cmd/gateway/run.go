@@ -19,6 +19,7 @@ import (
 	"github.com/therealshek/llmgate/internal/quota"
 	"github.com/therealshek/llmgate/internal/ratelimit"
 	"github.com/therealshek/llmgate/internal/requestlog"
+	"github.com/therealshek/llmgate/internal/router"
 	"github.com/therealshek/llmgate/internal/store"
 	"github.com/therealshek/llmgate/internal/usage"
 )
@@ -171,6 +172,10 @@ func run(ctx context.Context) error {
 		Backends: admissions,
 	})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
+		CircuitBreaker: router.CircuitOptions{
+			FailureThreshold: cfg.inference.circuitBreaker.failureThreshold,
+			Cooldown:         cfg.inference.circuitBreaker.cooldown,
+		},
 		Backends: backends, Health: registry, Readiness: backend.NewReadinessHandler(registry),
 		Authentication: authentication, RequestLimits: requestLimits, Metrics: gatewayMetrics,
 		Limits: gateway.ChatLimits{

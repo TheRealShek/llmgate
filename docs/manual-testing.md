@@ -1256,6 +1256,28 @@ go test ./cmd/gateway -run 'TestLoadBackends|TestBackendConfigIntegration'
 These tests establish request behavior, not multi-GPU throughput, backend death
 under load, or the Phase 2 latency target.
 
+## Inference circuit breakers
+
+Run the deterministic state and authenticated proxy-flow tests:
+
+```sh
+go test -race ./internal/router ./internal/gateway ./cmd/gateway -run 'TestCircuit'
+```
+
+These cover failure thresholds, streak resets, cooldown boundaries, one concurrent
+trial, recovery, stale results, queued assignment cleanup, JSON/SSE failover, and
+neutral client/admission failures. They use controlled backends and virtual time;
+they do not establish recovery latency under GPU load.
+
+During a controlled deployment test, keep backend A's `/health` returning 200
+while its generation endpoint returns 503. After the configured number of failed
+A generations, expect a `backend circuit opened` log with A's name. Further chats
+should bypass A, or return 503 if no other backend is eligible. After cooldown,
+one chat may try A. Restore successful generation and expect `backend circuit
+closed` after that trial; another failed trial restarts cooldown. Readiness can
+remain 200 throughout because it reports probe health. This deployed scenario has
+not yet been run. See [circuit behavior](architecture.md#circuit-breakers).
+
 ## Bounded chat failover
 
 `GATEWAY_MAX_ATTEMPTS` defaults to `2`; set `1` to disable chat retries. With two
@@ -1382,6 +1404,8 @@ records. The deployed overload check has not yet been run for this slice.
 | `GATEWAY_BACKEND_HEALTH_INTERVAL` | `5s` | Probe interval per backend; probes never overlap for the same backend |
 | `GATEWAY_BACKEND_HEALTH_FAILURES` | `3` | Consecutive failures before marking unhealthy; positive integer |
 | `GATEWAY_BACKEND_HEALTH_SUCCESSES` | `2` | Consecutive successes before marking healthy, including startup; positive integer |
+| `GATEWAY_BACKEND_CIRCUIT_FAILURES` | `3` | Consecutive eligible generation failures before opening a backend circuit; positive integer |
+| `GATEWAY_BACKEND_CIRCUIT_COOLDOWN` | `10s` | Positive delay before one chat recovery trial; a failed or neutral trial restarts the delay |
 | `GATEWAY_MAX_BODY_BYTES` | `1048576` | Chat request body limit |
 | `GATEWAY_MAX_TOKENS` | `1024` | Output-token limit and omitted-value default |
 | `GATEWAY_MAX_ATTEMPTS` | `2` | Total chat attempts, 1 or 2; a retry excludes the first backend |

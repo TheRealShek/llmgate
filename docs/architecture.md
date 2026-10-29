@@ -444,6 +444,11 @@ these application collectors, with no default process or Go-runtime collectors.
 
 ## Startup and shutdown ownership
 
+Startup loads [typed subsystem settings](../cmd/gateway/config.go) once. Each
+loader owns its defaults and validation; checks involving both server and admin
+settings run after assembly. Runtime components receive explicit settings from
+this validated config.
+
 [`run`](../cmd/gateway/run.go) opens and checks Postgres and Redis before binding
 HTTP listeners, constructs one authenticator shared by public and admin handlers,
 and owns the shared upstream transport. It validates Redis persistence and starts

@@ -50,16 +50,16 @@ func createKey(ctx context.Context, args []string, output io.Writer, getenv func
 		return fmt.Errorf("load key-create config: %w", err)
 	}
 
-	pool, err := store.OpenPool(ctx, cfg.databaseURL, store.PoolLimits{
-		MaxConns:       cfg.databaseMaxConns,
-		ConnectTimeout: cfg.databaseConnectTimeout,
+	pool, err := store.OpenPool(ctx, cfg.postgres.url, store.PoolLimits{
+		MaxConns:       cfg.postgres.maxConnections,
+		ConnectTimeout: cfg.postgres.connectTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize key-create database: %w", err)
 	}
 	defer pool.Close()
 
-	operationCtx, cancel := context.WithTimeout(ctx, cfg.authLookupTimeout)
+	operationCtx, cancel := context.WithTimeout(ctx, cfg.auth.keyStoreTimeout)
 	defer cancel()
 
 	key, secret, err := store.NewKeyStore(pool).CreateKey(operationCtx, params)

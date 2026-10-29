@@ -40,9 +40,9 @@ func run(ctx context.Context) error {
 	}
 
 	// Startup owns the pool. Its deferred close runs after HTTP draining completes.
-	pool, err := store.OpenPool(ctx, cfg.databaseURL, store.PoolLimits{
-		MaxConns:       cfg.databaseMaxConns,
-		ConnectTimeout: cfg.databaseConnectTimeout,
+	pool, err := store.OpenPool(ctx, cfg.postgres.url, store.PoolLimits{
+		MaxConns:       cfg.postgres.maxConnections,
+		ConnectTimeout: cfg.postgres.connectTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize gateway database: %w", err)
@@ -51,17 +51,17 @@ func run(ctx context.Context) error {
 
 	keys := store.NewKeyStore(pool)
 	authentication := auth.NewAuthenticator(keys, auth.Options{
-		LookupTimeout: cfg.authLookupTimeout,
-		CacheTTL:      cfg.authCacheTTL,
-		CacheCapacity: cfg.authCacheCapacity,
+		LookupTimeout: cfg.auth.keyStoreTimeout,
+		CacheTTL:      cfg.auth.cacheTTL,
+		CacheCapacity: cfg.auth.cacheCapacity,
 	})
 
 	// Startup owns this pool too. Closing it after HTTP draining lets admitted
 	// requests finish without losing shared dependencies during shutdown.
-	redisClient, err := ratelimit.OpenClient(ctx, cfg.redisURL, ratelimit.ClientLimits{
-		MaxConns:       cfg.redisMaxConns,
-		ConnectTimeout: cfg.redisConnectTimeout,
-		CommandTimeout: max(cfg.rateLimitTimeout, cfg.quotaRedisTimeout, cfg.usageWriteTimeout),
+	redisClient, err := ratelimit.OpenClient(ctx, cfg.redis.url, ratelimit.ClientLimits{
+		MaxConns:       cfg.redis.maxConnections,
+		ConnectTimeout: cfg.redis.connectTimeout,
+		CommandTimeout: max(cfg.rateLimit.checkTimeout, cfg.quota.redisTimeout, cfg.accounting.writeTimeout),
 	})
 	if err != nil {
 		return fmt.Errorf("initialize request limiting: %w", err)
@@ -69,20 +69,20 @@ func run(ctx context.Context) error {
 	defer redisClient.Close()
 
 	buckets := ratelimit.NewRedisStore(redisClient)
-	requestLimits := ratelimit.NewLimiter(buckets, cfg.rateLimitTimeout)
+	requestLimits := ratelimit.NewLimiter(buckets, cfg.rateLimit.checkTimeout)
 
 	usageStore := store.NewUsageStore(pool)
 
 	accountingQueue, err := accounting.Open(ctx, redisClient, usageStore, accounting.Options{
 		Namespace:     "llmgate:accounting:v1",
-		MaxPending:    cfg.accountingMaxPending,
-		BatchSize:     cfg.accountingBatchSize,
-		FlushInterval: cfg.accountingFlushInterval,
-		Timeout:       cfg.usageWriteTimeout,
-		LeaseTimeout:  cfg.accountingLeaseTimeout,
-		MaxAOFBytes:   cfg.accountingMaxAOFBytes,
-		Retention:     cfg.accountingRetention,
-		PruneInterval: cfg.accountingPruneInterval,
+		MaxPending:    cfg.accounting.maxPendingAttempts,
+		BatchSize:     cfg.accounting.batchSize,
+		FlushInterval: cfg.accounting.flushInterval,
+		Timeout:       cfg.accounting.writeTimeout,
+		LeaseTimeout:  cfg.accounting.ownershipLeaseTimeout,
+		MaxAOFBytes:   cfg.accounting.maxAOFBytes,
+		Retention:     cfg.accounting.retentionPeriod,
+		PruneInterval: cfg.accounting.pruneInterval,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize durable accounting: %w", err)
@@ -107,45 +107,45 @@ func run(ctx context.Context) error {
 	// Assert its underlying type is *http.Transport and clone it so custom
 	// timeouts and idle connection cleanup do not mutate the process-wide transport.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = (&net.Dialer{Timeout: cfg.upstreamConnectTimeout}).DialContext
-	transport.TLSHandshakeTimeout = cfg.upstreamConnectTimeout
+	transport.DialContext = (&net.Dialer{Timeout: cfg.inference.connectTimeout}).DialContext
+	transport.TLSHandshakeTimeout = cfg.inference.connectTimeout
 
-	transport.ResponseHeaderTimeout = cfg.upstreamHeaderTimeout
+	transport.ResponseHeaderTimeout = cfg.inference.responseHeaderTimeout
 	defer transport.CloseIdleConnections()
 
 	// Each backend gets its own queue, counter, proxies, and accounting identity.
 	// Redis quota state and durable accounting storage remain shared across targets.
-	targets := make([]backend.Target, 0, len(cfg.backends))
-	backends := make([]gateway.Backend, 0, len(cfg.backends))
+	targets := make([]backend.Target, 0, len(cfg.inference.targets))
+	backends := make([]gateway.Backend, 0, len(cfg.inference.targets))
 
-	admissions := make(map[string]*queue.Queue, len(cfg.backends))
-	for _, target := range cfg.backends {
+	admissions := make(map[string]*queue.Queue, len(cfg.inference.targets))
+	for _, target := range cfg.inference.targets {
 		admission, err := queue.New(queue.Options{
-			Slots: target.slots, Capacity: target.queueCapacity, WaitTimeout: cfg.backendQueueTimeout,
+			Slots: target.slots, Capacity: target.queueCapacity, WaitTimeout: cfg.inference.admission.queueWaitTimeout,
 		})
 		if err != nil {
 			return fmt.Errorf("initialize backend %s admission: %w", target.name, err)
 		}
 
-		counter := quota.NewCounter(target.url, transport, cfg.quotaCountMaxBytes)
+		counter := quota.NewCounter(target.url, transport, cfg.quota.maxCountResponseBytes)
 		tokenQuota := quota.NewLimiter(counter, quota.NewRedisStore(redisClient), quota.Options{
-			CountTimeout: cfg.quotaCountTimeout, RedisTimeout: cfg.quotaRedisTimeout, GracePercent: cfg.quotaGracePercent,
+			CountTimeout: cfg.quota.promptCountTimeout, RedisTimeout: cfg.quota.redisTimeout, GracePercent: cfg.quota.gracePercent,
 		})
 		recorder := usage.NewRecorder(usage.Options{
-			Store: accountingQueue, Backend: target.name, WriteTimeout: cfg.usageWriteTimeout, MaxBytes: cfg.usageMaxBytes,
+			Store: accountingQueue, Backend: target.name, WriteTimeout: cfg.accounting.writeTimeout, MaxBytes: cfg.accounting.observationMaxBytes,
 		})
 		targets = append(targets, backend.Target{Name: target.name, URL: target.url})
 		admissions[target.name] = admission
 		backends = append(backends, gateway.Backend{
 			Name: target.name, Admission: admission, Quota: tokenQuota, Usage: recorder,
-			NonStreaming: proxy.NewNonStreamingHandler(target.url, transport, cfg.upstreamTimeout),
-			Streaming:    proxy.NewStreamingHandler(target.url, transport, cfg.streamIdleTimeout),
+			NonStreaming: proxy.NewNonStreamingHandler(target.url, transport, cfg.inference.jsonResponseTimeout),
+			Streaming:    proxy.NewStreamingHandler(target.url, transport, cfg.inference.streamIdleTimeout),
 		})
 	}
 
 	registry, err := backend.NewRegistry(targets, transport, backend.HealthOptions{
-		Interval: cfg.backendHealthInterval, Timeout: cfg.readinessTimeout,
-		Failures: cfg.backendHealthFailures, Successes: cfg.backendHealthSuccesses,
+		Interval: cfg.inference.health.probeInterval, Timeout: cfg.inference.health.probeTimeout,
+		Failures: cfg.inference.health.failureThreshold, Successes: cfg.inference.health.successThreshold,
 	})
 	if err != nil {
 		return fmt.Errorf("initialize backend registry: %w", err)
@@ -167,17 +167,17 @@ func run(ctx context.Context) error {
 	}()
 
 	gatewayMetrics := metrics.New(metrics.Options{
-		KeyCapacity: cfg.metricsKeyCapacity, MaxScrapes: cfg.metricsMaxScrapes, ScrapeTimeout: cfg.metricsScrapeTimeout,
+		KeyCapacity: cfg.metrics.keyLabelCapacity, MaxScrapes: cfg.metrics.maxConcurrentScrapes, ScrapeTimeout: cfg.metrics.scrapeTimeout,
 		Backends: admissions,
 	})
 	routes := gateway.NewHandler(gateway.HandlerOptions{
 		Backends: backends, Health: registry, Readiness: backend.NewReadinessHandler(registry),
 		Authentication: authentication, RequestLimits: requestLimits, Metrics: gatewayMetrics,
 		Limits: gateway.ChatLimits{
-			MaxBodyBytes:       cfg.maxBodyBytes,
-			MaxTokens:          cfg.maxTokens,
-			MaxAttempts:        cfg.maxAttempts,
-			StreamErrorTimeout: cfg.streamIdleTimeout,
+			MaxBodyBytes:       cfg.chat.maxRequestBodyBytes,
+			MaxTokens:          cfg.chat.maxOutputTokens,
+			MaxAttempts:        cfg.chat.maxBackendAttempts,
+			StreamErrorTimeout: cfg.inference.streamIdleTimeout,
 		},
 	})
 	observedRoutes := gatewayMetrics.Observe(accountingQueue.Protect(routes))
@@ -185,33 +185,33 @@ func run(ctx context.Context) error {
 
 	// Bound request reads and idle connections without limiting response streams.
 	server := &http.Server{
-		Addr:              cfg.addr,
+		Addr:              cfg.server.address,
 		Handler:           loggedRoutes,
-		ReadTimeout:       cfg.readTimeout,
-		ReadHeaderTimeout: cfg.readHeaderTimeout,
-		IdleTimeout:       cfg.idleTimeout,
+		ReadTimeout:       cfg.server.readTimeout,
+		ReadHeaderTimeout: cfg.server.readHeaderTimeout,
+		IdleTimeout:       cfg.server.idleTimeout,
 	}
 
 	servers := []namedServer{{name: "gateway", server: server}}
 
-	if cfg.adminEnabled {
+	if cfg.admin.enabled {
 		adminRoutes := admin.NewHandler(admin.HandlerOptions{
 			Keys:          keys,
 			Revoker:       authentication,
-			Token:         cfg.adminToken,
-			MaxBodyBytes:  cfg.adminMaxBodyBytes,
-			CreateTimeout: cfg.adminCreateTimeout,
-			RevokeTimeout: cfg.adminRevokeTimeout,
+			Token:         cfg.admin.token,
+			MaxBodyBytes:  cfg.admin.maxRequestBodyBytes,
+			CreateTimeout: cfg.admin.createTimeout,
+			RevokeTimeout: cfg.admin.revokeTimeout,
 		})
 		loggedAdminRoutes := requestlog.NewHandler(adminRoutes, slog.Default())
 		adminServer := &http.Server{
-			Addr:              cfg.adminAddr,
+			Addr:              cfg.admin.address,
 			Handler:           loggedAdminRoutes,
-			ReadTimeout:       cfg.readTimeout,
-			ReadHeaderTimeout: cfg.readHeaderTimeout,
-			IdleTimeout:       cfg.idleTimeout,
+			ReadTimeout:       cfg.server.readTimeout,
+			ReadHeaderTimeout: cfg.server.readHeaderTimeout,
+			IdleTimeout:       cfg.server.idleTimeout,
 			// Bound admin uploads, storage operations, and response delivery.
-			WriteTimeout: cfg.readTimeout + max(cfg.adminCreateTimeout, cfg.adminRevokeTimeout),
+			WriteTimeout: cfg.server.readTimeout + max(cfg.admin.createTimeout, cfg.admin.revokeTimeout),
 		}
 		servers = append(servers, namedServer{name: "admin", server: adminServer})
 	}
@@ -221,5 +221,5 @@ func run(ctx context.Context) error {
 		return err
 	}
 
-	return runServers(ctx, bound, cfg.shutdownTimeout, cfg.shutdownCleanupTimeout)
+	return runServers(ctx, bound, cfg.server.shutdownTimeout, cfg.server.shutdownCleanupTimeout)
 }

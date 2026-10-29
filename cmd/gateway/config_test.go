@@ -72,15 +72,15 @@ func TestLoadConfigUpstreamURL(t *testing.T) {
 			}
 
 			if tt.value == "" {
-				if len(cfg.backends) != 0 {
+				if len(cfg.inference.targets) != 0 {
 					t.Fatal("unset URL must remain nil")
 				}
 
 				return
 			}
 
-			if len(cfg.backends) != 1 || cfg.backends[0].url.String() != tt.value {
-				t.Fatalf("upstream URL = %v, want %q", cfg.backends, tt.value)
+			if len(cfg.inference.targets) != 1 || cfg.inference.targets[0].url.String() != tt.value {
+				t.Fatalf("upstream URL = %v, want %q", cfg.inference.targets, tt.value)
 			}
 		})
 	}
@@ -99,42 +99,81 @@ func TestLoadConfig(t *testing.T) {
 			name: "defaults",
 			env:  map[string]string{},
 			want: config{
-				accountingMaxAOFBytes: 256 << 20, accountingRetention: 30 * 24 * time.Hour, accountingPruneInterval: time.Hour, accountingLeaseTimeout: 30 * time.Second, accountingMaxPending: 1024, accountingBatchSize: 64, accountingFlushInterval: 250 * time.Millisecond,
-				metricsKeyCapacity: 0, metricsMaxScrapes: 2, metricsScrapeTimeout: 2 * time.Second,
-				adminAddr:              "127.0.0.1:8082",
-				adminMaxBodyBytes:      4096,
-				adminCreateTimeout:     2 * time.Second,
-				adminRevokeTimeout:     2 * time.Second,
-				databaseURL:            "postgres://localhost/llmgate",
-				databaseMaxConns:       10,
-				databaseConnectTimeout: 5 * time.Second,
-				authLookupTimeout:      2 * time.Second,
-				authCacheTTL:           30 * time.Second,
-				authCacheCapacity:      1024,
-				redisURL:               "redis://127.0.0.1:6379/0",
-				redisMaxConns:          10,
-				redisConnectTimeout:    2 * time.Second,
-				rateLimitTimeout:       500 * time.Millisecond,
-				quotaCountTimeout:      2 * time.Second,
-				quotaRedisTimeout:      500 * time.Millisecond,
-				quotaCountMaxBytes:     8 << 20,
-				usageWriteTimeout:      2 * time.Second,
-				usageMaxBytes:          64 << 10,
-				addr:                   ":8080",
-				readTimeout:            10 * time.Second,
-				maxBodyBytes:           1 << 20, // 1 MiB
-				maxTokens:              1024, maxAttempts: 2,
-				upstreamConnectTimeout: 5 * time.Second,
-				upstreamHeaderTimeout:  30 * time.Second,
-				streamIdleTimeout:      30 * time.Second,
-				readinessTimeout:       2 * time.Second,
-				backendHealthInterval:  5 * time.Second, backendHealthFailures: 3, backendHealthSuccesses: 2,
-				backendSlots: 1, backendQueueCapacity: 4, backendQueueTimeout: 5 * time.Second,
-				upstreamTimeout:        30 * time.Second,
-				readHeaderTimeout:      5 * time.Second,
-				idleTimeout:            60 * time.Second,
-				shutdownTimeout:        10 * time.Second,
-				shutdownCleanupTimeout: 3 * time.Second,
+				accounting: accountingConfig{
+					maxAOFBytes:           256 << 20,
+					retentionPeriod:       30 * 24 * time.Hour,
+					pruneInterval:         time.Hour,
+					ownershipLeaseTimeout: 30 * time.Second,
+					maxPendingAttempts:    1024,
+					batchSize:             64,
+					flushInterval:         250 * time.Millisecond,
+					writeTimeout:          2 * time.Second,
+					observationMaxBytes:   64 << 10,
+				},
+				metrics: metricsConfig{
+					keyLabelCapacity:     0,
+					maxConcurrentScrapes: 2,
+					scrapeTimeout:        2 * time.Second,
+				},
+				admin: adminConfig{
+					address:             "127.0.0.1:8082",
+					maxRequestBodyBytes: 4096,
+					createTimeout:       2 * time.Second,
+					revokeTimeout:       2 * time.Second,
+				},
+				postgres: postgresConfig{
+					url:            "postgres://localhost/llmgate",
+					maxConnections: 10,
+					connectTimeout: 5 * time.Second,
+				},
+				auth: authConfig{
+					keyStoreTimeout: 2 * time.Second,
+					cacheTTL:        30 * time.Second,
+					cacheCapacity:   1024,
+				},
+				redis: redisConfig{
+					url:            "redis://127.0.0.1:6379/0",
+					maxConnections: 10,
+					connectTimeout: 2 * time.Second,
+				},
+				rateLimit: rateLimitConfig{
+					checkTimeout: 500 * time.Millisecond,
+				},
+				quota: quotaConfig{
+					promptCountTimeout:    2 * time.Second,
+					redisTimeout:          500 * time.Millisecond,
+					maxCountResponseBytes: 8 << 20,
+				},
+				server: serverConfig{
+					address:                ":8080",
+					readTimeout:            10 * time.Second,
+					readHeaderTimeout:      5 * time.Second,
+					idleTimeout:            60 * time.Second,
+					shutdownTimeout:        10 * time.Second,
+					shutdownCleanupTimeout: 3 * time.Second,
+				},
+				chat: chatConfig{
+					maxRequestBodyBytes: 1 << 20,
+					maxOutputTokens:     1024,
+					maxBackendAttempts:  2,
+				},
+				inference: inferenceConfig{
+					connectTimeout:        5 * time.Second,
+					responseHeaderTimeout: 30 * time.Second,
+					streamIdleTimeout:     30 * time.Second,
+					health: backendHealthConfig{
+						probeTimeout:     2 * time.Second,
+						probeInterval:    5 * time.Second,
+						failureThreshold: 3,
+						successThreshold: 2,
+					},
+					admission: inferenceAdmissionConfig{
+						defaultActiveSlots:   1,
+						defaultQueueCapacity: 4,
+						queueWaitTimeout:     5 * time.Second,
+					},
+					jsonResponseTimeout: 30 * time.Second,
+				},
 			},
 		},
 		{
@@ -155,42 +194,81 @@ func TestLoadConfig(t *testing.T) {
 				"GATEWAY_SHUTDOWN_CLEANUP_TIMEOUT": "4s",
 			},
 			want: config{
-				accountingMaxAOFBytes: 256 << 20, accountingRetention: 30 * 24 * time.Hour, accountingPruneInterval: time.Hour, accountingLeaseTimeout: 30 * time.Second, accountingMaxPending: 1024, accountingBatchSize: 64, accountingFlushInterval: 250 * time.Millisecond,
-				metricsKeyCapacity: 0, metricsMaxScrapes: 2, metricsScrapeTimeout: 2 * time.Second,
-				adminAddr:              "127.0.0.1:8082",
-				adminMaxBodyBytes:      4096,
-				adminCreateTimeout:     2 * time.Second,
-				adminRevokeTimeout:     2 * time.Second,
-				databaseURL:            "postgres://localhost/llmgate",
-				databaseMaxConns:       10,
-				databaseConnectTimeout: 5 * time.Second,
-				authLookupTimeout:      2 * time.Second,
-				authCacheTTL:           30 * time.Second,
-				authCacheCapacity:      1024,
-				redisURL:               "redis://127.0.0.1:6379/0",
-				redisMaxConns:          10,
-				redisConnectTimeout:    2 * time.Second,
-				rateLimitTimeout:       500 * time.Millisecond,
-				quotaCountTimeout:      2 * time.Second,
-				quotaRedisTimeout:      500 * time.Millisecond,
-				quotaCountMaxBytes:     8 << 20,
-				usageWriteTimeout:      2 * time.Second,
-				usageMaxBytes:          64 << 10,
-				addr:                   "127.0.0.1:9090",
-				readTimeout:            3 * time.Second,
-				maxBodyBytes:           2048,
-				maxTokens:              512, maxAttempts: 2,
-				upstreamConnectTimeout: 2 * time.Second,
-				upstreamHeaderTimeout:  3 * time.Second,
-				streamIdleTimeout:      4 * time.Second,
-				readinessTimeout:       500 * time.Millisecond,
-				backendHealthInterval:  5 * time.Second, backendHealthFailures: 3, backendHealthSuccesses: 2,
-				backendSlots: 1, backendQueueCapacity: 4, backendQueueTimeout: 5 * time.Second,
-				upstreamTimeout:        20 * time.Second,
-				readHeaderTimeout:      2 * time.Second,
-				idleTimeout:            30 * time.Second,
-				shutdownTimeout:        15 * time.Second,
-				shutdownCleanupTimeout: 4 * time.Second,
+				accounting: accountingConfig{
+					maxAOFBytes:           256 << 20,
+					retentionPeriod:       30 * 24 * time.Hour,
+					pruneInterval:         time.Hour,
+					ownershipLeaseTimeout: 30 * time.Second,
+					maxPendingAttempts:    1024,
+					batchSize:             64,
+					flushInterval:         250 * time.Millisecond,
+					writeTimeout:          2 * time.Second,
+					observationMaxBytes:   64 << 10,
+				},
+				metrics: metricsConfig{
+					keyLabelCapacity:     0,
+					maxConcurrentScrapes: 2,
+					scrapeTimeout:        2 * time.Second,
+				},
+				admin: adminConfig{
+					address:             "127.0.0.1:8082",
+					maxRequestBodyBytes: 4096,
+					createTimeout:       2 * time.Second,
+					revokeTimeout:       2 * time.Second,
+				},
+				postgres: postgresConfig{
+					url:            "postgres://localhost/llmgate",
+					maxConnections: 10,
+					connectTimeout: 5 * time.Second,
+				},
+				auth: authConfig{
+					keyStoreTimeout: 2 * time.Second,
+					cacheTTL:        30 * time.Second,
+					cacheCapacity:   1024,
+				},
+				redis: redisConfig{
+					url:            "redis://127.0.0.1:6379/0",
+					maxConnections: 10,
+					connectTimeout: 2 * time.Second,
+				},
+				rateLimit: rateLimitConfig{
+					checkTimeout: 500 * time.Millisecond,
+				},
+				quota: quotaConfig{
+					promptCountTimeout:    2 * time.Second,
+					redisTimeout:          500 * time.Millisecond,
+					maxCountResponseBytes: 8 << 20,
+				},
+				server: serverConfig{
+					address:                "127.0.0.1:9090",
+					readTimeout:            3 * time.Second,
+					readHeaderTimeout:      2 * time.Second,
+					idleTimeout:            30 * time.Second,
+					shutdownTimeout:        15 * time.Second,
+					shutdownCleanupTimeout: 4 * time.Second,
+				},
+				chat: chatConfig{
+					maxRequestBodyBytes: 2048,
+					maxOutputTokens:     512,
+					maxBackendAttempts:  2,
+				},
+				inference: inferenceConfig{
+					connectTimeout:        2 * time.Second,
+					responseHeaderTimeout: 3 * time.Second,
+					streamIdleTimeout:     4 * time.Second,
+					health: backendHealthConfig{
+						probeTimeout:     500 * time.Millisecond,
+						probeInterval:    5 * time.Second,
+						failureThreshold: 3,
+						successThreshold: 2,
+					},
+					admission: inferenceAdmissionConfig{
+						defaultActiveSlots:   1,
+						defaultQueueCapacity: 4,
+						queueWaitTimeout:     5 * time.Second,
+					},
+					jsonResponseTimeout: 20 * time.Second,
+				},
 			},
 		},
 		{
@@ -546,15 +624,15 @@ func TestAdminConfiguration(t *testing.T) {
 				return
 			}
 
-			if cfg.adminEnabled != (tt.env["GATEWAY_ADMIN_ENABLED"] == "true") {
+			if cfg.admin.enabled != (tt.env["GATEWAY_ADMIN_ENABLED"] == "true") {
 				t.Fatal("admin enablement changed")
 			}
 
-			if tt.name == "positive resource overrides" && (cfg.adminMaxBodyBytes != 2048 || cfg.adminCreateTimeout.String() != "750ms" || cfg.adminRevokeTimeout.String() != "900ms") {
+			if tt.name == "positive resource overrides" && (cfg.admin.maxRequestBodyBytes != 2048 || cfg.admin.createTimeout.String() != "750ms" || cfg.admin.revokeTimeout.String() != "900ms") {
 				t.Fatal("admin resource overrides were lost")
 			}
 
-			if !cfg.adminEnabled && cfg.adminToken != "" {
+			if !cfg.admin.enabled && cfg.admin.token != "" {
 				t.Fatal("disabled administration retained token")
 			}
 		})
@@ -639,11 +717,11 @@ func TestAuthCacheConfiguration(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if tt.setting == "GATEWAY_AUTH_CACHE_TTL" && cfg.authCacheTTL != 45*time.Second {
+			if tt.setting == "GATEWAY_AUTH_CACHE_TTL" && cfg.auth.cacheTTL != 45*time.Second {
 				t.Fatal("cache TTL override was ignored")
 			}
 
-			if tt.setting == "GATEWAY_AUTH_CACHE_CAPACITY" && cfg.authCacheCapacity != 16 {
+			if tt.setting == "GATEWAY_AUTH_CACHE_CAPACITY" && cfg.auth.cacheCapacity != 16 {
 				t.Fatal("cache capacity override was ignored")
 			}
 		})
@@ -694,19 +772,19 @@ func TestRedisLimitsConfiguration(t *testing.T) {
 
 			switch tt.setting {
 			case "GATEWAY_REDIS_URL":
-				if cfg.redisURL != tt.value {
+				if cfg.redis.url != tt.value {
 					t.Fatal("URL override ignored")
 				}
 			case "GATEWAY_REDIS_MAX_CONNS":
-				if cfg.redisMaxConns != 3 {
+				if cfg.redis.maxConnections != 3 {
 					t.Fatal("pool override ignored")
 				}
 			case "GATEWAY_REDIS_CONNECT_TIMEOUT":
-				if cfg.redisConnectTimeout != 3*time.Second {
+				if cfg.redis.connectTimeout != 3*time.Second {
 					t.Fatal("connection deadline override ignored")
 				}
 			case "GATEWAY_RATE_LIMIT_TIMEOUT":
-				if cfg.rateLimitTimeout != 250*time.Millisecond {
+				if cfg.rateLimit.checkTimeout != 250*time.Millisecond {
 					t.Fatal("decision deadline override ignored")
 				}
 			}
@@ -755,11 +833,11 @@ func TestUsageConfiguration(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if tt.setting == "GATEWAY_USAGE_WRITE_TIMEOUT" && cfg.usageWriteTimeout != 750*time.Millisecond {
+			if tt.setting == "GATEWAY_USAGE_WRITE_TIMEOUT" && cfg.accounting.writeTimeout != 750*time.Millisecond {
 				t.Fatal("usage deadline override ignored")
 			}
 
-			if tt.setting == "GATEWAY_USAGE_MAX_BYTES" && cfg.usageMaxBytes != 4096 {
+			if tt.setting == "GATEWAY_USAGE_MAX_BYTES" && cfg.accounting.observationMaxBytes != 4096 {
 				t.Fatal("usage observation bound override ignored")
 			}
 		})
@@ -818,7 +896,7 @@ func TestDatabaseConfiguration(t *testing.T) {
 				"GATEWAY_AUTH_LOOKUP_TIMEOUT":      "500ms",
 			}[k]
 		})
-		if err != nil || cfg.databaseMaxConns != 3 || cfg.authLookupTimeout.String() != "500ms" || cfg.databaseConnectTimeout.String() != "250ms" {
+		if err != nil || cfg.postgres.maxConnections != 3 || cfg.auth.keyStoreTimeout.String() != "500ms" || cfg.postgres.connectTimeout.String() != "250ms" {
 			t.Fatalf("database overrides were lost: error %v", err)
 		}
 	})
@@ -868,7 +946,7 @@ func TestQuotaConfiguration(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if tt.name == "default" && cfg.quotaGracePercent != 0 {
+			if tt.name == "default" && cfg.quota.gracePercent != 0 {
 				t.Fatal("grace must default to zero")
 			}
 		})
@@ -924,8 +1002,8 @@ func TestMetricsConfiguration(t *testing.T) {
 				"GATEWAY_METRICS_KEY_CAPACITY": value,
 			}[key]
 		})
-		if err != nil || cfg.metricsKeyCapacity != 0 {
-			t.Fatalf("zero capacity rejected: value=%q capacity=%d err=%v", value, cfg.metricsKeyCapacity, err)
+		if err != nil || cfg.metrics.keyLabelCapacity != 0 {
+			t.Fatalf("zero capacity rejected: value=%q capacity=%d err=%v", value, cfg.metrics.keyLabelCapacity, err)
 		}
 	}
 
@@ -934,7 +1012,7 @@ func TestMetricsConfiguration(t *testing.T) {
 			"GATEWAY_DATABASE_URL": "postgres://localhost/db", "GATEWAY_METRICS_KEY_CAPACITY": "10", "GATEWAY_METRICS_MAX_SCRAPES": "3", "GATEWAY_METRICS_SCRAPE_TIMEOUT": "1s",
 		}[key]
 	})
-	if err != nil || cfg.metricsKeyCapacity != 10 || cfg.metricsMaxScrapes != 3 || cfg.metricsScrapeTimeout != time.Second {
+	if err != nil || cfg.metrics.keyLabelCapacity != 10 || cfg.metrics.maxConcurrentScrapes != 3 || cfg.metrics.scrapeTimeout != time.Second {
 		t.Fatal("metrics overrides lost", err)
 	}
 }
@@ -989,7 +1067,7 @@ func TestAccountingConfig(t *testing.T) {
 				t.Fatal("unexpected accounting configuration validation", err)
 			}
 
-			if !tt.invalid && (cfg.accountingMaxPending != 128 || cfg.accountingBatchSize != 32 || cfg.accountingFlushInterval != 100*time.Millisecond || cfg.accountingMaxAOFBytes != 536870912 || cfg.accountingRetention != 48*time.Hour || cfg.accountingPruneInterval != time.Minute || cfg.accountingLeaseTimeout != 10*time.Second) {
+			if !tt.invalid && (cfg.accounting.maxPendingAttempts != 128 || cfg.accounting.batchSize != 32 || cfg.accounting.flushInterval != 100*time.Millisecond || cfg.accounting.maxAOFBytes != 536870912 || cfg.accounting.retentionPeriod != 48*time.Hour || cfg.accounting.pruneInterval != time.Minute || cfg.accounting.ownershipLeaseTimeout != 10*time.Second) {
 				t.Fatal("custom accounting settings ignored")
 			}
 		})
@@ -1010,8 +1088,8 @@ func TestBackendHealthConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if cfg.backendHealthInterval != 250*time.Millisecond || cfg.backendHealthFailures != 4 || cfg.backendHealthSuccesses != 3 {
-		t.Fatalf("unexpected health configuration: %v, %d, %d", cfg.backendHealthInterval, cfg.backendHealthFailures, cfg.backendHealthSuccesses)
+	if cfg.inference.health.probeInterval != 250*time.Millisecond || cfg.inference.health.failureThreshold != 4 || cfg.inference.health.successThreshold != 3 {
+		t.Fatalf("unexpected health configuration: %v, %d, %d", cfg.inference.health.probeInterval, cfg.inference.health.failureThreshold, cfg.inference.health.successThreshold)
 	}
 
 	for _, key := range []string{
@@ -1059,7 +1137,7 @@ func TestInferenceQueueConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		if cfg.backendSlots != 3 || strconv.Itoa(cfg.backendQueueCapacity) != capacity || cfg.backendQueueTimeout != 250*time.Millisecond {
+		if cfg.inference.admission.defaultActiveSlots != 3 || strconv.Itoa(cfg.inference.admission.defaultQueueCapacity) != capacity || cfg.inference.admission.queueWaitTimeout != 250*time.Millisecond {
 			t.Fatal("queue overrides were not applied")
 		}
 	}
@@ -1118,8 +1196,8 @@ func TestAttemptConfiguration(t *testing.T) {
 					want = 1
 				}
 
-				if cfg.maxAttempts != want {
-					t.Fatal(cfg.maxAttempts, want)
+				if cfg.chat.maxBackendAttempts != want {
+					t.Fatal(cfg.chat.maxBackendAttempts, want)
 				}
 			}
 		})

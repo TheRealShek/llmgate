@@ -109,7 +109,8 @@ curl -fsS http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $API_KEY"
 Use the README chat example and the [metrics check](#prometheus-metrics) below.
 `deploy/.env.example` lists optional overrides as commented, empty assignments.
 Uncomment a setting and supply a value to override it. Compose forwards optional
-gateway settings as empty when unset, so `cmd/gateway/config.go` owns their defaults.
+gateway settings as empty when unset. The [startup configuration loaders](../cmd/gateway/config.go)
+supply defaults and validate them by subsystem.
 Only variables referenced by Compose reach the container. Internal database,
 Redis, upstream, and listener addresses stay fixed in Compose, which also owns
 Docker and backend defaults such as published ports and container stop grace.

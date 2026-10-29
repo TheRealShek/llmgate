@@ -87,7 +87,7 @@ func TestBackendConfigIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(cfg.backends) != 2 || cfg.backends[0].slots != 2 || cfg.backends[1].slots != 4 || cfg.backends[1].queueCapacity != 7 {
-		t.Fatal(cfg.backends)
+	if len(cfg.inference.targets) != 2 || cfg.inference.targets[0].slots != 2 || cfg.inference.targets[1].slots != 4 || cfg.inference.targets[1].queueCapacity != 7 {
+		t.Fatal(cfg.inference.targets)
 	}
 }
